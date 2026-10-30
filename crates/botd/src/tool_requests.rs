@@ -17,6 +17,7 @@ pub enum ExternalToolRequest {
     },
     WebFetch {
         url: String,
+        render: bool,
     },
     WebSearch {
         query: String,
@@ -245,7 +246,15 @@ pub(crate) fn validate_request(
                     "no URL was provided",
                 ))
             },
-            |url| Ok(ExternalToolRequest::WebFetch { url }),
+            |url| {
+                Ok(ExternalToolRequest::WebFetch {
+                    url,
+                    render: arguments
+                        .get("render")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                })
+            },
         ),
         NativeTool::WebSearch => {
             let query = collapse_and_limit(&text(arguments, "query"), 500);
@@ -525,6 +534,22 @@ mod tests {
                 NativeTool::HackerNews,
                 json!({"limit": 100}),
                 ExternalToolRequest::HackerNews { limit: 10 },
+            ),
+            (
+                NativeTool::WebFetch,
+                json!({"url": "https://example.com/app"}),
+                ExternalToolRequest::WebFetch {
+                    url: "https://example.com/app".to_owned(),
+                    render: false,
+                },
+            ),
+            (
+                NativeTool::WebFetch,
+                json!({"url": "https://example.com/app", "render": true}),
+                ExternalToolRequest::WebFetch {
+                    url: "https://example.com/app".to_owned(),
+                    render: true,
+                },
             ),
             (
                 NativeTool::Polymarket,

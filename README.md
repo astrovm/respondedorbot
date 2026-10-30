@@ -8,7 +8,7 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 
 ## Features
 
-- **Chat.** AI chat with memory, web search, tools, and provider fallback.
+- **Chat.** AI chat with memory, web search, page reading (pages built by JavaScript load in headless Chromium), tools, and provider fallback.
 - **Media.** Transcribes audio or YouTube captions and describes images or GIFs.
 - **YouTube summaries.** Summarizes YouTube videos from their existing captions.
 - **Conversation summaries.** Catches you up on what the chat said.
@@ -285,6 +285,7 @@ Foreground AI conversations emit single-line `AI trace:` JSON records to stderr,
 - Each record includes the operation ID and provider round.
 - Events show available tools, provider generation IDs, requested tool calls, execution duration, and the final executed-tool count (including zero).
 - Search events include the query, up to ten source URLs/titles/snippets (news results first, with their date), empty results or an error, and the provider request ID when available.
+- Page reads include the URL, `render` when the model asked for a browser load, and whether the page was rendered or why rendering failed.
 
 ```bash
 podman logs --since 15m --timestamps respondedorbot 2>&1 | grep 'AI trace:'

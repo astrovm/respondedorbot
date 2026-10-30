@@ -13,6 +13,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::chat_provider::{ChatRoundError, ChatRoundResult, OpenRouterChatStreamer};
+use crate::web_fetch_tool::RENDER_DIAGNOSTIC_PREFIX;
 
 pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 5;
 /// Sent with the answer round once the tool rounds run out.
@@ -869,12 +870,23 @@ pub(crate) fn tool_trace(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
             ));
+            if arguments.get("render").and_then(Value::as_bool) == Some(true) {
+                details["render"] = json!(true);
+            }
         }
         _ => {}
     }
     if let Some(result) = result {
         details["output_chars"] = json!(result.output.chars().count());
         details["diagnostic_count"] = json!(result.diagnostics.len());
+        if name == "web_fetch"
+            && let Some(outcome) = result
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.starts_with(RENDER_DIAGNOSTIC_PREFIX))
+        {
+            details["rendering"] = json!(bounded(outcome, 300));
+        }
         if name == "web_search" {
             let payload = serde_json::from_str::<Value>(&result.output).ok();
             if let Some(results) = payload
@@ -2408,8 +2420,41 @@ mod tests {
         );
         assert_eq!(trace["url"], "https://example.com/page");
         assert!(trace.get("output_chars").is_none());
+        assert!(trace.get("render").is_none());
         let missing = tool_trace("web_fetch", "call-1", &json!({}), None);
         assert_eq!(missing["url"], "[invalid URL]");
+        let rendered = tool_trace(
+            "web_fetch",
+            "call-1",
+            &json!({"url": "https://example.com/app", "render": true}),
+            None,
+        );
+        assert_eq!(rendered["render"], true);
+        let result = ToolExecutionResult::with_diagnostics(
+            "Title: App",
+            vec![
+                "web_fetch truncated response from https://example.com/app?token=private"
+                    .to_owned(),
+                "web_fetch render failed: browser failed: exit status: 124".to_owned(),
+            ],
+        );
+        let finished = tool_trace(
+            "web_fetch",
+            "call-1",
+            &json!({"url": "https://example.com/app"}),
+            Some(&result),
+        );
+        assert_eq!(
+            finished["rendering"],
+            "web_fetch render failed: browser failed: exit status: 124"
+        );
+        let plain = tool_trace(
+            "web_fetch",
+            "call-1",
+            &json!({"url": "https://example.com/app"}),
+            Some(&ToolExecutionResult::output("Title: App")),
+        );
+        assert!(plain.get("rendering").is_none());
     }
 
     #[test]

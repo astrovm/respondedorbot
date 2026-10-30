@@ -273,10 +273,13 @@ pub(crate) fn tool_schema(tool: NativeTool) -> Value {
             }),
         ),
         NativeTool::WebFetch => (
-            "Fetch and extract text content from a URL. Returns the page title and visible text content.",
+            "Fetch and extract text content from a URL. Returns the page title and visible text content. Pages that are mostly built by JavaScript are loaded in a browser automatically.",
             json!({
                 "type": "object",
-                "properties": {"url": {"type": "string", "description": "The URL to fetch and read"}},
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch and read"},
+                    "render": {"type": "boolean", "description": "Load the page in a browser so its JavaScript runs. Use it when an earlier fetch of the same page showed loading placeholders or was missing the data you need. Takes a few seconds.", "default": false}
+                },
                 "required": ["url"]
             }),
         ),

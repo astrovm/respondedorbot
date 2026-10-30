@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use thiserror::Error;
 use url::{Host, Url};
 
+use crate::browser::{PageRenderer, RenderError};
 use crate::http_client::{BROWSER_USER_AGENT, error_chain};
 
 /// News pages often put most of a megabyte of inline scripts before the
@@ -21,6 +22,12 @@ use crate::http_client::{BROWSER_USER_AGENT, error_chain};
 pub const FETCH_MAX_BYTES: usize = 2_097_152;
 pub const FETCH_MAX_CHARS: usize = 12_000;
 pub const FETCH_MAX_REDIRECTS: usize = 5;
+/// A page with less visible text than this that holds an iframe is a wrapper
+/// around the iframe's page.
+const IFRAME_WRAPPER_MAX_CHARS: usize = 200;
+/// A page with scripts and less visible text than this is probably built by
+/// JavaScript, so it is rendered in a browser.
+pub const RENDER_BELOW_CHARS: usize = 3_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebFetchResponse {
@@ -135,6 +142,18 @@ pub struct WebFetchContent {
     pub canonical_url: Option<String>,
     pub content: String,
     pub truncated: bool,
+    pub has_scripts: bool,
+    pub rendering: Rendering,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rendering {
+    /// The page as the server sent it.
+    Static,
+    /// The page after a browser ran its scripts.
+    Rendered,
+    /// The page as the server sent it, because rendering failed.
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -188,12 +207,7 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
                     detail: "redirect response omitted Location".to_owned(),
                 });
             };
-            if redirect_count == FETCH_MAX_REDIRECTS {
-                return Err(PublicFetchError::Request {
-                    url: url.to_string(),
-                    detail: "too many redirects".to_owned(),
-                });
-            }
+            next_hop(&url, &mut redirect_count)?;
             url = url
                 .join(location)
                 .ok()
@@ -201,7 +215,6 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
                 .ok_or_else(|| PublicFetchError::Blocked {
                     url: location.to_owned(),
                 })?;
-            redirect_count += 1;
             continue;
         }
         if !(200..300).contains(&response.status_code) {
@@ -220,14 +233,28 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
                         .to_ascii_lowercase()
                         .contains("<html")
                 });
+        let mut has_scripts = false;
         let (title, canonical_url, content) = if is_html {
-            let (title, content) = extract_text_from_html(&decoded);
+            let page = parse_html(&decoded);
+            // Link cloakers answer with an empty page that shows the real
+            // one in an iframe; read that page instead, as a browser would.
+            if page.text.chars().count() < IFRAME_WRAPPER_MAX_CHARS
+                && let Some(frame) = page
+                    .frames
+                    .iter()
+                    .find_map(|source| normalize_http_url(url.join(source).ok()?.as_str()))
+            {
+                next_hop(&url, &mut redirect_count)?;
+                url = frame;
+                continue;
+            }
+            has_scripts = page.has_scripts;
             (
-                title,
+                page.title,
                 extract_meta_content(&decoded, "og:url")
                     .and_then(|value| url.join(&value).ok())
                     .map(|value| value.to_string()),
-                content,
+                page.text,
             )
         } else {
             (
@@ -245,8 +272,22 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
             canonical_url,
             content,
             truncated: response.truncated || text_truncated,
+            has_scripts,
+            rendering: Rendering::Static,
         });
     }
+}
+
+/// Counts one more hop, redirect or iframe, toward [`FETCH_MAX_REDIRECTS`].
+fn next_hop(url: &Url, redirect_count: &mut usize) -> Result<(), PublicFetchError> {
+    if *redirect_count == FETCH_MAX_REDIRECTS {
+        return Err(PublicFetchError::Request {
+            url: url.to_string(),
+            detail: "too many redirects".to_owned(),
+        });
+    }
+    *redirect_count += 1;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,10 +305,14 @@ pub enum AiFetchOutcome {
     TweetError { url: String },
 }
 
+/// Fetches `raw_url` for the model. Pages that look built by JavaScript, or
+/// any scripted page when `render` is set, go through `renderer` too.
 pub fn fetch_ai_url<T: WebFetchTransport, R: HostResolver>(
     transport: &T,
     resolver: &R,
+    renderer: Option<&dyn PageRenderer>,
     raw_url: &str,
+    render: bool,
 ) -> Result<AiFetchOutcome, PublicFetchError> {
     if let Some(canonical_url) = canonical_tweet_url(raw_url) {
         return Ok(
@@ -288,7 +333,42 @@ pub fn fetch_ai_url<T: WebFetchTransport, R: HostResolver>(
             ),
         );
     }
-    Ok(AiFetchOutcome::Page(page))
+    Ok(AiFetchOutcome::Page(match renderer {
+        Some(renderer)
+            if page.has_scripts
+                && (render || page.content.chars().count() < RENDER_BELOW_CHARS) =>
+        {
+            render_page(page, renderer)
+        }
+        _ => page,
+    }))
+}
+
+fn render_page(page: WebFetchContent, renderer: &dyn PageRenderer) -> WebFetchContent {
+    let rendered = renderer.render(&page.url).and_then(|html| {
+        let parsed = parse_html(&html);
+        if parsed.text.is_empty() {
+            Err(RenderError::Failed("rendered page has no text".to_owned()))
+        } else {
+            Ok(parsed)
+        }
+    });
+    match rendered {
+        Ok(parsed) => {
+            let (content, truncated) = truncate_chars(&parsed.text, FETCH_MAX_CHARS);
+            WebFetchContent {
+                title: parsed.title.or(page.title),
+                content,
+                truncated,
+                rendering: Rendering::Rendered,
+                ..page
+            }
+        }
+        Err(error) => WebFetchContent {
+            rendering: Rendering::Failed(error.to_string()),
+            ..page
+        },
+    }
 }
 
 fn canonical_tweet_url(raw_url: &str) -> Option<String> {
@@ -439,7 +519,10 @@ fn parse_attributes(input: &str) -> Vec<(String, String)> {
         let (value, rest) = if let Some(quote @ ('\'' | '"')) = remaining.chars().next() {
             let after_quote = &remaining[quote.len_utf8()..];
             let end = after_quote.find(quote).unwrap_or(after_quote.len());
-            (&after_quote[..end], &after_quote[end.saturating_add(1)..])
+            (
+                &after_quote[..end],
+                after_quote.get(end + 1..).unwrap_or_default(),
+            )
         } else {
             let end = remaining
                 .find(char::is_whitespace)
@@ -480,11 +563,31 @@ pub fn is_public_http_url<R: HostResolver>(raw_url: &str, resolver: &R) -> bool 
     normalize_http_url(raw_url).is_some_and(|url| ensure_public(&url, resolver).is_ok())
 }
 
+/// Every address `url`'s host resolves to, or `None` when the host is local,
+/// does not resolve, or has an address that is not public. Callers connect to
+/// exactly these addresses, so a second DNS answer cannot swap in a private
+/// one.
+pub(crate) fn public_addresses<R: HostResolver>(url: &Url, resolver: &R) -> Option<Vec<IpAddr>> {
+    let addresses = match url.host()? {
+        Host::Ipv4(address) => vec![IpAddr::V4(address)],
+        Host::Ipv6(address) => vec![IpAddr::V6(address)],
+        Host::Domain(hostname) if is_local_name(hostname) => return None,
+        Host::Domain(hostname) => resolver
+            .addresses(hostname, url.port_or_known_default()?)
+            .ok()?,
+    };
+    (!addresses.is_empty() && addresses.iter().all(|address| is_public_ip(*address)))
+        .then_some(addresses)
+}
+
+fn is_local_name(hostname: &str) -> bool {
+    hostname.eq_ignore_ascii_case("localhost")
+        || hostname.to_ascii_lowercase().ends_with(".localhost")
+}
+
 fn ensure_public<R: HostResolver>(url: &Url, resolver: &R) -> Result<(), PublicFetchError> {
     let hostname = url.host_str().unwrap_or_default();
-    let blocked_name = hostname.eq_ignore_ascii_case("localhost")
-        || hostname.to_ascii_lowercase().ends_with(".localhost");
-    if blocked_name {
+    if is_local_name(hostname) {
         return Err(PublicFetchError::Blocked {
             url: url.to_string(),
         });
@@ -551,6 +654,19 @@ fn is_public_ip(address: IpAddr) -> bool {
 }
 
 pub fn extract_text_from_html(html: &str) -> (Option<String>, String) {
+    let page = parse_html(html);
+    (page.title, page.text)
+}
+
+struct ParsedHtml {
+    title: Option<String>,
+    text: String,
+    /// `src` of every iframe outside script, style and noscript, in order.
+    frames: Vec<String>,
+    has_scripts: bool,
+}
+
+fn parse_html(html: &str) -> ParsedHtml {
     let mut parser = VisibleTextParser::default();
     parser.feed(html);
     parser.finish()
@@ -562,6 +678,11 @@ struct VisibleTextParser {
     current: String,
     title: String,
     in_title: bool,
+    /// Set once the first title closes. Later ones, such as icon tooltips in
+    /// inline SVGs, are neither the page title nor visible text.
+    title_closed: bool,
+    frames: Vec<String>,
+    has_scripts: bool,
 }
 
 impl VisibleTextParser {
@@ -605,11 +726,21 @@ impl VisibleTextParser {
             .into_iter()
             .find(|raw_text| *raw_text == name)
         {
+            self.has_scripts |= raw_text == "script" && !closing;
             return (!closing).then_some(raw_text);
         }
         if name == "title" {
             self.in_title = !closing;
+            self.title_closed |= closing;
             return None;
+        }
+        if name == "iframe"
+            && !closing
+            && let Some((_, source)) = parse_attributes(&raw[name.len()..])
+                .into_iter()
+                .find(|(attribute, _)| attribute == "src")
+        {
+            self.frames.push(decode_html_entities(&source));
         }
         if is_block_tag(&name) {
             self.flush();
@@ -624,10 +755,12 @@ impl VisibleTextParser {
             return;
         }
         if self.in_title {
-            if !self.title.is_empty() {
-                self.title.push(' ');
+            if !self.title_closed {
+                if !self.title.is_empty() {
+                    self.title.push(' ');
+                }
+                self.title.push_str(&cleaned);
             }
-            self.title.push_str(&cleaned);
             return;
         }
         if !self.current.is_empty() {
@@ -642,10 +775,14 @@ impl VisibleTextParser {
         }
     }
 
-    fn finish(mut self) -> (Option<String>, String) {
+    fn finish(mut self) -> ParsedHtml {
         self.flush();
-        let title = (!self.title.is_empty()).then_some(self.title);
-        (title, self.lines.join("\n"))
+        ParsedHtml {
+            title: (!self.title.is_empty()).then_some(self.title),
+            text: self.lines.join("\n"),
+            frames: self.frames,
+            has_scripts: self.has_scripts,
+        }
     }
 }
 
@@ -930,6 +1067,183 @@ mod tests {
     }
 
     #[test]
+    fn near_empty_wrapper_pages_are_read_through_their_iframe() -> TestResult {
+        let wrapper = concat!(
+            "<html><head><title>Short link</title></head><body>",
+            "<noscript><iframe src=\"https://ads.example.net/\"></iframe></noscript>",
+            "<iframe src=\"about:blank\"></iframe>",
+            "<IFRAME class=\"w-full\" SRC=\"/real?a=1&amp;b=2\"></IFRAME>",
+            "</body></html>"
+        );
+        let transport = Transport {
+            responses: RefCell::new(vec![
+                Ok(response(200, wrapper)),
+                Ok(response(
+                    200,
+                    "<title>Tracker</title><p>Drained 5 coins</p>",
+                )),
+            ]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let resolver = Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]);
+        let page = fetch_public_url(&transport, &resolver, "https://short.example/link")?;
+        assert_eq!(
+            *transport.urls.borrow(),
+            [
+                "https://short.example/link",
+                "https://short.example/real?a=1&b=2"
+            ]
+        );
+        assert_eq!(page.url, "https://short.example/real?a=1&b=2");
+        assert_eq!(page.title.as_deref(), Some("Tracker"));
+        assert_eq!(page.content, "Drained 5 coins");
+
+        let article = format!(
+            "<p>{}</p><iframe src=\"https://video.example/embed\"></iframe>",
+            "Real article text. ".repeat(20)
+        );
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(response(200, &article))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let page = fetch_public_url(&transport, &resolver, "https://news.example/story")?;
+        assert_eq!(page.url, "https://news.example/story");
+        assert_eq!(transport.urls.borrow().len(), 1);
+
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(response(
+                200,
+                "<iframe src=\"http://169.254.169.254/latest\"></iframe>",
+            ))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        assert!(matches!(
+            fetch_public_url(
+                &transport,
+                &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+                "https://short.example/link",
+            ),
+            Err(PublicFetchError::Blocked { .. })
+        ));
+
+        let framed = || Ok(response(200, "<iframe src=\"/again\"></iframe>"));
+        let transport = Transport {
+            responses: RefCell::new((0..=FETCH_MAX_REDIRECTS).map(|_| framed()).collect()),
+            urls: RefCell::new(Vec::new()),
+        };
+        assert!(matches!(
+            fetch_public_url(
+                &transport,
+                &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+                "https://short.example/link",
+            ),
+            Err(PublicFetchError::Request { detail, .. }) if detail == "too many redirects"
+        ));
+        Ok(())
+    }
+
+    struct Renderer {
+        result: Result<String, RenderError>,
+        urls: RefCell<Vec<String>>,
+    }
+
+    impl Renderer {
+        fn new(result: Result<&str, RenderError>) -> Self {
+            Self {
+                result: result.map(ToOwned::to_owned),
+                urls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl PageRenderer for Renderer {
+        fn render(&self, url: &str) -> Result<String, RenderError> {
+            self.urls.borrow_mut().push(url.to_owned());
+            self.result.clone()
+        }
+    }
+
+    fn fetch_page(
+        body: &str,
+        renderer: Option<&dyn PageRenderer>,
+        render: bool,
+    ) -> Option<WebFetchContent> {
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(response(200, body))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        fetch_ai_url(
+            &transport,
+            &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+            renderer,
+            "https://app.example/",
+            render,
+        )
+        .ok()
+        .and_then(page_of)
+    }
+
+    fn page_of(outcome: AiFetchOutcome) -> Option<WebFetchContent> {
+        match outcome {
+            AiFetchOutcome::Page(page) => Some(page),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn script_built_pages_are_rendered_and_fall_back_to_their_static_text() -> TestResult {
+        let shell = "<title>App</title><p>Live trace loading</p><script src=\"/app.js\"></script>";
+        let renderer = Renderer::new(Ok("<title>Live</title><p>Drained 5 coins</p>"));
+        let page = fetch_page(shell, Some(&renderer), false).ok_or("page")?;
+        assert_eq!(page.title.as_deref(), Some("Live"));
+        assert_eq!(page.content, "Drained 5 coins");
+        assert_eq!(page.rendering, Rendering::Rendered);
+        assert_eq!(*renderer.urls.borrow(), ["https://app.example/"]);
+
+        let renderer = Renderer::new(Ok(&format!("<p>{}</p>", "a".repeat(FETCH_MAX_CHARS + 1))));
+        let page = fetch_page(shell, Some(&renderer), false).ok_or("page")?;
+        assert_eq!(page.title.as_deref(), Some("App"));
+        assert!(page.truncated);
+
+        let long = format!(
+            "<script></script><p>{}</p>",
+            "word ".repeat(RENDER_BELOW_CHARS)
+        );
+        let renderer = Renderer::new(Ok("<p>rendered</p>"));
+        let page = fetch_page(&long, Some(&renderer), false).ok_or("page")?;
+        assert_eq!(page.rendering, Rendering::Static);
+        assert!(renderer.urls.borrow().is_empty());
+        let page = fetch_page(&long, Some(&renderer), true).ok_or("page")?;
+        assert_eq!(page.content, "rendered");
+
+        let page = fetch_page("<p>No scripts</p>", Some(&renderer), true).ok_or("page")?;
+        assert_eq!(page.rendering, Rendering::Static);
+        assert_eq!(renderer.urls.borrow().len(), 1);
+        let page = fetch_page(shell, None, true).ok_or("page")?;
+        assert_eq!(page.rendering, Rendering::Static);
+        let tweet = AiFetchOutcome::TweetError {
+            url: "https://x.com/user/status/1".to_owned(),
+        };
+        assert_eq!(page_of(tweet), None);
+
+        for (result, reason) in [
+            (
+                Err(RenderError::Failed("exit status: 124".to_owned())),
+                "browser failed: exit status: 124",
+            ),
+            (
+                Ok("<script>x()</script>"),
+                "browser failed: rendered page has no text",
+            ),
+        ] {
+            let page = fetch_page(shell, Some(&Renderer::new(result)), false).ok_or("page")?;
+            assert_eq!(page.content, "Live trace loading");
+            assert_eq!(page.rendering, Rendering::Failed(reason.to_owned()));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn bounds_unicode_text_and_preserves_transport_diagnostics_in_errors() -> TestResult {
         let body = format!(
             "<html><body><p>{}</p></body></html>",
@@ -1111,7 +1425,9 @@ mod tests {
         let result = fetch_ai_url(
             &transport,
             &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+            None,
             "https://twitter.com/user/status/123",
+            false,
         );
         assert_eq!(
             result,
@@ -1145,7 +1461,9 @@ mod tests {
             fetch_ai_url(
                 &transport,
                 &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+                None,
                 "https://fixupx.com/status/456",
+                false,
             ),
             Ok(AiFetchOutcome::TweetError {
                 url: "https://x.com/example_user/status/456".to_owned(),
@@ -1166,7 +1484,9 @@ mod tests {
         let result = fetch_ai_url(
             &transport,
             &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+            None,
             "https://example.com/read/fixupx.com/status/123",
+            false,
         );
         assert!(matches!(result, Ok(AiFetchOutcome::Page(_))));
         assert_eq!(transport.urls.borrow().len(), 1);
@@ -1225,17 +1545,27 @@ mod tests {
         assert!(attributes.contains(&("disabled".to_owned(), String::new())));
         assert!(attributes.contains(&("data-name".to_owned(), "synthetic".to_owned())));
         assert!(attributes.contains(&("quoted".to_owned(), "two words".to_owned())));
+        assert_eq!(
+            parse_attributes("src=\"unclosed"),
+            [("src".to_owned(), "unclosed".to_owned())]
+        );
+        let page = parse_html("<iframe src=\"abc>visible");
+        assert_eq!(
+            (page.frames, page.text),
+            (vec!["abc".to_owned()], "visible".to_owned())
+        );
 
         let html = concat!(
             "<!-- synthetic comment -->",
-            "<title>First</title><title>Second</title>",
+            "<title>First</title><svg><title>Icon tooltip</title></svg><title>Second</title>",
             "<p>A &lt; B &gt; C &quot;quoted&quot; &apos;single&apos; ",
             "&#65; &#x42; &#X43; &unknown;</p>",
             "<script>ignored</script><style>ignored</style><noscript>ignored</noscript>",
             "<div>tail"
         );
         let (title, text) = extract_text_from_html(html);
-        assert_eq!(title.as_deref(), Some("First Second"));
+        assert_eq!(title.as_deref(), Some("First"));
+        assert!(!text.contains("Icon") && !text.contains("Second"));
         assert!(text.contains("A < B > C \"quoted\" 'single' A B C &unknown;"));
         assert!(text.contains("tail"));
 
@@ -1311,7 +1641,9 @@ mod tests {
             fetch_ai_url(
                 &transport,
                 &Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+                None,
                 "https://twitter.com/example_user/status/789?s=20",
+                false,
             ),
             Ok(AiFetchOutcome::TweetError {
                 url: "https://x.com/example_user/status/789".to_owned(),

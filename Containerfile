@@ -24,6 +24,9 @@ RUN cargo build --locked --release -p botd
 FROM mirror.gcr.io/library/debian:trixie-slim AS runtime
 WORKDIR /app
 
+# chromium: web_fetch renders pages built by JavaScript in headless Chromium.
+# tini: runs as PID 1 and reaps the helper processes Chromium leaves behind,
+# which botd would otherwise collect as zombies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libopus0 \
@@ -31,6 +34,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libzstd1 \
     zlib1g \
     ffmpeg \
+    chromium \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust-builder /app/target/release/botd /usr/local/bin/botd
@@ -38,4 +43,5 @@ COPY --from=rust-builder /app/target/release/botd /usr/local/bin/botd
 RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
 USER botuser
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/local/bin/botd"]
