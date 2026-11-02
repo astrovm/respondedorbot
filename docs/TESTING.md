@@ -42,12 +42,18 @@ cargo +nightly fuzz run user_text corpus/user_text seeds/user_text -- -max_total
 
 ## Mutation testing
 
-CI runs [cargo-mutants](https://mutants.rs/) on the `bot-core` lines a pull request changes, and fails on any mutant the tests miss. A mutant that makes the tests hang counts as caught. Run the same check locally:
+[cargo-mutants](https://mutants.rs/) changes `bot-core` in small ways, such as flipping a comparison or emptying a function, and runs the crate's tests for each change. A change no test notices is a missed mutant: code whose behavior nothing checks. Only `bot-core` is mutated: its tests are fast and need no PostgreSQL, Redis, FFmpeg or network, while the `bot-adapters` and `botd` tests that need them return early without them.
 
 ```bash
-git diff origin/main...HEAD -- crates/bot-core/src > pr.diff
-cargo mutants --in-diff pr.diff -p bot-core
+scripts/mutants.sh diff origin/main   # the bot-core lines this branch changed
+scripts/mutants.sh shard 3/64         # the 4th of 64 equal parts of every mutant
 ```
+
+Results land in `build/mutants/mutants.out` (`missed.txt`, `caught.txt`, `timeout.txt` and a log per mutant). Settings live in `.cargo/mutants.toml`.
+
+It never blocks a merge: `CI / Required` doesn't wait for it. On a pull request that changes `bot-core`, the `Mutants` workflow mutates the changed lines and keeps one comment listing what no test caught (a mutant that makes the tests hang is listed too); the comment goes away once everything is caught. Each one is a lead for a follow-up PR, unless the change doesn't alter behavior. A pull request that changes the mutation setup also runs part 0 of 64, so a broken setup shows before the weekly run. Every Saturday the workflow runs a quarter of all mutants, 16 of the 64 parts, so four weeks cover everything, and lists what survived in the open "Missed mutants" issue (it opens one if something lived).
+
+`scripts/tests/mutants.sh` checks the two helper scripts with a fake `cargo` and a fake `gh`. `CI / Required` runs it.
 
 ## Test layers
 

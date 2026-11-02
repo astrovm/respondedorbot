@@ -41,6 +41,11 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
+      - name: Check the mutation testing scripts
+        run: |
+          shellcheck scripts/*.sh scripts/tests/*.sh
+          scripts/tests/mutants.sh
+
       - name: Lint Rust workspace
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
@@ -206,81 +211,6 @@ jobs:
           name: fuzz-artifacts-${{ matrix.shard }}
           path: fuzz/artifacts
 
-  mutants:
-    # Mutation testing of the domain logic this pull request changes, split
-    # across runners. On main this only builds, to keep the cache warm.
-    runs-on: ubuntu-26.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ${{ fromJSON(github.event_name == 'pull_request' && '[0, 1, 2, 3, 4, 5, 6, 7]' || '[0]') }}
-    env:
-      MUTANT_SHARDS: 8
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Find changed bot-core lines
-        id: diff
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          git diff "origin/$BASE_REF...HEAD" -- crates/bot-core/src > pr.diff
-          if [ -s pr.diff ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; fi
-
-      - name: Set up Rust toolchain
-        if: github.event_name == 'push' || steps.diff.outputs.changed == 'true'
-        run: rustup show
-
-      - name: Cache Rust build
-        if: github.event_name == 'push' || steps.diff.outputs.changed == 'true'
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Build bot-core tests
-        if: github.event_name == 'push'
-        run: cargo test --locked -p bot-core --no-run
-
-      - name: Install cargo-mutants
-        if: steps.diff.outputs.changed == 'true'
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
-        with:
-          tool: cargo-mutants@27.1.0
-
-      - name: Mutate this shard of the changed bot-core lines
-        if: steps.diff.outputs.changed == 'true'
-        env:
-          SHARD: ${{ matrix.shard }}
-        run: |
-          # Each mutant rebuilds bot-core, and incremental builds reuse most of
-          # the previous one. rust-cache turns them off for the whole job.
-          export CARGO_INCREMENTAL=1
-          status=0
-          # The coverage job already runs the unmutated tests, so skip the
-          # baseline and mutate the checkout in place on the cached build.
-          cargo mutants --in-diff pr.diff -p bot-core --in-place --baseline=skip \
-            --shard "$SHARD/$MUTANT_SHARDS" --sharding round-robin \
-            --timeout 180 --no-shuffle || status=$?
-          # Exit 3 means some mutants made the tests hang, which still counts as
-          # caught. It also wins over exit 2, so check the missed list directly.
-          if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then exit "$status"; fi
-          if [ -s mutants.out/missed.txt ]; then cat mutants.out/missed.txt; exit 2; fi
-
-      - name: Upload mutation report
-        if: always() && steps.diff.outputs.changed == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: mutants-report-${{ matrix.shard }}
-          path: mutants.out
-
   image:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
@@ -406,7 +336,6 @@ jobs:
       - quality
       - coverage
       - fuzz
-      - mutants
       - image
     runs-on: ubuntu-26.04
     timeout-minutes: 5

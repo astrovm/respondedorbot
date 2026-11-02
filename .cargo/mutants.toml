@@ -1,0 +1,3 @@
+# cargo-mutants settings, used by scripts/mutants.sh.
+# Build and test with the lock file, as CI does.
+additional_cargo_args = ["--locked"]
