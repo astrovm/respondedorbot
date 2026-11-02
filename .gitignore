@@ -22,3 +22,7 @@ lcov.info
 docs/superpowers/
 .survey/
 .sisyphus/
+
+# Mutation testing (scripts/mutants.sh)
+build/
+mutants.out*/

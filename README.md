@@ -322,6 +322,8 @@ Coverage requirements:
 | `bot-adapters` | 100% |
 | `botd` | 100% |
 
+Mutation testing of `bot-core` (`scripts/mutants.sh`) runs in its own `Mutants` workflow and never blocks a merge.
+
 More detail: [Testing](docs/TESTING.md)
 
 </details>

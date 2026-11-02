@@ -1,0 +1,208 @@
+name: Mutants
+# Mutation testing of bot-core (scripts/mutants.sh). It never blocks a merge:
+# CI / Required doesn't need it.
+# - A pull request mutates the bot-core lines it changed, and one comment lists
+#   the changes no test noticed, for a follow-up. A pull request that changes
+#   this setup also runs one real part, so a broken setup shows before Saturday.
+# - Every week, a quarter of all bot-core mutants, split into 64 parts, so four
+#   weeks cover everything. What survives is listed in the open "Missed
+#   mutants" issue.
+on:
+  pull_request:
+    paths:
+      - crates/bot-core/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/mutants.toml
+      - scripts/mutants.sh
+      - scripts/mutants-comment.sh
+      - scripts/tests/mutants.sh
+      - .github/workflows/mutants.yml
+  schedule:
+    - cron: '0 5 * * 6'
+  workflow_dispatch:
+    inputs:
+      quarter:
+        description: Which quarter of the parts to run, 0 to 3 (empty for this week's)
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push replaces a pull request's run; full runs never cancel.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 'full' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changed:
+    name: Mutants / Changed code
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge commit and its first parent, the base branch.
+          fetch-depth: 2
+      - name: Set up Rust toolchain
+        run: rustup show
+      # Pull requests can only restore caches saved on main, so the weekly run
+      # saves it and a pull request never does.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: mutants
+          save-if: 'false'
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Mutate the changed code
+        # Missed mutants (2) and timeouts (3) are findings for the comment.
+        # Anything else is a broken run.
+        run: |
+          status=0
+          scripts/mutants.sh diff HEAD^1 || status=$?
+          [[ $status == 0 || $status == 2 || $status == 3 ]] || exit "$status"
+      - name: Try one part of everything
+        # A change to the setup itself gets a real run of part 0 of 64. Its
+        # findings aren't in the comment: they aren't this pull request's.
+        run: |
+          if git diff --quiet HEAD^1 -- .cargo/mutants.toml scripts/mutants.sh scripts/mutants-comment.sh .github/workflows/mutants.yml; then
+            echo "The setup didn't change."
+          else
+            status=0
+            MUTANTS_OUTPUT=build/mutants-part scripts/mutants.sh shard 0/64 || status=$?
+            [[ $status == 0 || $status == 2 || $status == 3 ]] || exit "$status"
+          fi
+      - name: Comment what lived
+        # A fork's token can't comment; its run page has the summary.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: scripts/mutants-comment.sh build/mutants/mutants.out
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-changed-code
+          path: |
+            build/mutants/mutants.out
+            build/mutants-part/mutants.out
+          if-no-files-found: ignore
+
+  plan:
+    name: Mutants / Plan
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      parts: ${{ steps.plan.outputs.parts }}
+    steps:
+      - name: Pick this week's parts
+        id: plan
+        env:
+          QUARTER: ${{ inputs.quarter }}
+        run: |
+          quarter=${QUARTER:-$(( $(date -u +%s) / 604800 % 4 ))}
+          [[ $quarter =~ ^[0-3]$ ]] || { echo "Quarter must be 0 to 3, got $quarter" >&2; exit 1; }
+          echo "parts=$(jq -cn --argjson q "$quarter" '[range($q * 16; $q * 16 + 16)]')" >> "$GITHUB_OUTPUT"
+
+  mutants:
+    name: Mutants / Part ${{ matrix.part }} of 64
+    needs: plan
+    runs-on: ubuntu-26.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(needs.plan.outputs.parts) }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Rust toolchain
+        run: rustup show
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: mutants
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Mutate part ${{ matrix.part }}
+        # Missed mutants (2) and timeouts (3) are the findings; the report
+        # job lists them. Anything else is a broken run.
+        run: |
+          status=0
+          scripts/mutants.sh shard "${{ matrix.part }}/64" || status=$?
+          [[ $status == 0 || $status == 2 || $status == 3 ]] || exit "$status"
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-part-${{ matrix.part }}
+          path: build/mutants/mutants.out
+          if-no-files-found: ignore
+
+  report:
+    name: Mutants / Report
+    needs: [plan, mutants]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Download results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: mutants-part-*
+          path: results
+      - name: List what survived in the open issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PARTS: ${{ needs.plan.outputs.parts }}
+          JOBS: ${{ needs.mutants.result }}
+        run: |
+          missed=$(cat results/*/missed.txt 2>/dev/null | sort -u || true)
+          timeouts=$(cat results/*/timeout.txt 2>/dev/null | sort -u || true)
+          parts=$(jq -r 'map(tostring) | join(", ")' <<< "$PARTS")
+          issue=$(gh issue list --state open --search 'in:title "Missed mutants"' --json number --jq '.[0].number // empty')
+          {
+            echo "Parts $parts of 64: [run]($RUN), jobs $JOBS."
+            echo
+            if [[ -z $missed && -z $timeouts ]]; then
+              echo 'Every mutant in these parts was caught.'
+            fi
+            if [[ -n $missed ]]; then
+              echo "### Missed ($(wc -l <<< "$missed"))"
+              echo 'No test failed when this code changed:'
+              echo '```'
+              echo "$missed"
+              echo '```'
+            fi
+            if [[ -n $timeouts ]]; then
+              echo "### Timed out ($(wc -l <<< "$timeouts"))"
+              echo '```'
+              echo "$timeouts"
+              echo '```'
+            fi
+          } > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n $issue ]]; then
+            gh issue comment "$issue" --body-file report.md
+          elif [[ -n $missed || -n $timeouts ]]; then
+            gh issue create --title 'Missed mutants' --body-file report.md
+          fi
