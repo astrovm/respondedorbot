@@ -363,6 +363,19 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
         String::new(),
     ]);
     parts.push(reply_instructions(input.locale).join("\n"));
+    if input
+        .link_context
+        .as_deref()
+        .is_some_and(|links| !links.is_empty())
+    {
+        parts.push(
+            match input.locale {
+                Locale::Es => "- si te preguntan por un link, respondé sobre ese link, sin mezclarlo con otros temas del chat; si no pudiste leerlo o ver su imagen, decilo y no inventes",
+                Locale::En => "- if asked about a link, answer about that link without mixing in other chat topics; if you could not read it or see its image, say so and do not make things up",
+            }
+            .to_owned(),
+        );
+    }
     if input.enable_web_search {
         parts.push(
             match input.locale {
@@ -615,6 +628,34 @@ mod tests {
         assert!(prompt.contains(
             "- para fechas y horarios, si aparece una fecha pasada o fuentes contradictorias, usá web_fetch sobre una fuente oficial antes de responder; si el conflicto sigue, decilo y no elijas una fecha al azar"
         ));
+    }
+
+    #[test]
+    fn link_rule_only_appears_when_the_turn_has_links() {
+        for (locale, rule) in [
+            (
+                Locale::Es,
+                "respondé sobre ese link, sin mezclarlo con otros temas del chat",
+            ),
+            (
+                Locale::En,
+                "answer about that link without mixing in other chat topics",
+            ),
+        ] {
+            let mut value = input(locale);
+            let prompt = |value: &ConversationPromptInput| {
+                build_conversation_prompt(value)
+                    .last()
+                    .map(text_of)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            assert!(prompt(&value).contains(rule));
+            value.link_context = Some(String::new());
+            assert!(!prompt(&value).contains(rule));
+            value.link_context = None;
+            assert!(!prompt(&value).contains(rule));
+        }
     }
 
     #[test]

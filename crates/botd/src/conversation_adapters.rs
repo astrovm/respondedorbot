@@ -1167,6 +1167,7 @@ mod tests {
             timestamp: 1_700_000_000 + message_id,
             spontaneous: false,
             link_context: None,
+            link_image: crate::ai_dispatch::LinkImage::None,
         }
     }
 

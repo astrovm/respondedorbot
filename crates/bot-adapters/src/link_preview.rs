@@ -270,6 +270,8 @@ pub struct PreviewMetadata {
     pub media_url: Option<String>,
     pub media_content_type: Option<String>,
     pub media_size: Option<u64>,
+    /// The picture a chat app would show for this link.
+    pub image_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,6 +291,7 @@ fn empty_metadata() -> PreviewMetadata {
         media_url: None,
         media_content_type: None,
         media_size: None,
+        image_url: None,
     }
 }
 
@@ -490,6 +493,10 @@ pub fn inspect_with<T: LinkPreviewTransport>(transport: &T, url: &str) -> Previe
             status_code: Some(response.status_code),
             final_url: final_url.clone(),
             metadata: PreviewMetadata {
+                image_url: response
+                    .content_type
+                    .starts_with("image/")
+                    .then(|| final_url.clone()),
                 media_url: Some(final_url),
                 media_content_type: Some(response.content_type),
                 media_size: response.content_length,
@@ -522,6 +529,10 @@ pub fn inspect_with<T: LinkPreviewTransport>(transport: &T, url: &str) -> Previe
         .or_else(|| tags.get("twitter:player:stream"))
         .or_else(|| tags.get("og:image"))
         .or_else(|| tags.get("twitter:image"));
+    let image_url = tags
+        .get("og:image")
+        .or_else(|| tags.get("twitter:image"))
+        .map(|reference| resolve_url(&response.final_url, reference));
     let has_media = media_reference.is_some()
         || tags.contains_key("twitter:player")
         || tags.contains_key("twitter:card");
@@ -547,6 +558,7 @@ pub fn inspect_with<T: LinkPreviewTransport>(transport: &T, url: &str) -> Previe
             media_url: media.as_ref().map(|value| value.final_url.clone()),
             media_content_type: media.as_ref().map(|value| value.content_type.clone()),
             media_size: media.and_then(|value| value.content_length),
+            image_url,
         },
         failure: None,
     }
@@ -901,6 +913,7 @@ mod tests {
                 media_url: Some("https://cdn.test/video.mp4".to_owned()),
                 media_content_type: Some("video/mp4".to_owned()),
                 media_size: Some(20_000_001),
+                image_url: None,
             },
             failure: None,
         };

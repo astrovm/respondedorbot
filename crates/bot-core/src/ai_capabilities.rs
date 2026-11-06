@@ -20,7 +20,7 @@ const CAPABILITIES_ES: &str = r#"CAPACIDADES DEL BOT:
 - polymarket: en mensajes normales busco mercados de predicción de Polymarket sobre cualquier tema (elecciones, deportes, crypto, economía) con sus probabilidades
 - /rulo, /devo, /powerlaw, /rainbow, /satoshi, /sat, /sats: rulo desde oficial, arbitraje tarjeta/crypto, power law, rainbow chart y sats
 - /transcribe, /transcript, /describe: transcribo voice/audio/video/video_note o subtítulos de YouTube y describo fotos, stickers o GIF respondiendo al mensaje; también puedo procesar media cuando me hablan
-- links: arreglo links de X/Twitter, Bluesky, Instagram y Reddit según config; leo metadata, tweets y transcripts de YouTube como contexto
+- links: arreglo links de X/Twitter, Bluesky, Instagram y Reddit según config; leo metadata, tweets con su foto y transcripts de YouTube como contexto, también en el mensaje al que me responden
 - encuestas: si me lo piden mando una encuesta de Telegram y después puedo leer los votos y quién votó; en encuestas creadas por usuarios solo veo los votos cuando me responden a la encuesta, nunca quién votó
 - /tarea, /tareas, /task, /tasks: agendo recordatorios y tareas recurrentes por lenguaje natural; cualquiera de los comandos lista sin texto y crea con texto; en un grupo cada ejecución se paga como un mensaje de IA de quien la creó (sus créditos personales y los del grupo, según quién paga primero y su límite por hora); si un admin apaga "Tareas con créditos del grupo" en /config, solo se usan los créditos personales de quien la creó; en privado siempre son los personales
 - /resumen, /summary, /tldr: resumo el chat, guardo resumen acumulado y recupero mensajes relevantes para responder con contexto
@@ -50,7 +50,7 @@ const CAPABILITIES_EN: &str = r#"BOT CAPABILITIES:
 - polymarket: in normal messages I search Polymarket prediction markets on any topic (elections, sports, crypto, economy) with their odds
 - /rulo, /devo, /powerlaw, /rainbow, /satoshi, /sat, /sats: official-rate, card/crypto, power-law, rainbow-chart, and satoshi tools
 - /transcribe, /transcript, /describe: transcribe audio, video, or YouTube captions; describe images, stickers, or GIFs
-- links: fix supported social links and read linked content as context
+- links: fix supported social links and read linked content, including a tweet's photo, as context, also in the message I'm replied to
 - polls: when asked, I send a Telegram poll and can later read its votes and who voted; for polls users create, I only see counts when someone replies to the poll, never who voted
 - /tarea, /tareas, /task, /tasks: create reminders and recurring tasks with natural language; in a group each run is paid like an AI message from whoever created it (their personal credits and the group's, following who pays first and their hourly limit); if an admin turns off "Tareas con créditos del grupo" (group credits for tasks) in /config, only the creator's personal credits are used; in private chats it is always personal
 - /resumen, /summary, /tldr: summarize chats and retrieve relevant prior messages

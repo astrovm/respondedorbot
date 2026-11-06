@@ -75,8 +75,9 @@ use bot_adapters::weather::{
     load_weather,
 };
 use bot_adapters::web_fetch::{
-    FETCH_MAX_REDIRECTS, HostResolver, ReqwestWebFetchTransport, SystemHostResolver,
-    is_public_http_url,
+    FETCH_MAX_REDIRECTS, HostResolver, ReqwestWebFetchTransport, SystemHostResolver, TweetContent,
+    WebFetchResponse, WebFetchTransport, WebFetchTransportError, fetch_public_image, fetch_tweet,
+    is_public_http_url, is_tweet_link,
 };
 use bot_adapters::yahoo_finance::{
     ReqwestYahooFinanceTransport, TransportFailureKind as YahooTransportFailureKind,
@@ -108,6 +109,7 @@ use num_bigint::{BigInt, BigUint};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::ai_dispatch::LinkImage;
 use crate::chat_members_tool::{ChatMemberSource, ChatMembersTool};
 use crate::chat_provider::OpenRouterChatStreamer;
 use crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
@@ -121,11 +123,11 @@ use crate::dispatcher::{
     ChargeHistorySource, ChatBanStore, ChatConfigSource, ChatLimitStore, DiagnosticLog,
     DollarMarketLoad, DollarMarketSource, DollarQuotesSource, ElectionLoad, ElectionSource,
     GreetingPoolLoad, GreetingPoolSource, GroupAuthorizationDecision, GroupAuthorizer,
-    GroupSpendingSource, LinkReplacementLoad, LinkReplacementSource, MarketPriceLoad,
-    MarketPriceSource, MessageStateSink, NativeDispatcher, OilPriceSource, OilQuoteLoad,
-    RandomSource, RuloInputLoad, RuloSource, RuntimeValues, ScheduledTaskSource,
-    StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad, TokenSignalLoad,
-    TokenSignalSource, WeatherObservationLoad, WeatherSource,
+    GroupSpendingSource, LinkContext, LinkContextRequest, LinkReplacementLoad,
+    LinkReplacementSource, MarketPriceLoad, MarketPriceSource, MessageStateSink, NativeDispatcher,
+    OilPriceSource, OilQuoteLoad, RandomSource, RuloInputLoad, RuloSource, RuntimeValues,
+    ScheduledTaskSource, StarPaymentReceipt, StarPaymentSink, StockPriceSource, StockQuotesLoad,
+    TokenSignalLoad, TokenSignalSource, WeatherObservationLoad, WeatherSource,
 };
 use crate::error_text;
 use crate::firecrawl_tool::FirecrawlTool;
@@ -428,12 +430,34 @@ struct NativeMarketPriceSource<T, C, Y, F, S> {
     stocks: YahooStockPriceSource<Y, F, S>,
 }
 
-struct NativeLinkReplacementSource<T, R> {
+struct NativeLinkReplacementSource<T, R, W> {
     transport: T,
     /// Short-timeout transport for optional AI link context.
     context_transport: T,
     /// Keeps AI link context off private and loopback addresses.
     context_resolver: R,
+    /// Short-timeout transport for reading tweets and link pictures.
+    context_fetch: W,
+}
+
+/// Runs the link reader the bot uses in production, for replaying real links.
+/// Empty when its HTTP clients can't be built.
+#[must_use]
+pub fn read_live_link_context(request: LinkContextRequest<'_>) -> LinkContext {
+    let (Ok(transport), Ok(context_transport), Ok(context_fetch)) = (
+        ReqwestLinkPreviewTransport::new(),
+        ReqwestLinkPreviewTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT),
+        ReqwestWebFetchTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT),
+    ) else {
+        return LinkContext::default();
+    };
+    NativeLinkReplacementSource {
+        transport,
+        context_transport,
+        context_resolver: SystemHostResolver,
+        context_fetch,
+    }
+    .preview_context(request)
 }
 
 /// Links whose previews may feed one AI turn, and the wall-clock budget for
@@ -441,6 +465,9 @@ struct NativeLinkReplacementSource<T, R> {
 const AI_LINK_CONTEXT_MAX_LINKS: usize = 3;
 const AI_LINK_CONTEXT_DEADLINE: Duration = Duration::from_secs(4);
 const AI_LINK_CONTEXT_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+/// Budget for the picture, on top of the text's, since a question about a
+/// photo can't be answered without it.
+const AI_LINK_IMAGE_DEADLINE: Duration = Duration::from_secs(4);
 
 /// Fails requests once a shared deadline passes, so several optional
 /// previews cannot stack their individual timeouts.
@@ -455,6 +482,21 @@ impl<T: LinkPreviewTransport> LinkPreviewTransport for DeadlineLinkPreviewTransp
             return Err(PreviewFailure::Timeout);
         }
         self.inner.request(request)
+    }
+}
+
+/// [`DeadlineLinkPreviewTransport`] for tweet and picture downloads.
+struct DeadlineWebFetchTransport<'a, W> {
+    inner: &'a W,
+    deadline: Instant,
+}
+
+impl<W: WebFetchTransport> WebFetchTransport for DeadlineWebFetchTransport<'_, W> {
+    fn get(&self, url: &str) -> Result<WebFetchResponse, WebFetchTransportError> {
+        if Instant::now() >= self.deadline {
+            return Err(WebFetchTransportError::Timeout);
+        }
+        self.inner.get(url)
     }
 }
 
@@ -502,18 +544,128 @@ fn is_youtube_link(url: &str) -> bool {
         })
 }
 
-fn format_link_context(previews: &[PreviewInspection]) -> Option<String> {
-    let mut lines = vec!["LINKS DEL MENSAJE:".to_owned()];
-    for (index, preview) in previews.iter().enumerate() {
-        lines.push(format!("{}. {}", index + 1, preview.final_url));
-        if let Some(title) = bounded_link_text(preview.metadata.title.as_deref(), 160) {
-            lines.push(format!("titulo: {title}"));
-        }
-        if let Some(description) = bounded_link_text(preview.metadata.description.as_deref(), 280) {
-            lines.push(format!("descripcion: {description}"));
+const MESSAGE_LINKS_HEADER: &str = "LINKS DEL MENSAJE:";
+const REPLIED_LINKS_HEADER: &str = "LINKS DEL MENSAJE RESPONDIDO:";
+const AI_TWEET_TEXT_MAX_CHARS: usize = 1_000;
+
+/// One numbered entry per link, its address on the first line.
+fn format_link_section(header: &str, links: &[Vec<String>]) -> Option<String> {
+    let mut lines = vec![header.to_owned()];
+    for (index, link) in links.iter().enumerate() {
+        for (position, line) in link.iter().enumerate() {
+            lines.push(if position == 0 {
+                format!("{}. {line}", index + 1)
+            } else {
+                line.clone()
+            });
         }
     }
-    (!previews.is_empty()).then(|| lines.join("\n"))
+    (!links.is_empty()).then(|| lines.join("\n"))
+}
+
+fn preview_lines(preview: &PreviewInspection) -> Vec<String> {
+    let mut lines = vec![preview.final_url.clone()];
+    if let Some(title) = bounded_link_text(preview.metadata.title.as_deref(), 160) {
+        lines.push(format!("titulo: {title}"));
+    }
+    if let Some(description) = bounded_link_text(preview.metadata.description.as_deref(), 280) {
+        lines.push(format!("descripcion: {description}"));
+    }
+    lines
+}
+
+fn tweet_lines(tweet: &TweetContent) -> Vec<String> {
+    let text = |value: &str| bounded_link_text(Some(value), AI_TWEET_TEXT_MAX_CHARS);
+    let mut lines = vec![tweet.url.clone()];
+    if let Some(author) = text(&tweet.author) {
+        lines.push(format!("autor: {author}"));
+    }
+    if let Some(date) = text(&tweet.date) {
+        lines.push(format!("fecha: {date}"));
+    }
+    if let Some(body) = text(&tweet.text) {
+        lines.push(format!("texto: {body}"));
+    }
+    if let Some(quote) = &tweet.quote {
+        lines.push(format!(
+            "cita a {}: {}",
+            text(&quote.author).unwrap_or_default(),
+            text(&quote.text).unwrap_or_default()
+        ));
+    }
+    if !tweet.photos.is_empty() {
+        lines.push(format!("fotos: {}", tweet.photos.len()));
+    }
+    if tweet.video_count > 0 {
+        lines.push(format!("videos que no podés ver: {}", tweet.video_count));
+    }
+    lines
+}
+
+fn format_link_context(previews: &[PreviewInspection]) -> Option<String> {
+    let links = previews.iter().map(preview_lines).collect::<Vec<_>>();
+    format_link_section(MESSAGE_LINKS_HEADER, &links)
+}
+
+/// Links in `text` the AI context reads. YouTube has its own transcript path.
+fn context_links(text: &str) -> Vec<&str> {
+    let Some(pattern) = bot_core::regex_cache::cached_regex(r"https?://[^\s<>]+") else {
+        return Vec::new();
+    };
+    let mut urls = Vec::new();
+    for url in pattern.find_iter(text).map(|found| found.as_str()) {
+        if !is_youtube_link(url) && !urls.contains(&url) {
+            urls.push(url);
+        }
+    }
+    urls
+}
+
+/// A picture a link leads to, and the link it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinkPicture {
+    image_url: Option<String>,
+    source_url: String,
+    /// The picture is the post's content, not a page's decoration, so the
+    /// model should hear about it even when it can't see it.
+    is_content: bool,
+}
+
+/// What reading one link gave: lines for the prompt, and its picture.
+#[derive(Debug, Default)]
+struct LinkRead {
+    lines: Option<Vec<String>>,
+    picture: Option<LinkPicture>,
+}
+
+fn read_tweet_link(tweet: &TweetContent) -> LinkRead {
+    let picture = tweet
+        .photos
+        .first()
+        .cloned()
+        .map(Some)
+        .or_else(|| tweet.media_unavailable.then_some(None))
+        .map(|image_url| LinkPicture {
+            image_url,
+            source_url: tweet.url.clone(),
+            is_content: true,
+        });
+    LinkRead {
+        lines: Some(tweet_lines(tweet)),
+        picture,
+    }
+}
+
+fn read_preview_link(preview: &PreviewInspection) -> LinkRead {
+    let has_text = preview.metadata.title.is_some() || preview.metadata.description.is_some();
+    LinkRead {
+        lines: has_text.then(|| preview_lines(preview)),
+        picture: preview.metadata.image_url.clone().map(|url| LinkPicture {
+            image_url: Some(url),
+            source_url: preview.final_url.clone(),
+            is_content: false,
+        }),
+    }
 }
 
 fn bounded_link_text(value: Option<&str>, limit: usize) -> Option<String> {
@@ -532,8 +684,47 @@ fn bounded_link_text(value: Option<&str>, limit: usize) -> Option<String> {
     Some(truncated)
 }
 
-impl<T: LinkPreviewTransport, R: HostResolver> LinkReplacementSource
-    for NativeLinkReplacementSource<T, R>
+impl<T: LinkPreviewTransport, R: HostResolver, W: WebFetchTransport>
+    NativeLinkReplacementSource<T, R, W>
+{
+    /// Downloads the first picture that works. Pictures that can't reach the
+    /// model only matter if they're the post's content.
+    fn link_image(
+        &self,
+        pictures: &[LinkPicture],
+        wants_image: bool,
+        diagnostics: &mut Vec<String>,
+    ) -> LinkImage {
+        let deadline = Instant::now() + AI_LINK_IMAGE_DEADLINE;
+        let transport = DeadlineWebFetchTransport {
+            inner: &self.context_fetch,
+            deadline,
+        };
+        for picture in pictures.iter().filter(|_| wants_image) {
+            let Some(image_url) = picture.image_url.as_deref() else {
+                continue;
+            };
+            match fetch_public_image(&transport, &self.context_resolver, image_url) {
+                Ok(bytes) => {
+                    return LinkImage::Attached {
+                        bytes: Arc::from(bytes),
+                        source_url: picture.source_url.clone(),
+                    };
+                }
+                Err(error) => diagnostics.push(format!("AI link image: {error:?}")),
+            }
+        }
+        pictures
+            .iter()
+            .find(|picture| picture.is_content || wants_image)
+            .map_or(LinkImage::None, |picture| LinkImage::Unavailable {
+                source_url: picture.source_url.clone(),
+            })
+    }
+}
+
+impl<T: LinkPreviewTransport, R: HostResolver, W: WebFetchTransport> LinkReplacementSource
+    for NativeLinkReplacementSource<T, R, W>
 {
     fn load(&mut self, text: &str, now_unix: i64) -> LinkReplacementLoad {
         let mut previews = Vec::new();
@@ -550,39 +741,91 @@ impl<T: LinkPreviewTransport, R: HostResolver> LinkReplacementSource
         let oversized_video = previews
             .iter()
             .find_map(|preview| download_oversized_video(&self.transport, preview));
+        let image_url = previews
+            .iter()
+            .find_map(|preview| preview.metadata.image_url.clone());
         LinkReplacementLoad {
             replacement,
             context,
             oversized_video,
+            image_url,
             diagnostics: Vec::new(),
         }
     }
 
-    fn preview_context(&mut self, text: &str) -> Option<String> {
-        let pattern = bot_core::regex_cache::cached_regex(r"https?://[^\s<>]+")?;
-        let mut urls = Vec::<&str>::new();
-        for url in pattern.find_iter(text).map(|found| found.as_str()) {
-            if !is_youtube_link(url) && !urls.contains(&url) {
-                urls.push(url);
-            }
-        }
-        let deadline = DeadlineLinkPreviewTransport {
+    fn preview_context(&mut self, request: LinkContextRequest<'_>) -> LinkContext {
+        let own_links = context_links(request.text);
+        let replied_links = request
+            .replied_text
+            .map(context_links)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|url| !own_links.contains(url));
+        let deadline = Instant::now() + AI_LINK_CONTEXT_DEADLINE;
+        let preview_deadline = DeadlineLinkPreviewTransport {
             inner: &self.context_transport,
-            deadline: Instant::now() + AI_LINK_CONTEXT_DEADLINE,
+            deadline,
         };
-        let transport = PublicLinkPreviewTransport {
-            inner: &deadline,
+        let previews = PublicLinkPreviewTransport {
+            inner: &preview_deadline,
             resolver: &self.context_resolver,
         };
-        let previews = urls
-            .into_iter()
-            .take(AI_LINK_CONTEXT_MAX_LINKS)
-            .map(|url| inspect_link_preview(&transport, url))
-            .filter(|preview| {
-                preview.metadata.title.is_some() || preview.metadata.description.is_some()
-            })
-            .collect::<Vec<_>>();
-        format_link_context(&previews)
+        let tweets = DeadlineWebFetchTransport {
+            inner: &self.context_fetch,
+            deadline,
+        };
+        let read = |url: &str| match fetch_tweet(&tweets, &self.context_resolver, url) {
+            Some(tweet) => read_tweet_link(&tweet),
+            None => read_preview_link(&inspect_link_preview(&previews, url)),
+        };
+        let mut own_lines = Vec::new();
+        let mut replied_lines = Vec::new();
+        let mut pictures = Vec::new();
+        let links = own_links
+            .iter()
+            .map(|url| (*url, true))
+            .chain(replied_links.map(|url| (url, false)))
+            .take(AI_LINK_CONTEXT_MAX_LINKS);
+        for (url, is_own) in links {
+            // The link fix already previewed these, so a page needs no second
+            // look. Only a tweet has more to give: its photo.
+            if is_own && request.own_links_known && !is_tweet_link(url) {
+                continue;
+            }
+            let link = read(url);
+            pictures.extend(link.picture);
+            if is_own && request.own_links_known {
+                continue;
+            }
+            if let Some(lines) = link.lines {
+                if is_own {
+                    own_lines.push(lines);
+                } else {
+                    replied_lines.push(lines);
+                }
+            }
+        }
+        if let Some(image_url) = request.own_image_url {
+            pictures.push(LinkPicture {
+                image_url: Some(image_url.to_owned()),
+                source_url: own_links.first().copied().unwrap_or(image_url).to_owned(),
+                is_content: false,
+            });
+        }
+        let text = [
+            format_link_section(MESSAGE_LINKS_HEADER, &own_lines),
+            format_link_section(REPLIED_LINKS_HEADER, &replied_lines),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        let mut diagnostics = Vec::new();
+        let image = self.link_image(&pictures, request.wants_image, &mut diagnostics);
+        LinkContext {
+            text: (!text.is_empty()).then(|| text.join("\n\n")),
+            image,
+            diagnostics,
+        }
     }
 }
 
@@ -2830,6 +3073,8 @@ pub enum CompositionError {
     GiphyCache(RedisJsonCacheError),
     #[error("could not construct social-link preview transport: {0:?}")]
     LinkPreviewTransport(bot_adapters::link_preview::PreviewFailure),
+    #[error("could not construct link context fetch transport: {0}")]
+    LinkContextFetch(WebFetchTransportError),
     #[error("could not construct Open-Meteo transport: {0:?}")]
     WeatherTransport(WeatherTransportFailureKind),
     #[error("could not construct weather Redis cache: {0}")]
@@ -3341,6 +3586,9 @@ fn build_native_dispatcher_with_stream_delivery(
     let link_context_transport =
         ReqwestLinkPreviewTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT)
             .map_err(CompositionError::LinkPreviewTransport)?;
+    let link_context_fetch =
+        ReqwestWebFetchTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT)
+            .map_err(CompositionError::LinkContextFetch)?;
     let weather_transport =
         ReqwestWeatherTransport::new().map_err(CompositionError::WeatherTransport)?;
     let weather_cache =
@@ -3447,6 +3695,7 @@ fn build_native_dispatcher_with_stream_delivery(
         transport: link_preview_transport,
         context_transport: link_context_transport,
         context_resolver: SystemHostResolver,
+        context_fetch: link_context_fetch,
     }))
     .with_scheduled_task_source(Box::new(task_source))
     .with_token_signal_source(Box::new(TokenSignalAdapter::new(
@@ -3752,9 +4001,11 @@ mod tests {
         TelegramGroupAuthorizer, TelegramUpdateSource, YahooOilPriceSource, YahooStockPriceSource,
         build_native_runtime, publish_telegram_commands,
     };
-    use crate::ai_dispatch::AiConversationInput;
+    use crate::ai_dispatch::{AiConversationInput, LinkImage};
     use crate::conversation::ConversationToolFactory;
     use crate::dispatcher::RuloSource;
+    use crate::dispatcher::{LinkContext, LinkContextRequest};
+    use bot_adapters::web_fetch::{WebFetchResponse, WebFetchTransport, WebFetchTransportError};
 
     fn ready_edit(
         decision: super::TelegramStreamDeliveryDecision,
@@ -3952,6 +4203,322 @@ mod tests {
                 .to_string(),
             })
         }
+    }
+
+    /// Reads no tweets and downloads no pictures, like a dead network.
+    struct NoFetchStub;
+
+    impl WebFetchTransport for NoFetchStub {
+        fn get(&self, _url: &str) -> Result<WebFetchResponse, WebFetchTransportError> {
+            Err(WebFetchTransportError::Connection)
+        }
+    }
+
+    fn own_links(text: &str) -> LinkContextRequest<'_> {
+        LinkContextRequest {
+            text,
+            replied_text: None,
+            own_links_known: false,
+            own_image_url: None,
+            wants_image: true,
+        }
+    }
+
+    /// Answers from a fixed address book and records what was asked for.
+    struct RoutedFetchStub {
+        routes: Vec<(&'static str, WebFetchResponse)>,
+        requests: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl WebFetchTransport for RoutedFetchStub {
+        fn get(&self, url: &str) -> Result<WebFetchResponse, WebFetchTransportError> {
+            self.requests.borrow_mut().push(url.to_owned());
+            self.routes
+                .iter()
+                .find(|(prefix, _)| url.starts_with(prefix))
+                .map(|(_, response)| response.clone())
+                .ok_or(WebFetchTransportError::Connection)
+        }
+    }
+
+    fn fetched(content_type: &str, body: &[u8]) -> WebFetchResponse {
+        WebFetchResponse {
+            status_code: 200,
+            content_type: content_type.to_owned(),
+            location: None,
+            body: body.to_vec(),
+            truncated: false,
+        }
+    }
+
+    const SYNTHETIC_TWEET: &str = r#"{"code":200,"tweet":{"url":"https://x.com/a/status/1","text":"A synthetic status.","author":{"name":"Example"},"media":{"all":[{"type":"photo","url":"https://pbs.twimg.com/media/a.jpg?name=orig"}]}}}"#;
+
+    fn tweet_routes(photo: Option<&[u8]>) -> RoutedFetchStub {
+        let mut routes = vec![(
+            "https://api.fxtwitter.com/status/1",
+            fetched("application/json", SYNTHETIC_TWEET.as_bytes()),
+        )];
+        if let Some(photo) = photo {
+            routes.push((
+                "https://pbs.twimg.com/media/a.jpg",
+                fetched("image/jpeg", photo),
+            ));
+        }
+        RoutedFetchStub {
+            routes,
+            requests: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// A page with a title and, on `/pic/` addresses, a preview picture.
+    struct PagePreviewStub;
+
+    impl LinkPreviewTransport for PagePreviewStub {
+        fn request(&self, request: &PreviewRequest) -> Result<PreviewResponse, PreviewFailure> {
+            let image = if request.url.contains("/pic/") {
+                "<meta property='og:image' content='https://cdn.example.test/page.png'>"
+            } else {
+                ""
+            };
+            Ok(PreviewResponse {
+                status_code: 200,
+                final_url: request.url.clone(),
+                content_type: "text/html".to_owned(),
+                content_length: None,
+                location: None,
+                body: format!("<meta property='og:title' content='page title'>{image}"),
+            })
+        }
+    }
+
+    fn link_source<W: WebFetchTransport>(
+        fetch: W,
+    ) -> super::NativeLinkReplacementSource<PagePreviewStub, PublicResolverStub, W> {
+        super::NativeLinkReplacementSource {
+            transport: PagePreviewStub,
+            context_transport: PagePreviewStub,
+            context_resolver: PublicResolverStub,
+            context_fetch: fetch,
+        }
+    }
+
+    fn replied_to(replied_text: &str) -> LinkContextRequest<'_> {
+        LinkContextRequest {
+            text: "real?",
+            replied_text: Some(replied_text),
+            own_links_known: false,
+            own_image_url: None,
+            wants_image: true,
+        }
+    }
+
+    #[test]
+    fn a_replied_tweet_link_brings_its_text_and_photo_to_the_turn() {
+        let mut source = link_source(tweet_routes(Some(b"pixels")));
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            replied_to("https://fixupx.com/a/status/1\n\ncompartido por @ana"),
+        );
+        assert_eq!(
+            context.text.as_deref(),
+            Some(
+                "LINKS DEL MENSAJE RESPONDIDO:\n1. https://x.com/a/status/1\nautor: Example\ntexto: A synthetic status.\nfotos: 1"
+            )
+        );
+        assert_eq!(
+            context.image,
+            LinkImage::Attached {
+                bytes: std::sync::Arc::from(&b"pixels"[..]),
+                source_url: "https://x.com/a/status/1".to_owned(),
+            }
+        );
+        assert_eq!(
+            source.context_fetch.requests.borrow()[1],
+            "https://pbs.twimg.com/media/a.jpg?name=large"
+        );
+    }
+
+    #[test]
+    fn a_tweet_photo_is_announced_but_not_downloaded_when_nobody_asked() {
+        let mut source = link_source(tweet_routes(Some(b"pixels")));
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            LinkContextRequest {
+                wants_image: false,
+                ..replied_to("https://x.com/a/status/1")
+            },
+        );
+        assert_eq!(
+            context.image,
+            LinkImage::Unavailable {
+                source_url: "https://x.com/a/status/1".to_owned(),
+            }
+        );
+        assert_eq!(source.context_fetch.requests.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_tweet_photo_that_wont_download_is_announced_and_logged() {
+        let mut source = link_source(tweet_routes(None));
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            replied_to("https://x.com/a/status/1"),
+        );
+        assert_eq!(
+            context.image,
+            LinkImage::Unavailable {
+                source_url: "https://x.com/a/status/1".to_owned(),
+            }
+        );
+        assert_eq!(context.diagnostics.len(), 1);
+        assert!(context.diagnostics[0].starts_with("AI link image:"));
+        assert!(context.text.is_some());
+    }
+
+    #[test]
+    fn page_pictures_reach_the_turn_only_when_someone_asked() {
+        let picture = RoutedFetchStub {
+            routes: vec![(
+                "https://cdn.example.test/page.png",
+                fetched("image/png", b"page"),
+            )],
+            requests: std::cell::RefCell::new(Vec::new()),
+        };
+        let mut source = link_source(picture);
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            replied_to("https://example.com/pic/nota"),
+        );
+        assert_eq!(
+            context.text.as_deref(),
+            Some(
+                "LINKS DEL MENSAJE RESPONDIDO:\n1. https://example.com/pic/nota\ntitulo: page title"
+            )
+        );
+        assert_eq!(
+            context.image,
+            LinkImage::Attached {
+                bytes: std::sync::Arc::from(&b"page"[..]),
+                source_url: "https://example.com/pic/nota".to_owned(),
+            }
+        );
+        let unasked = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            LinkContextRequest {
+                wants_image: false,
+                ..replied_to("https://example.com/pic/nota")
+            },
+        );
+        assert_eq!(unasked.image, LinkImage::None);
+    }
+
+    #[test]
+    fn links_are_read_once_with_the_messages_own_first_and_a_cap_on_the_total() {
+        let mut source = link_source(NoFetchStub);
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            LinkContextRequest {
+                text: "https://example.com/a",
+                ..replied_to(
+                    "https://example.com/a https://example.com/b https://example.com/c https://example.com/d https://youtu.be/e",
+                )
+            },
+        );
+        assert_eq!(
+            context.text.as_deref(),
+            Some(
+                "LINKS DEL MENSAJE:\n1. https://example.com/a\ntitulo: page title\n\nLINKS DEL MENSAJE RESPONDIDO:\n1. https://example.com/b\ntitulo: page title\n2. https://example.com/c\ntitulo: page title"
+            )
+        );
+        assert_eq!(context.image, LinkImage::None);
+    }
+
+    #[test]
+    fn links_the_fix_already_previewed_only_add_the_photo() {
+        let mut source = link_source(tweet_routes(Some(b"pixels")));
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            LinkContextRequest {
+                own_links_known: true,
+                own_image_url: Some("https://pbs.fxtwitter.com/media/a.jpg"),
+                ..own_links("https://x.com/a/status/1 https://example.com/nota")
+            },
+        );
+        assert_eq!(context.text, None);
+        assert_eq!(
+            context.image,
+            LinkImage::Attached {
+                bytes: std::sync::Arc::from(&b"pixels"[..]),
+                source_url: "https://x.com/a/status/1".to_owned(),
+            }
+        );
+
+        // Nothing but the fix's own picture to go on.
+        let picture = RoutedFetchStub {
+            routes: vec![(
+                "https://cdn.example.test/page.png",
+                fetched("image/png", b"page"),
+            )],
+            requests: std::cell::RefCell::new(Vec::new()),
+        };
+        let mut source = link_source(picture);
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            LinkContextRequest {
+                own_links_known: true,
+                own_image_url: Some("https://cdn.example.test/page.png"),
+                ..own_links("https://example.com/nota")
+            },
+        );
+        assert_eq!(context.text, None);
+        assert_eq!(
+            context.image,
+            LinkImage::Attached {
+                bytes: std::sync::Arc::from(&b"page"[..]),
+                source_url: "https://example.com/nota".to_owned(),
+            }
+        );
+        assert_eq!(source.context_fetch.requests.borrow().len(), 1);
+    }
+
+    #[test]
+    fn link_pictures_stay_off_private_addresses() {
+        let private = RoutedFetchStub {
+            routes: vec![(
+                "https://internal.example.test/",
+                fetched("image/png", b"secret"),
+            )],
+            requests: std::cell::RefCell::new(Vec::new()),
+        };
+        let mut source = link_source(private);
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            LinkContextRequest {
+                own_links_known: true,
+                own_image_url: Some("https://internal.example.test/a.png"),
+                ..own_links("https://example.com/nota")
+            },
+        );
+        assert!(matches!(context.image, LinkImage::Unavailable { .. }));
+        assert_eq!(source.context_fetch.requests.borrow().len(), 0);
+    }
+
+    #[test]
+    fn link_downloads_stop_at_the_shared_deadline() {
+        let expired = super::DeadlineWebFetchTransport {
+            inner: &NoFetchStub,
+            deadline: std::time::Instant::now(),
+        };
+        assert_eq!(
+            expired.get("https://example.com"),
+            Err(WebFetchTransportError::Timeout)
+        );
+        let routes = tweet_routes(Some(b"pixels"));
+        let open = super::DeadlineWebFetchTransport {
+            inner: &routes,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        };
+        assert!(open.get("https://pbs.twimg.com/media/a.jpg").is_ok());
     }
 
     struct LinkPreviewTransportStub;
@@ -6901,6 +7468,7 @@ mod tests {
             timestamp: 1_700_000_000,
             spontaneous: false,
             link_context: None,
+            link_image: LinkImage::None,
         };
         use crate::chat_tool_loop::NativeToolRuntime;
         let tools = factory.create(&input);
@@ -7013,6 +7581,7 @@ mod tests {
             transport: LinkPreviewTransportStub,
             context_transport: LinkPreviewTransportStub,
             context_resolver: PublicResolverStub,
+            context_fetch: NoFetchStub,
         };
         let load = crate::dispatcher::LinkReplacementSource::load(
             &mut source,
@@ -7046,11 +7615,15 @@ mod tests {
             transport: LinkPreviewTransportStub,
             context_transport: LinkPreviewTransportStub,
             context_resolver: PublicResolverStub,
+            context_fetch: NoFetchStub,
         };
         let context = crate::dispatcher::LinkReplacementSource::preview_context(
             &mut source,
-            "mirá https://example.com/nota https://example.com/nota https://youtu.be/abc",
-        );
+            own_links(
+                "mirá https://example.com/nota https://example.com/nota https://youtu.be/abc",
+            ),
+        )
+        .text;
         assert!(context.as_deref().is_some_and(|context| {
             context.starts_with("LINKS DEL MENSAJE:\n1. https://example.com/nota\ntitulo: ")
                 && context.contains("descripcion: ")
@@ -7059,9 +7632,9 @@ mod tests {
         assert_eq!(
             crate::dispatcher::LinkReplacementSource::preview_context(
                 &mut source,
-                "solo https://www.youtube.com/watch?v=abc y https://m.youtube.com/x"
+                own_links("solo https://www.youtube.com/watch?v=abc y https://m.youtube.com/x")
             ),
-            None
+            LinkContext::default()
         );
         assert!(super::is_youtube_link(
             "https://music.youtube.com/watch?v=abc"
@@ -7159,13 +7732,16 @@ mod tests {
             transport: LinkPreviewTransportStub,
             context_transport: LinkPreviewTransportStub,
             context_resolver: PublicResolverStub,
+            context_fetch: NoFetchStub,
         };
         assert_eq!(
             crate::dispatcher::LinkReplacementSource::preview_context(
                 &mut source,
-                "qué dice https://169.254.169.254/latest/meta-data/ y https://127.0.0.1:6379/"
+                own_links(
+                    "qué dice https://169.254.169.254/latest/meta-data/ y https://127.0.0.1:6379/"
+                )
             ),
-            None
+            LinkContext::default()
         );
     }
 
@@ -8664,6 +9240,7 @@ mod tests {
             transport: LinkPreviewTransportStub,
             context_transport: LinkPreviewTransportStub,
             context_resolver: PublicResolverStub,
+            context_fetch: NoFetchStub,
         };
         let text = "see https://www.instagram.com/p/plain/";
         let load = crate::dispatcher::LinkReplacementSource::load(&mut source, text, 1_700_000_000);
@@ -9131,6 +9708,7 @@ mod tests {
             timestamp: 1_700_000_000,
             spontaneous: false,
             link_context: None,
+            link_image: LinkImage::None,
         };
         let arguments = serde_json::json!({"text": "synthetic reminder", "delay_seconds": 3600});
 

@@ -1,5 +1,7 @@
 //! Object-safe boundary between Telegram routing and one native AI transaction.
 
+use std::sync::Arc;
+
 use bot_core::locale::Locale;
 use bot_core::telegram_input::{ChatId, MessageId, UserId};
 
@@ -55,6 +57,20 @@ impl CreditlessLimit {
     }
 }
 
+/// The picture behind a link the AI turn talks about.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LinkImage {
+    #[default]
+    None,
+    /// Downloaded, ready to go into the prompt.
+    Attached {
+        bytes: Arc<[u8]>,
+        source_url: String,
+    },
+    /// The link has one, but the model won't get to see it.
+    Unavailable { source_url: String },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AiConversationInput {
     pub chat_id: ChatId,
@@ -84,6 +100,7 @@ pub struct AiConversationInput {
     pub spontaneous: bool,
     /// Bounded preview metadata (title/description) for links in the message.
     pub link_context: Option<String>,
+    pub link_image: LinkImage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,7 +231,7 @@ mod tests {
 
     use super::{
         AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
-        AiStreamEvent, CreditlessLimit, reply_context,
+        AiStreamEvent, CreditlessLimit, LinkImage, reply_context,
     };
 
     struct TokenStreamingSource;
@@ -297,6 +314,7 @@ mod tests {
             timestamp: 1_700_000_000,
             spontaneous: false,
             link_context: None,
+            link_image: LinkImage::None,
         }
     }
 
