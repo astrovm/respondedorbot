@@ -118,7 +118,7 @@ fn grade(case: &Case, calls: &[ToolCall]) -> Result<(), String> {
             ));
         }
     }
-    if case.expect.is_empty() {
+    if case.expect.is_empty() && case.args_none.is_empty() {
         return match calls.first() {
             Some(call) => Err(format!("expected no tool, got {}", call.function.name)),
             None => Ok(()),

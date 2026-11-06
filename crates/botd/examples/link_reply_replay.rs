@@ -18,7 +18,8 @@
 //! words. Use words only the photo shows. Web search is stubbed to find nothing,
 //! so they can't come from there. `--answer-may-mention yes` is for questions
 //! about an earlier wrong answer, which the reply can fairly bring up.
-//! `--distraction retrieved` puts the distraction among the messages found by
+//! `--distraction-is-the-topic yes` is the control for a reply that does ask
+//! about the distraction. `--distraction retrieved` puts the distraction among the messages found by
 //! search instead of the chat history. Images go as downloaded, not through
 //! ffmpeg.
 
@@ -57,6 +58,7 @@ struct Options {
     retrieved: bool,
     answer_may_mention: bool,
     unseen: bool,
+    on_topic: bool,
 }
 
 fn options() -> Result<Options, String> {
@@ -69,6 +71,7 @@ fn options() -> Result<Options, String> {
         retrieved: false,
         answer_may_mention: false,
         unseen: false,
+        on_topic: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -81,6 +84,7 @@ fn options() -> Result<Options, String> {
             }
             "--distraction" => options.retrieved = value == "retrieved",
             "--answer-may-mention" => options.answer_may_mention = value == "yes",
+            "--distraction-is-the-topic" => options.on_topic = value == "yes",
             "--runs" => {
                 options.runs = value
                     .parse()
@@ -255,7 +259,7 @@ fn run_once(
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
         if completion.tool_calls.is_empty() {
-            if !options.answer_may_mention {
+            if !options.answer_may_mention && !options.on_topic {
                 clean &= !distraction_in(&completion.text);
             }
             let answer = completion.text.to_lowercase();
@@ -272,7 +276,7 @@ fn run_once(
         assistant.tool_calls.clone_from(&completion.tool_calls);
         messages.push(assistant);
         for call in &completion.tool_calls {
-            clean &= !distraction_in(&call.function.arguments);
+            clean &= options.on_topic || !distraction_in(&call.function.arguments);
             trace.push(format!(
                 "{} {}",
                 call.function.name, call.function.arguments
