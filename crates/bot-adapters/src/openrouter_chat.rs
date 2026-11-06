@@ -824,6 +824,8 @@ const PREFERRED_MAX_LATENCY_P90: f64 = 5.0;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct ProviderPreferences {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_price: Option<ProviderMaxPrice>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -831,6 +833,8 @@ pub struct ProviderPreferences {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_max_latency: Option<Value>,
 }
+
+const IMAGE_GARBLING_PROVIDERS: [&str; 1] = ["Relace"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReasoningConfig {
@@ -866,6 +870,29 @@ impl ChatCompletionRequest {
 
     /// Steers routing toward endpoints that have been fast lately, so a slow
     /// provider does not keep a chat reply waiting for minutes.
+    /// Keeps a request with an image away from providers that garble images.
+    /// Measured on one photo through `deepseek/deepseek-v4.1-flash-1017`, in
+    /// November 2026: Relace, its cheapest provider, saw the shirt's color
+    /// right in 1 of 7 tries and once called the photo a "glitch-like collage",
+    /// while nearly all of the 39 others got it right in 3 of 3.
+    pub fn avoid_image_garbling_providers(&mut self) {
+        let has_image = self.messages.iter().any(|message| {
+            message
+                .content
+                .as_ref()
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    parts
+                        .iter()
+                        .any(|part| part.get("type").and_then(Value::as_str) == Some("image_url"))
+                })
+        });
+        if has_image {
+            self.provider.get_or_insert_default().ignore =
+                IMAGE_GARBLING_PROVIDERS.map(str::to_owned).to_vec();
+        }
+    }
+
     pub fn prefer_fast_providers(&mut self) {
         let provider = self.provider.get_or_insert_default();
         provider.preferred_min_throughput = Some(json!({ "p90": PREFERRED_MIN_THROUGHPUT_P90 }));

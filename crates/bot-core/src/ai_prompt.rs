@@ -363,6 +363,28 @@ pub fn build_conversation_prompt(input: &ConversationPromptInput) -> Vec<PromptM
         String::new(),
     ]);
     parts.push(reply_instructions(input.locale).join("\n"));
+    if input
+        .link_context
+        .as_deref()
+        .is_some_and(|links| !links.is_empty())
+    {
+        if input.reply_context.is_some() {
+            parts.push(
+                match input.locale {
+                    Locale::Es => "- este mensaje responde a otro mensaje con un link: si no nombra otro tema, lo que dice o pregunta es sobre ese link y lo que muestra, aunque el chat venga hablando de otra cosa; no busques ni menciones esos otros temas",
+                    Locale::En => "- this message replies to another message with a link: unless it names another topic, what it says or asks is about that link and what it shows, even if the chat was talking about something else; do not search for or mention those other topics",
+                }
+                .to_owned(),
+            );
+        }
+        parts.push(
+            match input.locale {
+                Locale::Es => "- si no pudiste leer un link o ver su imagen, decilo y no inventes",
+                Locale::En => "- if you could not read a link or see its image, say so and do not make things up",
+            }
+            .to_owned(),
+        );
+    }
     if input.enable_web_search {
         parts.push(
             match input.locale {
@@ -615,6 +637,46 @@ mod tests {
         assert!(prompt.contains(
             "- para fechas y horarios, si aparece una fecha pasada o fuentes contradictorias, usá web_fetch sobre una fuente oficial antes de responder; si el conflicto sigue, decilo y no elijas una fecha al azar"
         ));
+    }
+
+    #[test]
+    fn link_rules_follow_what_the_turn_has() {
+        for (locale, reply_rule, honesty_rule) in [
+            (
+                Locale::Es,
+                "este mensaje responde a otro mensaje con un link",
+                "si no pudiste leer un link o ver su imagen",
+            ),
+            (
+                Locale::En,
+                "this message replies to another message with a link",
+                "if you could not read a link or see its image",
+            ),
+        ] {
+            let prompt = |value: &ConversationPromptInput| {
+                build_conversation_prompt(value)
+                    .last()
+                    .map(text_of)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let mut value = input(locale);
+            value.reply_context = Some("Ana: https://example.test".to_owned());
+            assert!(prompt(&value).contains(reply_rule));
+            assert!(prompt(&value).contains(honesty_rule));
+
+            // A link in the message itself says nothing about a reply.
+            value.reply_context = None;
+            assert!(!prompt(&value).contains(reply_rule));
+            assert!(prompt(&value).contains(honesty_rule));
+
+            value.reply_context = Some("Ana: hola".to_owned());
+            for empty in [Some(String::new()), None] {
+                value.link_context = empty;
+                assert!(!prompt(&value).contains(reply_rule));
+                assert!(!prompt(&value).contains(honesty_rule));
+            }
+        }
     }
 
     #[test]

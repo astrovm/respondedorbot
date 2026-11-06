@@ -110,6 +110,7 @@ impl<Transport> OpenRouterChatStreamer<Transport> {
             pricing.apply_to_request(&mut request)?;
         }
         request.prefer_fast_providers();
+        request.avoid_image_garbling_providers();
         request.tools = tools.to_vec();
         request.max_tokens = u64::try_from(chat_output_token_limit(&self.model)).ok();
         // Every round reasons at the provider's default depth. Rounds after a
@@ -856,6 +857,7 @@ mod tests {
         assert_eq!(body["messages"][0]["content"][0]["type"], "text");
         assert_eq!(body["messages"][0]["content"][0]["text"], "inspect this");
         assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
+        assert_eq!(body["provider"]["ignore"], serde_json::json!(["Relace"]));
         assert_eq!(
             body["messages"][0]["content"][1]["image_url"]["url"],
             "data:image/png;base64,c3ludGhldGlj"

@@ -23,7 +23,7 @@ use serde_json::{Map, Value, json};
 
 use crate::ai_dispatch::{
     AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
-    AiStreamEvent, CreditlessLimit,
+    AiStreamEvent, CreditlessLimit, LinkImage,
 };
 use crate::chat_tool_loop::{
     ChatRoundStream, ChatToolLoopError, ChatToolLoopEvent, NativeToolRuntime, provider_error_kind,
@@ -557,6 +557,48 @@ where
         }
     }
 
+    /// Puts the picture behind a link in the prompt. Failing only costs the
+    /// picture: the turn goes on, and the model is told it's missing.
+    fn prepare_link_image(
+        &mut self,
+        input: &AiConversationInput,
+        operation_id: &str,
+    ) -> Result<PreparedConversationMedia, String> {
+        let LinkImage::Attached { bytes, source_url } = &input.link_image else {
+            return Ok(PreparedConversationMedia::default());
+        };
+        let prepared = self
+            .media
+            .as_mut()
+            .ok_or("native media runtime disappeared")?
+            .prepare_image_bytes_for_prompt(bytes);
+        Ok(match prepared {
+            Ok(image) => {
+                println!(
+                    "Media trace: {}",
+                    serde_json::json!({
+                        "event": "ai_link_image",
+                        "operation_id": operation_id,
+                        "source_url": source_url,
+                        "downloaded_bytes": bytes.len(),
+                        "prompt_bytes": image.bytes.len(),
+                    })
+                );
+                PreparedConversationMedia {
+                    image: Some(PromptImage {
+                        bytes: image.bytes,
+                        mime: image.mime,
+                    }),
+                    ..PreparedConversationMedia::default()
+                }
+            }
+            Err(error) => PreparedConversationMedia {
+                diagnostics: vec![format!("AI link image: {error}")],
+                ..PreparedConversationMedia::default()
+            },
+        })
+    }
+
     fn prepare_media(
         &mut self,
         input: &AiConversationInput,
@@ -576,7 +618,7 @@ where
                     .map(|file_id| (MediaKind::Image, file_id, None))
             });
         let Some((kind, file_id, duration)) = selected else {
-            return Ok(PreparedConversationMedia::default());
+            return self.prepare_link_image(input, operation_id);
         };
         if kind == MediaKind::Image {
             let direct_image = self
@@ -1225,6 +1267,11 @@ where
         }
 
         let prepared_media = self.prepare_media(&input, &operation_id)?;
+        let image_note = link_image_note(
+            &input.link_image,
+            prepared_media.image.is_some(),
+            input.locale,
+        );
         segments.extend(prepared_media.segments);
         diagnostics.extend(prepared_media.diagnostics);
         if let Some(decision) = prepared_media
@@ -1249,8 +1296,12 @@ where
             prepared_media.execution.as_ref(),
             prepared_media.image.as_ref(),
             merged_link_context(
-                prepared_youtube.context.as_deref(),
-                input.link_context.as_deref(),
+                merged_link_context(
+                    prepared_youtube.context.as_deref(),
+                    input.link_context.as_deref(),
+                )
+                .as_deref(),
+                image_note.as_deref(),
             )
             .as_deref(),
         ) {
@@ -1418,6 +1469,35 @@ where
             completion_id: Some(operation_id),
             diagnostics,
         })
+    }
+}
+
+/// Says which link the attached picture belongs to, or that a link's picture
+/// is missing, so the model never takes a guess for what it shows.
+#[must_use]
+pub fn link_image_note(image: &LinkImage, attached: bool, locale: Locale) -> Option<String> {
+    match (image, attached, locale) {
+        (LinkImage::None, ..) => None,
+        (LinkImage::Attached { source_url, .. }, true, Locale::Es) => Some(format!(
+            "la imagen adjunta es la de este link: {source_url}. Usala para responder."
+        )),
+        (LinkImage::Attached { source_url, .. }, true, Locale::En) => Some(format!(
+            "the attached image is the one from this link: {source_url}. Use it to answer."
+        )),
+        (
+            LinkImage::Attached { source_url, .. } | LinkImage::Unavailable { source_url },
+            _,
+            Locale::Es,
+        ) => Some(format!(
+            "este link tiene una imagen que no pudiste ver: {source_url}. Si la respuesta depende de ella, decilo, no adivines qué muestra y no busques otros temas en su lugar."
+        )),
+        (
+            LinkImage::Attached { source_url, .. } | LinkImage::Unavailable { source_url },
+            _,
+            Locale::En,
+        ) => Some(format!(
+            "this link has an image you could not see: {source_url}. If the answer depends on it, say so, do not guess what it shows and do not search for other topics instead."
+        )),
     }
 }
 
@@ -2475,6 +2555,19 @@ mod tests {
                 }))
         }
 
+        fn prepare_image_bytes_for_prompt(
+            &mut self,
+            bytes: &[u8],
+        ) -> Result<crate::media::PreparedImagePrompt, String> {
+            if bytes == b"undecodable" {
+                return Err("invalid image".to_owned());
+            }
+            Ok(crate::media::PreparedImagePrompt {
+                bytes: Arc::from(bytes),
+                mime: "image/webp".to_owned(),
+            })
+        }
+
         fn execute(
             &mut self,
             prepared: crate::media::PreparedMedia,
@@ -2673,6 +2766,7 @@ mod tests {
             timestamp: 1_672_531_200,
             spontaneous: false,
             link_context: None,
+            link_image: LinkImage::None,
         }
     }
 
@@ -3810,6 +3904,118 @@ mod tests {
             provider_failure.billing.settlements[0].reason,
             "transcribe_command_delivery_failure_refund"
         );
+    }
+
+    fn link_image_prompt(
+        link_image: LinkImage,
+        photo_file_id: Option<&str>,
+    ) -> (Vec<String>, Option<PromptImage>, Vec<String>) {
+        let mut service = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        )
+        .with_media(Box::new(FakeMedia {
+            direct_image: true,
+            ..FakeMedia::default()
+        }));
+        let mut request = input();
+        request.link_image = link_image;
+        request.photo_file_id = photo_file_id.map(str::to_owned);
+        let result = service.prepare(request).must();
+        let (_, _, diagnostics) = pending(reply(Ok(result)));
+        let prompts = service.provider.prompts.borrow();
+        match &prompts[0].last().must().content {
+            PromptContent::Image { text_parts, image } => {
+                (text_parts.clone(), Some(image.clone()), diagnostics)
+            }
+            other => (vec![format!("{other:?}")], None, diagnostics),
+        }
+    }
+
+    fn attached(bytes: &[u8]) -> LinkImage {
+        LinkImage::Attached {
+            bytes: Arc::from(bytes),
+            source_url: "https://x.com/a/status/1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_link_image_reaches_the_prompt_and_says_which_link_it_is_from() {
+        let (text, image, diagnostics) = link_image_prompt(attached(b"tweet photo"), None);
+        let image = image.must();
+        assert_eq!(image.bytes.as_ref(), b"tweet photo");
+        assert_eq!(image.mime, "image/webp");
+        assert!(text.iter().any(|part| {
+            part.contains("the attached image is the one from this link: https://x.com/a/status/1")
+        }));
+        assert_eq!(diagnostics, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_link_image_that_wont_decode_costs_the_picture_not_the_answer() {
+        let (text, image, diagnostics) = link_image_prompt(attached(b"undecodable"), None);
+        assert_eq!(image, None);
+        assert!(text.iter().any(|part| {
+            part.contains("this link has an image you could not see: https://x.com/a/status/1")
+        }));
+        assert_eq!(diagnostics, vec!["AI link image: invalid image".to_owned()]);
+    }
+
+    #[test]
+    fn a_link_image_with_no_media_runtime_to_prepare_it_is_announced_as_missing() {
+        let mut service = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        );
+        let mut request = input();
+        request.link_image = attached(b"tweet photo");
+        assert!(service.prepare(request).is_ok());
+        let prompts = service.provider.prompts.borrow();
+        let last = format!("{:?}", prompts[0].last().must().content);
+        assert!(last.contains("this link has an image you could not see"));
+        assert!(!last.contains("Attached image"));
+    }
+
+    #[test]
+    fn a_link_image_the_model_cant_get_is_announced_without_an_attachment() {
+        let unavailable = LinkImage::Unavailable {
+            source_url: "https://x.com/a/status/1".to_owned(),
+        };
+        let (text, image, _) = link_image_prompt(unavailable.clone(), None);
+        assert_eq!(image, None);
+        assert!(text.iter().any(|part| part.contains("could not see")));
+        assert!(!text.iter().any(|part| part.contains("Attached image")));
+
+        // The sender's own photo keeps the slot, and the note still holds.
+        let (text, image, _) = link_image_prompt(unavailable, Some("synthetic-image"));
+        assert_eq!(image.must().bytes.as_ref(), b"direct image synthetic-image");
+        assert!(text.iter().any(|part| part.contains("could not see")));
+    }
+
+    #[test]
+    fn turns_without_a_link_image_get_no_note() {
+        let (text, image, _) = link_image_prompt(LinkImage::None, None);
+        assert_eq!(image, None);
+        assert!(!text.iter().any(|part| part.contains("this link")));
+    }
+
+    #[test]
+    fn link_image_notes_are_localized() {
+        let source_url = "https://x.com/a/status/1".to_owned();
+        let image = LinkImage::Unavailable {
+            source_url: source_url.clone(),
+        };
+        assert!(
+            link_image_note(&image, false, Locale::Es)
+                .must()
+                .starts_with("este link tiene una imagen que no pudiste ver")
+        );
+        assert!(
+            link_image_note(&attached(b"x"), true, Locale::Es)
+                .must()
+                .starts_with("la imagen adjunta es la de este link")
+        );
+        assert_eq!(link_image_note(&LinkImage::None, true, Locale::Es), None);
     }
 
     #[test]

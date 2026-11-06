@@ -121,7 +121,7 @@ use thiserror::Error;
 
 use crate::ai_dispatch::{
     AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, CreditlessLimit,
-    reply_context,
+    LinkImage, reply_context,
 };
 use crate::runtime::{HandlerErrorDisposition, UpdateHandler};
 use crate::telegram_stream::{StreamFinalizeError, TelegramAiStream};
@@ -1009,16 +1009,45 @@ pub struct LinkReplacementLoad {
     pub replacement: LinkReplacement,
     pub context: Option<String>,
     pub oversized_video: Option<Vec<u8>>,
+    /// The first picture among the previews, for an AI turn on the same links.
+    pub image_url: Option<String>,
     pub diagnostics: Vec<String>,
+}
+
+/// The links an AI turn is about, which can sit in the message or in the one
+/// it replies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkContextRequest<'a> {
+    pub text: &'a str,
+    pub replied_text: Option<&'a str>,
+    /// The message's own links were already previewed by the link fix.
+    pub own_links_known: bool,
+    pub own_image_url: Option<&'a str>,
+    /// Someone asked the bot and no other media fills the prompt's image slot.
+    pub wants_image: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkContext {
+    pub text: Option<String>,
+    pub image: LinkImage,
+    pub diagnostics: Vec<String>,
+}
+
+/// What the link fix learned about the message's links.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrefetchedLinks {
+    context: Option<String>,
+    image_url: Option<String>,
 }
 
 pub trait LinkReplacementSource {
     fn load(&mut self, text: &str, now_unix: i64) -> LinkReplacementLoad;
 
-    /// Bounded title/description context for links in a message the AI will
-    /// answer, fetched under a short deadline. `None` when nothing is known.
-    fn preview_context(&mut self, _text: &str) -> Option<String> {
-        None
+    /// Bounded context for the links of a message the AI will answer, fetched
+    /// under a short deadline. Empty when nothing is known.
+    fn preview_context(&mut self, _request: LinkContextRequest<'_>) -> LinkContext {
+        LinkContext::default()
     }
 }
 
@@ -1212,7 +1241,7 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     trigger_words: Vec<String>,
     /// Link preview context already fetched by link replacement for the
     /// current message, so the AI turn does not fetch it again.
-    prefetched_link_context: Option<Option<String>>,
+    prefetched_links: Option<PrefetchedLinks>,
     last_outcome: Option<DispatchOutcome>,
     /// Why parts of the current update failed or degraded.
     state_diagnostics: Vec<String>,
@@ -1278,7 +1307,7 @@ where
             poll_update_sink: None,
             ai_conversation_source: None,
             trigger_words: vec!["bot".to_owned(), "assistant".to_owned()],
-            prefetched_link_context: None,
+            prefetched_links: None,
             last_outcome: None,
             state_diagnostics: Vec::new(),
             diagnostic_log: None,
@@ -1545,6 +1574,45 @@ where
     }
 
     /// Stored metadata for the bot message this message replies to.
+    /// Gathers what's behind the links in a message the AI will answer and in
+    /// the message it replies to, so the model doesn't have to go looking.
+    fn ai_link_context(
+        &mut self,
+        text: &str,
+        replied_text: Option<&str>,
+        wants_image: bool,
+    ) -> LinkContext {
+        let prefetched = self.prefetched_links.take();
+        let replied_text = replied_text.filter(|replied| text_without_links(replied) != *replied);
+        let has_links =
+            prefetched.is_some() || replied_text.is_some() || text_without_links(text) != text;
+        let mut context = if has_links {
+            self.link_replacement_source
+                .as_mut()
+                .map(|source| {
+                    source.preview_context(LinkContextRequest {
+                        text,
+                        replied_text,
+                        own_links_known: prefetched.is_some(),
+                        own_image_url: prefetched
+                            .as_ref()
+                            .and_then(|links| links.image_url.as_deref()),
+                        wants_image,
+                    })
+                })
+                .unwrap_or_default()
+        } else {
+            LinkContext::default()
+        };
+        self.state_diagnostics.append(&mut context.diagnostics);
+        let known = prefetched.and_then(|links| links.context);
+        context.text = match (known, context.text.take()) {
+            (Some(known), Some(read)) => Some(format!("{known}\n\n{read}")),
+            (known, read) => known.or(read),
+        };
+        context
+    }
+
     fn replied_bot_metadata(
         &mut self,
         message: &IncomingMessage,
@@ -1598,7 +1666,10 @@ where
         let load = source.load(text, timestamp);
         self.state_diagnostics.extend(load.diagnostics);
         if addressed {
-            self.prefetched_link_context = Some(load.context.clone());
+            self.prefetched_links = Some(PrefetchedLinks {
+                context: load.context.clone(),
+                image_url: load.image_url.clone(),
+            });
         }
         let shared_by = message.sender_username.as_deref().map_or_else(
             || {
@@ -5276,6 +5347,7 @@ where
             timestamp,
             spontaneous,
             link_context: None,
+            link_image: LinkImage::None,
         };
         if evaluation == ResponseRoutingEvaluation::Ignore {
             if let Some(source) = self.ai_conversation_source.as_mut()
@@ -5286,16 +5358,14 @@ where
             }
             return Ok(DispatchOutcome::Handled);
         }
-        let link_context = match self.prefetched_link_context.take() {
-            Some(context) => context,
-            None if text_without_links(ai_prompt_text) != ai_prompt_text => self
-                .link_replacement_source
-                .as_mut()
-                .and_then(|source| source.preview_context(ai_prompt_text)),
-            None => None,
-        };
+        let link_context = self.ai_link_context(
+            ai_prompt_text,
+            message.replied_text.as_deref(),
+            !spontaneous && content.photo_file_id.is_none() && content.audio_file_id.is_none(),
+        );
         let input = AiConversationInput {
-            link_context,
+            link_context: link_context.text,
+            link_image: link_context.image,
             ..input
         };
 
@@ -5497,6 +5567,7 @@ where
             timestamp,
             spontaneous: false,
             link_context: None,
+            link_image: LinkImage::None,
         };
         // Downloading and converting media can take a while; show that the
         // bot is working. Best effort: the reply does not depend on it.
@@ -5655,6 +5726,7 @@ where
             timestamp,
             spontaneous: false,
             link_context: None,
+            link_image: LinkImage::None,
         };
         let (preparation, stream_finalize, ignored_edit_failures, thinking_status_failed) = {
             let Some(source) = self.ai_conversation_source.as_mut() else {
@@ -5890,7 +5962,7 @@ where
         {
             return Ok(outcome);
         }
-        self.prefetched_link_context = None;
+        self.prefetched_links = None;
         if !content.text.starts_with('/') && has_replaceable_link(&content.text) {
             let addressed = self.is_addressed_to_bot(message, &content.text, &config);
             if let Some(outcome) =
@@ -6851,9 +6923,10 @@ mod tests {
     use num_bigint::BigInt;
     use serde_json::{Map, Value, json};
 
+    use super::{LinkContext, LinkContextRequest};
     use crate::ai_dispatch::{
         AiConversationInput, AiConversationSource, AiDelivery, AiPreparation, AiReplyMetadata,
-        AiStreamEvent, CreditlessLimit,
+        AiStreamEvent, CreditlessLimit, LinkImage,
     };
 
     use super::LightningCheckout;
@@ -7427,14 +7500,20 @@ mod tests {
                 replacement: self.replacement.clone(),
                 context: self.context.clone(),
                 oversized_video: self.oversized_video.clone(),
+                image_url: None,
                 diagnostics: self.diagnostics.clone(),
             }
         }
 
-        fn preview_context(&mut self, text: &str) -> Option<String> {
-            self.preview
-                .as_ref()
-                .map(|preview| format!("{preview} for {text}"))
+        fn preview_context(&mut self, request: LinkContextRequest<'_>) -> LinkContext {
+            LinkContext {
+                text: self
+                    .preview
+                    .as_ref()
+                    .filter(|_| !request.own_links_known)
+                    .map(|preview| format!("{preview} for {}", request.text)),
+                ..LinkContext::default()
+            }
         }
     }
 
@@ -21045,6 +21124,7 @@ mod tests {
                 },
                 context: None,
                 oversized_video: None,
+                image_url: None,
                 diagnostics: Vec::new(),
             }
         }
@@ -21145,6 +21225,199 @@ mod tests {
             "https://fixupx.com/a/status/1\n\ncompartido por @tester"
         );
         assert_eq!(prepared.borrow().len(), 1);
+    }
+
+    struct RecordedLinkRequest {
+        replied_text: Option<String>,
+        own_links_known: bool,
+        own_image_url: Option<String>,
+        wants_image: bool,
+    }
+
+    /// Records what the AI turn asks about its links and answers the same.
+    #[derive(Clone)]
+    struct RecordingLinks {
+        requests: Rc<RefCell<Vec<RecordedLinkRequest>>>,
+        load_context: Option<String>,
+        load_image: Option<String>,
+        answer: LinkContext,
+    }
+
+    impl RecordingLinks {
+        fn answering(answer: LinkContext) -> Self {
+            Self {
+                requests: Rc::new(RefCell::new(Vec::new())),
+                load_context: None,
+                load_image: None,
+                answer,
+            }
+        }
+    }
+
+    impl LinkReplacementSource for RecordingLinks {
+        fn load(&mut self, text: &str, _now_unix: i64) -> LinkReplacementLoad {
+            LinkReplacementLoad {
+                replacement: LinkReplacement {
+                    text: text.replace("x.com", "fixupx.com"),
+                    changed: true,
+                    original_links: vec![text.to_owned()],
+                },
+                context: self.load_context.clone(),
+                oversized_video: None,
+                image_url: self.load_image.clone(),
+                diagnostics: Vec::new(),
+            }
+        }
+
+        fn preview_context(&mut self, request: LinkContextRequest<'_>) -> LinkContext {
+            self.requests.borrow_mut().push(RecordedLinkRequest {
+                replied_text: request.replied_text.map(str::to_owned),
+                own_links_known: request.own_links_known,
+                own_image_url: request.own_image_url.map(str::to_owned),
+                wants_image: request.wants_image,
+            });
+            self.answer.clone()
+        }
+    }
+
+    fn photo_answer() -> LinkContext {
+        LinkContext {
+            text: Some("LINKS DEL MENSAJE RESPONDIDO:\n1. tweet".to_owned()),
+            image: LinkImage::Attached {
+                bytes: std::sync::Arc::from(&b"pixels"[..]),
+                source_url: "https://x.com/a/status/1".to_owned(),
+            },
+            diagnostics: vec!["AI link image: synthetic".to_owned()],
+        }
+    }
+
+    #[test]
+    fn replying_to_a_link_brings_its_context_and_photo_to_the_ai_turn() {
+        let (source, (prepared, _ignored, _deliveries)) =
+            ai_source(Ok(AiPreparation::reply("respuesta", None)));
+        let links = RecordingLinks::answering(photo_answer());
+        let requests = Rc::clone(&links.requests);
+        let mut dispatcher = dispatcher()
+            .with_link_replacement_source(Box::new(links))
+            .with_ai_conversation_source(Box::new(source));
+        let mut message = group_link_message("@mybot real?");
+        message.has_reply = true;
+        message.replied_message_id = Some(MessageId(3));
+        message.replied_text = Some("https://fixupx.com/a/status/1 compartido por @ana".to_owned());
+        assert_eq!(
+            dispatcher.dispatch(wrap_message(message)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(requests.borrow().len(), 1);
+        assert_eq!(
+            requests.borrow()[0].replied_text.as_deref(),
+            Some("https://fixupx.com/a/status/1 compartido por @ana")
+        );
+        assert!(!requests.borrow()[0].own_links_known);
+        assert!(requests.borrow()[0].wants_image);
+        assert_eq!(prepared.borrow()[0].link_context, photo_answer().text);
+        assert_eq!(prepared.borrow()[0].link_image, photo_answer().image);
+        assert!(
+            dispatcher
+                .state_diagnostics()
+                .contains(&"AI link image: synthetic".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_message_with_its_own_media_keeps_the_prompts_image_slot() {
+        for (photo, audio) in [(true, false), (false, true)] {
+            let (source, _) = ai_source(Ok(AiPreparation::reply("respuesta", None)));
+            let links = RecordingLinks::answering(LinkContext::default());
+            let requests = Rc::clone(&links.requests);
+            let mut dispatcher = dispatcher()
+                .with_link_replacement_source(Box::new(links))
+                .with_ai_conversation_source(Box::new(source));
+            let mut message = group_link_message("@mybot real? https://example.com/nota");
+            message.content = Some(MessageContent {
+                text: "@mybot real? https://example.com/nota".to_owned(),
+                photo_file_id: photo.then(|| "synthetic-photo".to_owned()),
+                audio_file_id: audio.then(|| "synthetic-audio".to_owned()),
+            });
+            assert_eq!(
+                dispatcher.dispatch(wrap_message(message)),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(!requests.borrow()[0].wants_image);
+        }
+    }
+
+    #[test]
+    fn spontaneous_replies_read_the_link_but_never_ask_for_its_photo() {
+        let (source, _) = ai_source(Ok(AiPreparation::reply("respuesta", None)));
+        let links = RecordingLinks::answering(LinkContext::default());
+        let requests = Rc::clone(&links.requests);
+        let mut dispatcher = configured(
+            ChatConfig {
+                ai_random_replies: true,
+                link_mode: "off".to_owned(),
+                ..ChatConfig::default()
+            },
+            Actions::default(),
+        )
+        .with_trigger_words(vec!["gordo".to_owned()])
+        .with_link_replacement_source(Box::new(links))
+        .with_ai_conversation_source(Box::new(source));
+        dispatcher.random.choice_index = 0;
+        assert_eq!(
+            dispatcher.dispatch(group_link_update("che gordo mirá https://example.com/nota")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(requests.borrow().len(), 1);
+        assert!(!requests.borrow()[0].wants_image);
+    }
+
+    #[test]
+    fn turns_without_links_anywhere_skip_the_link_reader() {
+        let (source, (prepared, _ignored, _deliveries)) =
+            ai_source(Ok(AiPreparation::reply("respuesta", None)));
+        let links = RecordingLinks::answering(photo_answer());
+        let requests = Rc::clone(&links.requests);
+        let mut dispatcher = dispatcher()
+            .with_link_replacement_source(Box::new(links))
+            .with_ai_conversation_source(Box::new(source));
+        let mut message = group_link_message("@mybot real?");
+        message.has_reply = true;
+        message.replied_message_id = Some(MessageId(3));
+        message.replied_text = Some("sin links".to_owned());
+        assert_eq!(
+            dispatcher.dispatch(wrap_message(message)),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(requests.borrow().is_empty());
+        assert_eq!(prepared.borrow()[0].link_context, None);
+        assert_eq!(prepared.borrow()[0].link_image, LinkImage::None);
+    }
+
+    #[test]
+    fn the_link_fixs_preview_joins_what_the_reader_adds() {
+        let (source, (prepared, _ignored, _deliveries)) =
+            ai_source(Ok(AiPreparation::reply("respuesta", None)));
+        let mut links = RecordingLinks::answering(photo_answer());
+        links.load_context = Some("LINKS DEL MENSAJE:\n1. fixed".to_owned());
+        links.load_image = Some("https://cdn.test/fixed.png".to_owned());
+        let requests = Rc::clone(&links.requests);
+        let mut dispatcher = dispatcher()
+            .with_link_replacement_source(Box::new(links))
+            .with_ai_conversation_source(Box::new(source));
+        assert_eq!(
+            dispatcher.dispatch(group_link_update("@mybot qué es https://x.com/a/status/1")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(requests.borrow()[0].own_links_known);
+        assert_eq!(
+            requests.borrow()[0].own_image_url.as_deref(),
+            Some("https://cdn.test/fixed.png")
+        );
+        assert_eq!(
+            prepared.borrow()[0].link_context.as_deref(),
+            Some("LINKS DEL MENSAJE:\n1. fixed\n\nLINKS DEL MENSAJE RESPONDIDO:\n1. tweet")
+        );
     }
 
     #[test]

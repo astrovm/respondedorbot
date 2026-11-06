@@ -78,6 +78,29 @@ where
     }
 }
 
+/// Tells the model what the tweet shows that this tool can't, so it neither
+/// guesses at it nor goes chasing the media link.
+fn tweet_media_note(
+    locale: Locale,
+    photos: usize,
+    videos: usize,
+    unavailable: bool,
+) -> Option<String> {
+    let total = if unavailable {
+        photos + videos + 1
+    } else {
+        photos + videos
+    };
+    (total > 0).then(|| match locale {
+        Locale::Es => format!(
+            "Tiene {total} foto(s) o video(s) que esta herramienta no muestra. Si no ves la imagen en el mensaje, decí que no la viste y no adivines qué muestra."
+        ),
+        Locale::En => format!(
+            "It has {total} photo(s) or video(s) this tool can't show. If you can't see the image in the message, say you didn't see it and don't guess what it shows."
+        ),
+    })
+}
+
 fn fetch<Transport: WebFetchTransport, Resolver: HostResolver>(
     transport: &Transport,
     resolver: &Resolver,
@@ -107,6 +130,18 @@ fn fetch<Transport: WebFetchTransport, Resolver: HostResolver>(
             if !tweet.text.is_empty() {
                 parts.push(tweet.text);
             }
+            if let Some(quote) = tweet.quote {
+                parts.push(match locale {
+                    Locale::Es => format!("Cita un tweet de {}: {}", quote.author, quote.text),
+                    Locale::En => format!("Quotes a tweet by {}: {}", quote.author, quote.text),
+                });
+            }
+            parts.extend(tweet_media_note(
+                locale,
+                tweet.photos.len(),
+                tweet.video_count,
+                tweet.media_unavailable,
+            ));
             ToolExecutionResult::output(if parts.is_empty() {
                 localized(
                     locale,
@@ -123,7 +158,7 @@ fn fetch<Transport: WebFetchTransport, Resolver: HostResolver>(
                 "no se pudo leer el tweet",
                 "could not read the tweet",
             ),
-            vec![format!("Twitter oEmbed failed for {url}")],
+            vec![format!("Tweet read failed for {url}")],
         ),
         Ok(AiFetchOutcome::Page(page)) => {
             if page.content.contains("Something went wrong") && page.content.contains("Try again") {
@@ -322,6 +357,60 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1);
     }
 
+    fn fx_down() -> WebFetchResponse {
+        WebFetchResponse {
+            status_code: 503,
+            content_type: "application/json".to_owned(),
+            location: None,
+            body: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn tweet_output_shows_the_quote_and_warns_about_media_it_cannot_show() {
+        let payload = serde_json::json!({
+            "code": 200,
+            "tweet": {
+                "text": "A status.",
+                "author": {"name": "Example User"},
+                "media": {"all": [{"type": "photo", "url": "https://pbs.twimg.com/a.jpg"}]},
+                "quote": {"text": "The original.", "author": {"name": "Original"}}
+            }
+        })
+        .to_string();
+        let mut tool = make_tool(vec![Ok(response("application/json", &payload))], Locale::En);
+        assert_eq!(
+            tool.execute(request("https://x.com/user/status/123"), "call")
+                .output,
+            "Tweet by Example User\nA status.\nQuotes a tweet by Original: The original.\nIt has 1 photo(s) or video(s) this tool can't show. If you can't see the image in the message, say you didn't see it and don't guess what it shows."
+        );
+
+        let mut tool = make_tool(vec![Ok(response("application/json", &payload))], Locale::Es);
+        assert!(
+            tool.execute(request("https://x.com/user/status/123"), "call")
+                .output
+                .contains("Cita un tweet de Original: The original.")
+        );
+
+        let oembed = serde_json::json!({
+            "html": "<blockquote><p>A status. pic.twitter.com/abc</p></blockquote>"
+        })
+        .to_string();
+        let mut tool = make_tool(
+            vec![Ok(fx_down()), Ok(response("application/json", &oembed))],
+            Locale::Es,
+        );
+        let output = tool
+            .execute(request("https://x.com/user/status/123"), "call")
+            .output;
+        assert!(
+            output.starts_with("A status.\nTiene 1 foto(s) o video(s)"),
+            "{output}"
+        );
+        assert!(!output.contains("pic.twitter.com"));
+    }
+
     #[test]
     fn renders_direct_tweets_and_localizes_empty_oembed_content() {
         let payload = serde_json::json!({
@@ -329,7 +418,10 @@ mod tests {
             "html": "<blockquote><p>A status update.</p><a>Jan 1, 2020</a></blockquote>"
         })
         .to_string();
-        let mut tool = make_tool(vec![Ok(response("application/json", &payload))], Locale::En);
+        let mut tool = make_tool(
+            vec![Ok(fx_down()), Ok(response("application/json", &payload))],
+            Locale::En,
+        );
         assert_eq!(
             tool.execute(request("https://x.com/user/status/123"), "call")
                 .output,
@@ -337,7 +429,10 @@ mod tests {
         );
 
         let empty = serde_json::json!({"html": "<blockquote></blockquote>"}).to_string();
-        let mut tool = make_tool(vec![Ok(response("application/json", &empty))], Locale::Es);
+        let mut tool = make_tool(
+            vec![Ok(fx_down()), Ok(response("application/json", &empty))],
+            Locale::Es,
+        );
         assert_eq!(
             tool.execute(request("https://x.com/user/status/123"), "call")
                 .output,
@@ -348,7 +443,10 @@ mod tests {
             "html": "<blockquote><p>Actualización sintética.</p><a>Sep 2, 2026</a></blockquote>"
         })
         .to_string();
-        let mut tool = make_tool(vec![Ok(response("application/json", &dated))], Locale::Es);
+        let mut tool = make_tool(
+            vec![Ok(fx_down()), Ok(response("application/json", &dated))],
+            Locale::Es,
+        );
         assert_eq!(
             tool.execute(request("https://x.com/user/status/123"), "call")
                 .output,
@@ -398,16 +496,7 @@ mod tests {
         assert!(result.output.contains("error fetching"));
         assert!(result.diagnostics[0].contains("timed out"));
 
-        let mut tool = make_tool(
-            vec![Ok(WebFetchResponse {
-                status_code: 503,
-                content_type: "application/json".to_owned(),
-                location: None,
-                body: Vec::new(),
-                truncated: false,
-            })],
-            Locale::Es,
-        );
+        let mut tool = make_tool(vec![Ok(fx_down()), Ok(fx_down())], Locale::Es);
         assert_eq!(
             tool.execute(request("https://x.com/user/status/123"), "call")
                 .output,
@@ -446,7 +535,10 @@ mod tests {
             "html": "<blockquote><p>Hola.</p></blockquote>"
         })
         .to_string();
-        let mut tool = make_tool(vec![Ok(response("application/json", &payload))], Locale::Es);
+        let mut tool = make_tool(
+            vec![Ok(fx_down()), Ok(response("application/json", &payload))],
+            Locale::Es,
+        );
         assert_eq!(
             tool.execute(request("https://x.com/user/status/123"), "call")
                 .output,
@@ -466,19 +558,10 @@ mod tests {
             ["web_fetch blocked URL http://127.0.0.1/secret"]
         );
 
-        let mut tool = make_tool(
-            vec![Ok(WebFetchResponse {
-                status_code: 404,
-                content_type: "application/json".to_owned(),
-                location: None,
-                body: Vec::new(),
-                truncated: false,
-            })],
-            Locale::En,
-        );
+        let mut tool = make_tool(vec![Ok(fx_down()), Ok(fx_down())], Locale::En);
         let failed = tool.execute(request("https://x.com/user/status/123"), "call");
         assert_eq!(failed.output, "could not read the tweet");
         assert_eq!(failed.diagnostics.len(), 1);
-        assert!(failed.diagnostics[0].starts_with("Twitter oEmbed failed for "));
+        assert!(failed.diagnostics[0].starts_with("Tweet read failed for "));
     }
 }

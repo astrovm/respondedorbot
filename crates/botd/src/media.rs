@@ -109,6 +109,12 @@ pub trait MediaRuntime {
         file_id: &str,
     ) -> Result<Option<PreparedImagePrompt>, String>;
 
+    /// Same as [`Self::prepare_image_for_prompt`], for a file already at hand.
+    fn prepare_image_bytes_for_prompt(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<PreparedImagePrompt, String>;
+
     fn execute(&mut self, prepared: PreparedMedia, prompt: &str) -> Result<MediaExecution, String>;
 }
 
@@ -284,14 +290,21 @@ where
             .download(file_id)?
             .filter(|bytes| !bytes.is_empty())
             .ok_or_else(|| MediaPipelineError::Download.to_string())?;
+        self.prepare_image_bytes_for_prompt(&bytes).map(Some)
+    }
+
+    fn prepare_image_bytes_for_prompt(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<PreparedImagePrompt, String> {
         let image = self
             .processor
-            .prepare_image(&bytes)?
+            .prepare_image(bytes)?
             .ok_or_else(|| MediaPipelineError::InvalidImage.to_string())?;
-        Ok(Some(PreparedImagePrompt {
+        Ok(PreparedImagePrompt {
             bytes: Arc::from(image.bytes),
             mime: image.mime,
-        }))
+        })
     }
 
     fn prepare(

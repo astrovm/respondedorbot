@@ -16,7 +16,7 @@ It streams replies, remembers conversations, understands media, tracks markets, 
 - **Credits.** Telegram Stars, AI credits, transfers, and charge history.
 - **Scheduled tasks.** Recurring or one-time.
 - **Polls.** Sends Telegram polls when asked, including from scheduled tasks, and reads back the votes and who voted.
-- **Links and languages.** Repairs supported links and handles localized Telegram commands.
+- **Links and languages.** Repairs supported links, reads what's behind a link in the message or the one it replies to (a tweet's text and photo, a page's title and picture), and handles localized Telegram commands.
 
 ## 🚀 Use
 

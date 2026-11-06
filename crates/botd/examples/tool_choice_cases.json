@@ -15,5 +15,7 @@
   {"prompt": "armá una encuesta: asado o pizza el sábado?", "expect": [{"tool": "create_poll", "args_any": ["asado"]}]},
   {"prompt": "elegí uno al azar: rojo, azul o verde", "expect": [{"tool": "random_choice", "args_any": ["rojo"]}]},
   {"prompt": "quién ganó el último Boca-River?", "expect": [{"tool": "web_search", "args_any": ["boca"]}]},
-  {"prompt": "hola, todo bien?", "expect": []}
+  {"prompt": "hola, todo bien?", "expect": []},
+  {"prompt": "real?", "reply": "Gordo (@gordo): https://fixupx.com/example_user/status/1", "history": "Ana: salió el powerball, un ticket en new jersey se llevó 847 palos", "link_context": "LINKS DEL MENSAJE RESPONDIDO:\n1. https://x.com/example_user/status/1\nautor: Example User\ntexto: Cerró el banco de ejemplo y nadie avisó.", "args_none": ["powerball", "847", "new jersey"], "expect": []},
+  {"prompt": "qué muestra la foto?", "reply": "Gordo (@gordo): https://fixupx.com/example_user/status/2", "link_context": "LINKS DEL MENSAJE RESPONDIDO:\n1. https://x.com/example_user/status/2\nautor: Example User\ntexto: Miren esto.\nfotos: 1\n\neste link tiene una imagen que no pudiste ver: https://x.com/example_user/status/2. Si la respuesta depende de ella, decilo y no adivines qué muestra.", "args_none": ["pic.twitter.com"], "expect": []}
 ]

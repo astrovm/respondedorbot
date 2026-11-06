@@ -19,7 +19,8 @@ use bot_adapters::openrouter_chat::{
     ChatCompletionRequest, ChatMessage, ChatRole, ToolCall, complete,
 };
 use bot_core::ai_prompt::{
-    ConversationPromptInput, PromptContent, build_conversation_prompt, build_system_prompt,
+    ConversationPromptInput, HistoryMessage, PromptContent, PromptRole, build_conversation_prompt,
+    build_system_prompt,
 };
 use bot_core::locale::Locale;
 use botd::native_ai::PRIMARY_CHAT_MODEL;
@@ -31,6 +32,18 @@ struct Case {
     prompt: String,
     #[serde(default)]
     locale: Option<String>,
+    /// The message this one replies to.
+    #[serde(default)]
+    reply: Option<String>,
+    /// What the bot read from the links, as the prompt would show it.
+    #[serde(default)]
+    link_context: Option<String>,
+    /// An earlier chat message, usually about something else.
+    #[serde(default)]
+    history: Option<String>,
+    /// No tool call's arguments may contain these (case-insensitive).
+    #[serde(default)]
+    args_none: Vec<String>,
     expect: Vec<Expectation>,
 }
 
@@ -64,26 +77,48 @@ fn user_message(case: &Case, locale: Locale) -> String {
         formatted_time: "12:00".to_owned(),
         timezone_offset_hours: -3,
         message_text: case.prompt.clone(),
-        reply_context: None,
+        reply_context: case.reply.clone(),
         reply_target_is_latest: false,
-        link_context: None,
+        link_context: case.link_context.clone(),
         enable_web_search: true,
         summary: None,
-        history: Vec::new(),
+        history: case
+            .history
+            .iter()
+            .map(|text| HistoryMessage {
+                role: PromptRole::User,
+                text: text.clone(),
+                tool_notes: Vec::new(),
+            })
+            .collect(),
         retrieved: Vec::new(),
     });
     conversation
-        .last()
+        .iter()
         .map(|message| match &message.content {
             PromptContent::Text(text) => text.clone(),
             PromptContent::TextParts(parts) => parts.join("\n"),
-            _ => case.prompt.clone(),
+            _ => String::new(),
         })
-        .unwrap_or_else(|| case.prompt.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn grade(case: &Case, calls: &[ToolCall]) -> Result<(), String> {
-    if case.expect.is_empty() {
+    for call in calls {
+        let arguments = call.function.arguments.to_lowercase();
+        if let Some(word) = case
+            .args_none
+            .iter()
+            .find(|word| arguments.contains(&word.to_lowercase()))
+        {
+            return Err(format!(
+                "{} went off topic with {word}: {}",
+                call.function.name, call.function.arguments
+            ));
+        }
+    }
+    if case.expect.is_empty() && case.args_none.is_empty() {
         return match calls.first() {
             Some(call) => Err(format!("expected no tool, got {}", call.function.name)),
             None => Ok(()),

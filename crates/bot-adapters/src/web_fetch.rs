@@ -22,6 +22,7 @@ use crate::http_client::{BROWSER_USER_AGENT, error_chain};
 pub const FETCH_MAX_BYTES: usize = 2_097_152;
 pub const FETCH_MAX_CHARS: usize = 12_000;
 pub const FETCH_MAX_REDIRECTS: usize = 5;
+const FXTWITTER_API_BASE: &str = "https://api.fxtwitter.com/status";
 /// A page with less visible text than this that holds an iframe is a wrapper
 /// around the iframe's page.
 const IFRAME_WRAPPER_MAX_CHARS: usize = 200;
@@ -82,6 +83,17 @@ impl ReqwestWebFetchTransport {
         })
         .map(|client| Self { client })
         .map_err(classify_error)
+    }
+
+    /// A transport whose every request ends within `timeout`, for reads that
+    /// are optional context and must not hold up a reply.
+    pub fn with_timeout(timeout: Duration) -> Result<Self, WebFetchTransportError> {
+        Client::builder()
+            .timeout(timeout)
+            .redirect(Policy::none())
+            .build()
+            .map(|client| Self { client })
+            .map_err(classify_error)
     }
 }
 
@@ -183,17 +195,16 @@ impl PublicFetchError {
     }
 }
 
-pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
+/// Follows redirects from `url`, checking every hop is public, and returns
+/// the first successful response. `url` ends up at the address that answered.
+fn fetch_public_response<T: WebFetchTransport, R: HostResolver>(
     transport: &T,
     resolver: &R,
-    raw_url: &str,
-) -> Result<WebFetchContent, PublicFetchError> {
-    let mut url = normalize_http_url(raw_url).ok_or_else(|| PublicFetchError::Blocked {
-        url: raw_url.trim().to_owned(),
-    })?;
-    let mut redirect_count = 0;
+    url: &mut Url,
+    redirect_count: &mut usize,
+) -> Result<WebFetchResponse, PublicFetchError> {
     loop {
-        ensure_public(&url, resolver)?;
+        ensure_public(url, resolver)?;
         let response = transport
             .get(url.as_str())
             .map_err(|error| PublicFetchError::Request {
@@ -207,8 +218,8 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
                     detail: "redirect response omitted Location".to_owned(),
                 });
             };
-            next_hop(&url, &mut redirect_count)?;
-            url = url
+            next_hop(url, redirect_count)?;
+            *url = url
                 .join(location)
                 .ok()
                 .and_then(|value| normalize_http_url(value.as_str()))
@@ -223,6 +234,55 @@ pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
                 detail: format!("HTTP {}", response.status_code),
             });
         }
+        return Ok(response);
+    }
+}
+
+/// Downloads a public image whole. A cut-off file would decode to garbage or
+/// not at all, so anything over the transport's byte cap is an error.
+pub fn fetch_public_image<T: WebFetchTransport, R: HostResolver>(
+    transport: &T,
+    resolver: &R,
+    raw_url: &str,
+) -> Result<Vec<u8>, PublicFetchError> {
+    let mut url = normalize_http_url(raw_url).ok_or_else(|| PublicFetchError::Blocked {
+        url: raw_url.trim().to_owned(),
+    })?;
+    let mut redirect_count = 0;
+    let response = fetch_public_response(transport, resolver, &mut url, &mut redirect_count)?;
+    let rejection = if response.truncated {
+        Some("image is over the size limit")
+    } else if !response
+        .content_type
+        .to_ascii_lowercase()
+        .starts_with("image/")
+    {
+        Some("response is not an image")
+    } else if response.body.is_empty() {
+        Some("image is empty")
+    } else {
+        None
+    };
+    match rejection {
+        Some(detail) => Err(PublicFetchError::Request {
+            url: url.to_string(),
+            detail: detail.to_owned(),
+        }),
+        None => Ok(response.body),
+    }
+}
+
+pub fn fetch_public_url<T: WebFetchTransport, R: HostResolver>(
+    transport: &T,
+    resolver: &R,
+    raw_url: &str,
+) -> Result<WebFetchContent, PublicFetchError> {
+    let mut url = normalize_http_url(raw_url).ok_or_else(|| PublicFetchError::Blocked {
+        url: raw_url.trim().to_owned(),
+    })?;
+    let mut redirect_count = 0;
+    loop {
+        let response = fetch_public_response(transport, resolver, &mut url, &mut redirect_count)?;
         let decoded = String::from_utf8_lossy(&response.body);
         let is_html = response.content_type.to_ascii_lowercase().contains("html")
             || response
@@ -296,6 +356,18 @@ pub struct TweetContent {
     pub author: String,
     pub date: String,
     pub text: String,
+    pub quote: Option<QuotedTweet>,
+    /// Photos of the tweet, or of the tweet it quotes when it has none.
+    pub photos: Vec<String>,
+    pub video_count: usize,
+    /// The tweet has media this read could not get an address for.
+    pub media_unavailable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotedTweet {
+    pub author: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,12 +387,14 @@ pub fn fetch_ai_url<T: WebFetchTransport, R: HostResolver>(
     render: bool,
 ) -> Result<AiFetchOutcome, PublicFetchError> {
     if let Some(canonical_url) = canonical_tweet_url(raw_url) {
-        return Ok(
-            fetch_tweet_oembed(transport, resolver, &canonical_url).map_or_else(
-                || AiFetchOutcome::TweetError { url: canonical_url },
-                AiFetchOutcome::Tweet,
-            ),
-        );
+        return Ok(fetch_tweet(transport, resolver, raw_url).map_or_else(
+            || AiFetchOutcome::TweetError { url: canonical_url },
+            AiFetchOutcome::Tweet,
+        ));
+    }
+    // Links without a username still name the tweet by its id.
+    if let Some(tweet) = fetch_tweet_api(transport, resolver, raw_url) {
+        return Ok(AiFetchOutcome::Tweet(tweet));
     }
     let page = fetch_public_url(transport, resolver, raw_url)?;
     if is_twitter_frontend(raw_url)
@@ -406,6 +480,139 @@ fn is_twitter_frontend(raw_url: &str) -> bool {
         })
 }
 
+/// The id of the tweet a link on a Twitter frontend points at.
+fn tweet_status_id(raw_url: &str) -> Option<String> {
+    let url = normalize_http_url(raw_url)?;
+    if !is_twitter_frontend(url.as_str()) {
+        return None;
+    }
+    let segments = url.path_segments()?.collect::<Vec<_>>();
+    let status_id = match segments.as_slice() {
+        ["status", id, ..] | ["i", "web", "status", id, ..] | [_, "status", id, ..] => *id,
+        _ => return None,
+    };
+    (!status_id.is_empty() && status_id.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| status_id.to_owned())
+}
+
+/// Whether [`fetch_tweet`] can read this link.
+#[must_use]
+pub fn is_tweet_link(raw_url: &str) -> bool {
+    tweet_status_id(raw_url).is_some()
+}
+
+/// Reads a tweet from FxTwitter, which also gives its photos. oEmbed only
+/// covers the text, so it is the fallback for when FxTwitter is down.
+pub fn fetch_tweet<T: WebFetchTransport, R: HostResolver>(
+    transport: &T,
+    resolver: &R,
+    raw_url: &str,
+) -> Option<TweetContent> {
+    fetch_tweet_api(transport, resolver, raw_url).or_else(|| {
+        let canonical_url = canonical_tweet_url(raw_url)?;
+        fetch_tweet_oembed(transport, resolver, &canonical_url)
+    })
+}
+
+fn fetch_tweet_api<T: WebFetchTransport, R: HostResolver>(
+    transport: &T,
+    resolver: &R,
+    raw_url: &str,
+) -> Option<TweetContent> {
+    let status_id = tweet_status_id(raw_url)?;
+    let mut endpoint = Url::parse(&format!("{FXTWITTER_API_BASE}/{status_id}")).ok()?;
+    let mut redirect_count = 0;
+    let response =
+        fetch_public_response(transport, resolver, &mut endpoint, &mut redirect_count).ok()?;
+    let payload: Value = serde_json::from_slice(&response.body).ok()?;
+    let tweet = payload
+        .get("tweet")
+        .filter(|_| payload.get("code").and_then(Value::as_i64) == Some(200))?;
+    let (mut photos, mut video_count) = tweet_media(tweet);
+    let quote = tweet.get("quote").filter(|quote| quote.is_object());
+    if let Some(quote) = quote.filter(|_| photos.is_empty() && video_count == 0) {
+        (photos, video_count) = tweet_media(quote);
+    }
+    Some(TweetContent {
+        url: json_text(tweet, "url")
+            .or_else(|| canonical_tweet_url(raw_url))
+            .unwrap_or_else(|| format!("https://x.com/i/status/{status_id}")),
+        author: tweet_author(tweet),
+        date: json_text(tweet, "created_at").unwrap_or_default(),
+        text: json_text(tweet, "text").unwrap_or_default(),
+        quote: quote.map(|quote| QuotedTweet {
+            author: tweet_author(quote),
+            text: json_text(quote, "text").unwrap_or_default(),
+        }),
+        photos,
+        video_count,
+        media_unavailable: false,
+    })
+}
+
+fn json_text(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn tweet_author(tweet: &Value) -> String {
+    tweet
+        .get("author")
+        .and_then(|author| json_text(author, "name"))
+        .unwrap_or_default()
+}
+
+/// The tweet's photo addresses and how many of its other media it has.
+fn tweet_media(tweet: &Value) -> (Vec<String>, usize) {
+    let items = tweet
+        .pointer("/media/all")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let is_photo = |item: &&Value| item.get("type").and_then(Value::as_str) == Some("photo");
+    let photos = items
+        .iter()
+        .filter(is_photo)
+        .filter_map(|item| json_text(item, "url"))
+        .map(|url| bounded_photo_url(&url))
+        .collect();
+    let others = items.iter().filter(|item| !is_photo(item)).count();
+    (photos, others)
+}
+
+/// FxTwitter links the original upload, which can pass the download cap. The
+/// model only gets a small copy, so the "large" size loses nothing.
+fn bounded_photo_url(url: &str) -> String {
+    url.replace("name=orig", "name=large")
+}
+
+/// Drops the `pic.twitter.com` links oEmbed leaves in the text. They open a
+/// login wall, and they are the only sign the tweet has media.
+fn strip_media_links(text: &str) -> (String, bool) {
+    let is_media_link = |word: &&str| {
+        word.strip_prefix("https://")
+            .unwrap_or(word)
+            .starts_with("pic.twitter.com/")
+            || word
+                .strip_prefix("https://")
+                .unwrap_or(word)
+                .starts_with("pic.x.com/")
+    };
+    if !text.split_whitespace().any(|word| is_media_link(&word)) {
+        return (text.to_owned(), false);
+    }
+    let kept = text
+        .split_whitespace()
+        .filter(|word| !is_media_link(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    (kept, true)
+}
+
 fn fetch_tweet_oembed<T: WebFetchTransport, R: HostResolver>(
     transport: &T,
     resolver: &R,
@@ -422,6 +629,7 @@ fn fetch_tweet_oembed<T: WebFetchTransport, R: HostResolver>(
         .get("html")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let (text, media_unavailable) = strip_media_links(&extract_first_element_text(html, "p"));
     Some(TweetContent {
         url: canonical_url.to_owned(),
         author: payload
@@ -431,7 +639,11 @@ fn fetch_tweet_oembed<T: WebFetchTransport, R: HostResolver>(
             .trim()
             .to_owned(),
         date: extract_tweet_date(html),
-        text: extract_first_element_text(html, "p"),
+        text,
+        quote: None,
+        photos: Vec::new(),
+        video_count: 0,
+        media_unavailable,
     })
 }
 
@@ -1419,7 +1631,7 @@ mod tests {
         })
         .to_string();
         let transport = Transport {
-            responses: RefCell::new(vec![Ok(json_response(&payload))]),
+            responses: RefCell::new(vec![Ok(response(503, "")), Ok(json_response(&payload))]),
             urls: RefCell::new(Vec::new()),
         };
         let result = fetch_ai_url(
@@ -1436,9 +1648,307 @@ mod tests {
                 author: "Example User".to_owned(),
                 date: "Jan 1, 2020".to_owned(),
                 text: "This is an example & safe status.".to_owned(),
+                quote: None,
+                photos: Vec::new(),
+                video_count: 0,
+                media_unavailable: false,
             }))
         );
-        assert!(transport.urls.borrow()[0].starts_with("https://publish.twitter.com/oembed?"));
+        assert_eq!(
+            transport.urls.borrow()[0],
+            "https://api.fxtwitter.com/status/123"
+        );
+        assert!(transport.urls.borrow()[1].starts_with("https://publish.twitter.com/oembed?"));
+    }
+
+    fn synthetic_tweet_payload() -> String {
+        serde_json::json!({
+            "code": 200,
+            "message": "OK",
+            "tweet": {
+                "url": "https://x.com/example_user/status/42",
+                "text": "A synthetic status.",
+                "created_at": "Thu Nov 05 16:38:53 +0000 2026",
+                "author": {"name": "Example User", "screen_name": "example_user"},
+                "media": {"all": [
+                    {"type": "photo", "url": "https://pbs.twimg.com/media/one.jpg?name=orig"},
+                    {"type": "video", "url": "https://video.twimg.com/one.mp4"},
+                    {"type": "photo", "url": "https://pbs.twimg.com/media/two.jpg?name=orig"}
+                ]}
+            }
+        })
+        .to_string()
+    }
+
+    fn public_resolver() -> Resolver {
+        Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))])
+    }
+
+    fn scripted(responses: Vec<Result<WebFetchResponse, WebFetchTransportError>>) -> Transport {
+        Transport {
+            responses: RefCell::new(responses),
+            urls: RefCell::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn tweets_come_from_fxtwitter_with_their_photos_at_a_bounded_size() {
+        let transport = scripted(vec![Ok(json_response(&synthetic_tweet_payload()))]);
+        assert_eq!(
+            fetch_tweet(
+                &transport,
+                &public_resolver(),
+                "https://fixupx.com/example_user/status/42?s=20"
+            ),
+            Some(TweetContent {
+                url: "https://x.com/example_user/status/42".to_owned(),
+                author: "Example User".to_owned(),
+                date: "Thu Nov 05 16:38:53 +0000 2026".to_owned(),
+                text: "A synthetic status.".to_owned(),
+                quote: None,
+                photos: vec![
+                    "https://pbs.twimg.com/media/one.jpg?name=large".to_owned(),
+                    "https://pbs.twimg.com/media/two.jpg?name=large".to_owned(),
+                ],
+                video_count: 1,
+                media_unavailable: false,
+            })
+        );
+        assert_eq!(
+            *transport.urls.borrow(),
+            vec!["https://api.fxtwitter.com/status/42".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_quote_tweet_borrows_the_photo_of_the_tweet_it_quotes() {
+        let payload = |own_media: Value| {
+            serde_json::json!({
+                "code": 200,
+                "tweet": {
+                    "text": "Look at this.",
+                    "author": {"name": "Quoter"},
+                    "media": own_media,
+                    "quote": {
+                        "text": "The original.",
+                        "author": {"name": "Original"},
+                        "media": {"all": [
+                            {"type": "photo", "url": "https://pbs.twimg.com/media/q.jpg"}
+                        ]}
+                    }
+                }
+            })
+            .to_string()
+        };
+        let read = |body: String| {
+            fetch_tweet(
+                &scripted(vec![Ok(json_response(&body))]),
+                &public_resolver(),
+                "https://x.com/quoter/status/7",
+            )
+        };
+        let borrowed = read(payload(Value::Null));
+        assert_eq!(
+            borrowed.as_ref().map(|tweet| tweet.photos.clone()),
+            Some(vec!["https://pbs.twimg.com/media/q.jpg".to_owned()])
+        );
+        assert_eq!(
+            borrowed.and_then(|tweet| tweet.quote),
+            Some(QuotedTweet {
+                author: "Original".to_owned(),
+                text: "The original.".to_owned(),
+            })
+        );
+        // Its own photo wins, even over a video-only quote or a richer one.
+        let own = read(payload(serde_json::json!({"all": [
+            {"type": "photo", "url": "https://pbs.twimg.com/media/own.jpg"}
+        ]})));
+        assert_eq!(
+            own.map(|tweet| tweet.photos),
+            Some(vec!["https://pbs.twimg.com/media/own.jpg".to_owned()])
+        );
+    }
+
+    #[test]
+    fn unusable_fxtwitter_answers_fall_back_to_oembed_and_flag_its_media_link() {
+        let oembed = serde_json::json!({
+            "author_name": "Example User",
+            "html": "<blockquote><p>A status. <a href='https://t.co/a'>pic.twitter.com/abc</a></p><a>Jan 1, 2020</a></blockquote>"
+        })
+        .to_string();
+        for bad_answer in [
+            "<html>not json</html>",
+            r#"{"code": 404, "message": "NOT_FOUND"}"#,
+            r#"{"code": 200}"#,
+        ] {
+            let transport = scripted(vec![
+                Ok(json_response(bad_answer)),
+                Ok(json_response(&oembed)),
+            ]);
+            let tweet = fetch_tweet(
+                &transport,
+                &public_resolver(),
+                "https://x.com/example_user/status/42",
+            );
+            assert_eq!(
+                tweet.as_ref().map(|tweet| tweet.text.as_str()),
+                Some("A status.")
+            );
+            assert_eq!(tweet.map(|tweet| tweet.media_unavailable), Some(true));
+        }
+        // Without a username, oEmbed has no address to ask for.
+        assert_eq!(
+            fetch_tweet(
+                &scripted(vec![Ok(response(503, ""))]),
+                &public_resolver(),
+                "https://fixupx.com/status/42"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn plain_tweet_text_is_not_flagged_as_having_media() {
+        assert_eq!(
+            strip_media_links("read pic.twitter.comet/abc here"),
+            ("read pic.twitter.comet/abc here".to_owned(), false)
+        );
+        assert_eq!(
+            strip_media_links("a https://pic.x.com/b c pic.twitter.com/d"),
+            ("a c".to_owned(), true)
+        );
+    }
+
+    #[test]
+    fn tweet_links_are_recognized_on_frontends_only() {
+        for tweet in [
+            "https://x.com/a/status/1",
+            "https://www.twitter.com/a/status/1/photo/1",
+            "https://fixupx.com/status/1",
+            "https://fxtwitter.com/i/web/status/1",
+            "https://xcancel.com/a/status/1#m",
+        ] {
+            assert!(is_tweet_link(tweet), "{tweet}");
+        }
+        for other in [
+            "https://x.com/a",
+            "https://x.com/a/status/12a",
+            "https://x.com/a/status/",
+            "https://x.com/a/b/status/1",
+            "https://example.com/a/status/1",
+            "not a url",
+        ] {
+            assert!(!is_tweet_link(other), "{other}");
+        }
+    }
+
+    fn image_response(body: &[u8], truncated: bool, content_type: &str) -> WebFetchResponse {
+        WebFetchResponse {
+            status_code: 200,
+            content_type: content_type.to_owned(),
+            location: None,
+            body: body.to_vec(),
+            truncated,
+        }
+    }
+
+    #[test]
+    fn public_images_download_whole_or_not_at_all() {
+        let get = |response: WebFetchResponse| {
+            fetch_public_image(
+                &scripted(vec![Ok(response)]),
+                &public_resolver(),
+                "https://example.com/a.jpg",
+            )
+        };
+        assert_eq!(
+            get(image_response(b"pixels", false, "IMAGE/JPEG")),
+            Ok(b"pixels".to_vec())
+        );
+        for (rejected, detail) in [
+            (
+                image_response(b"pix", true, "image/jpeg"),
+                "image is over the size limit",
+            ),
+            (
+                image_response(b"<html>", false, "text/html"),
+                "response is not an image",
+            ),
+            (image_response(b"", false, "image/jpeg"), "image is empty"),
+        ] {
+            assert_eq!(
+                get(rejected),
+                Err(PublicFetchError::Request {
+                    url: "https://example.com/a.jpg".to_owned(),
+                    detail: detail.to_owned(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn id_only_tweet_links_read_straight_from_fxtwitter() {
+        let transport = scripted(vec![Ok(json_response(&synthetic_tweet_payload()))]);
+        let result = fetch_ai_url(
+            &transport,
+            &public_resolver(),
+            None,
+            "https://fixupx.com/status/42",
+            false,
+        );
+        assert!(matches!(
+            result,
+            Ok(AiFetchOutcome::Tweet(ref tweet)) if tweet.text == "A synthetic status."
+        ));
+        assert_eq!(transport.urls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn image_downloads_refuse_addresses_that_are_not_web_urls() {
+        assert_eq!(
+            fetch_public_image(
+                &scripted(Vec::new()),
+                &public_resolver(),
+                " file:///etc/passwd "
+            ),
+            Err(PublicFetchError::Blocked {
+                url: "file:///etc/passwd".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn image_downloads_check_every_redirect_hop_is_public() {
+        let hop_to = |location: &str| WebFetchResponse {
+            status_code: 302,
+            content_type: String::new(),
+            location: Some(location.to_owned()),
+            body: Vec::new(),
+            truncated: false,
+        };
+        let redirected = scripted(vec![
+            Ok(hop_to("https://cdn.example.com/b.jpg")),
+            Ok(image_response(b"pixels", false, "image/png")),
+        ]);
+        assert_eq!(
+            fetch_public_image(&redirected, &public_resolver(), "https://example.com/a.jpg"),
+            Ok(b"pixels".to_vec())
+        );
+        assert_eq!(
+            fetch_public_image(
+                &scripted(vec![Ok(hop_to("http://127.0.0.1/secret.png"))]),
+                &public_resolver(),
+                "https://example.com/a.jpg"
+            ),
+            Err(PublicFetchError::Blocked {
+                url: "http://127.0.0.1/secret.png".to_owned(),
+            })
+        );
+        let private = Resolver(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]);
+        assert!(matches!(
+            fetch_public_image(&scripted(Vec::new()), &private, "https://example.com/a.jpg"),
+            Err(PublicFetchError::Blocked { .. })
+        ));
     }
 
     #[test]
@@ -1446,6 +1956,7 @@ mod tests {
         let page = r#"<html><head><meta content='https://x.com/example_user/status/456' property='og:url'></head><body>preview</body></html>"#;
         let transport = Transport {
             responses: RefCell::new(vec![
+                Ok(response(503, "")),
                 Ok(response(200, page)),
                 Ok(WebFetchResponse {
                     status_code: 503,
@@ -1469,7 +1980,7 @@ mod tests {
                 url: "https://x.com/example_user/status/456".to_owned(),
             })
         );
-        assert_eq!(transport.urls.borrow().len(), 2);
+        assert_eq!(transport.urls.borrow().len(), 3);
     }
 
     #[test]
@@ -1634,7 +2145,10 @@ mod tests {
     #[test]
     fn direct_tweets_whose_oembed_fails_report_the_canonical_url() {
         let transport = Transport {
-            responses: RefCell::new(vec![Ok(response(404, "missing"))]),
+            responses: RefCell::new(vec![
+                Ok(response(404, "gone")),
+                Ok(response(404, "missing")),
+            ]),
             urls: RefCell::new(Vec::new()),
         };
         assert_eq!(
@@ -1649,7 +2163,7 @@ mod tests {
                 url: "https://x.com/example_user/status/789".to_owned(),
             })
         );
-        assert!(transport.urls.borrow()[0].starts_with("https://publish.twitter.com/oembed?"));
+        assert!(transport.urls.borrow()[1].starts_with("https://publish.twitter.com/oembed?"));
         assert_eq!(
             extract_first_element_text("<div>no paragraph</div>", "p"),
             ""
