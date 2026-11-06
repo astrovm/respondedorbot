@@ -1489,14 +1489,14 @@ pub fn link_image_note(image: &LinkImage, attached: bool, locale: Locale) -> Opt
             _,
             Locale::Es,
         ) => Some(format!(
-            "este link tiene una imagen que no pudiste ver: {source_url}. Si la respuesta depende de ella, decilo y no adivines qué muestra."
+            "este link tiene una imagen que no pudiste ver: {source_url}. Si la respuesta depende de ella, decilo, no adivines qué muestra y no busques otros temas en su lugar."
         )),
         (
             LinkImage::Attached { source_url, .. } | LinkImage::Unavailable { source_url },
             _,
             Locale::En,
         ) => Some(format!(
-            "this link has an image you could not see: {source_url}. If the answer depends on it, say so and do not guess what it shows."
+            "this link has an image you could not see: {source_url}. If the answer depends on it, say so, do not guess what it shows and do not search for other topics instead."
         )),
     }
 }

@@ -108,18 +108,22 @@ fn turn_messages(options: &Options, reply: &str) -> Vec<ChatMessage> {
     let mut context = None;
     let mut image = None;
     if !options.old {
-        let wants_image = !options.unseen;
-        let read = read_live_link_context(LinkContextRequest {
+        let mut read = read_live_link_context(LinkContextRequest {
             text: &options.question,
             replied_text: Some(reply),
             own_links_known: false,
             own_image_url: None,
-            wants_image,
+            wants_image: true,
         })
         .unwrap_or_else(|error| {
             println!("link reader failed: {error}");
             LinkContext::default()
         });
+        if options.unseen
+            && let LinkImage::Attached { source_url, .. } = read.image
+        {
+            read.image = LinkImage::Unavailable { source_url };
+        }
         let attached = matches!(read.image, LinkImage::Attached { .. });
         let note = link_image_note(&read.image, attached, Locale::Es);
         context = Some(
