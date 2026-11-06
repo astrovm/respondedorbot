@@ -563,14 +563,16 @@ where
         &mut self,
         input: &AiConversationInput,
         operation_id: &str,
-    ) -> PreparedConversationMedia {
+    ) -> Result<PreparedConversationMedia, String> {
         let LinkImage::Attached { bytes, source_url } = &input.link_image else {
-            return PreparedConversationMedia::default();
+            return Ok(PreparedConversationMedia::default());
         };
-        let Some(media) = self.media.as_mut() else {
-            return PreparedConversationMedia::default();
-        };
-        match media.prepare_image_bytes_for_prompt(bytes) {
+        let prepared = self
+            .media
+            .as_mut()
+            .ok_or("native media runtime disappeared")?
+            .prepare_image_bytes_for_prompt(bytes);
+        Ok(match prepared {
             Ok(image) => {
                 println!(
                     "Media trace: {}",
@@ -594,7 +596,7 @@ where
                 diagnostics: vec![format!("AI link image: {error}")],
                 ..PreparedConversationMedia::default()
             },
-        }
+        })
     }
 
     fn prepare_media(
@@ -616,7 +618,7 @@ where
                     .map(|file_id| (MediaKind::Image, file_id, None))
             });
         let Some((kind, file_id, duration)) = selected else {
-            return Ok(self.prepare_link_image(input, operation_id));
+            return self.prepare_link_image(input, operation_id);
         };
         if kind == MediaKind::Image {
             let direct_image = self
