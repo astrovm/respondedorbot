@@ -113,6 +113,7 @@ pub fn describe_image_with<T: OpenRouterTransport>(
         },
     ];
     let mut request = ChatCompletionRequest::new(vision.model, messages);
+    request.avoid_image_garbling_providers();
     request.max_tokens = Some(vision.max_tokens);
     if let Some((prompt, completion)) = vision.price_ceiling {
         request.set_price_ceiling(prompt, completion);

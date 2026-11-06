@@ -386,6 +386,13 @@ mod tests {
             "Tweet by Example User\nA status.\nQuotes a tweet by Original: The original.\nIt has 1 photo(s) or video(s) this tool can't show. If you can't see the image in the message, say you didn't see it and don't guess what it shows."
         );
 
+        let mut tool = make_tool(vec![Ok(response("application/json", &payload))], Locale::Es);
+        assert!(
+            tool.execute(request("https://x.com/user/status/123"), "call")
+                .output
+                .contains("Cita un tweet de Original: The original.")
+        );
+
         let oembed = serde_json::json!({
             "html": "<blockquote><p>A status. pic.twitter.com/abc</p></blockquote>"
         })

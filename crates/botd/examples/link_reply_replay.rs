@@ -11,11 +11,16 @@
 //!     --url https://fixupx.com/user/status/123 --expect word --runs 5
 //! ```
 //!
-//! `--mode old` shows the model what it used to get: no link context, no photo,
+//! `--mode unseen` withholds the picture, as when its download fails: use
+//! `--expect` with words that admit it. `--mode old` shows the model what it used to get: no link context, no photo,
 //! and a text-only `web_fetch`. A run passes when no tool call or answer goes
-//! off on the distraction and, with `--expect`, the answer has that word. Use
-//! a word only the photo shows. Web search is stubbed to find nothing, so it
-//! can't come from there. Images go as downloaded, not through ffmpeg.
+//! off on the distraction and, with `--expect a,b`, the answer has one of those
+//! words. Use words only the photo shows. Web search is stubbed to find nothing,
+//! so they can't come from there. `--answer-may-mention yes` is for questions
+//! about an earlier wrong answer, which the reply can fairly bring up.
+//! `--distraction retrieved` puts the distraction among the messages found by
+//! search instead of the chat history. Images go as downloaded, not through
+//! ffmpeg.
 
 use std::process::ExitCode;
 
@@ -26,14 +31,14 @@ use bot_adapters::openrouter_chat::{
 };
 use bot_adapters::web_fetch::{ReqwestWebFetchTransport, SystemHostResolver, fetch_tweet};
 use bot_core::ai_prompt::{
-    ConversationPromptInput, HistoryMessage, PromptContent, PromptRole, build_conversation_prompt,
-    build_system_prompt,
+    ConversationPromptInput, HistoryMessage, PromptContent, PromptRole, RetrievedMessage,
+    build_conversation_prompt, build_system_prompt,
 };
 use bot_core::locale::Locale;
 use botd::ai_dispatch::LinkImage;
 use botd::composition::read_live_link_context;
 use botd::conversation::link_image_note;
-use botd::dispatcher::LinkContextRequest;
+use botd::dispatcher::{LinkContext, LinkContextRequest};
 use botd::native_ai::PRIMARY_CHAT_MODEL;
 use botd::native_tools::catalog_schemas;
 use serde_json::{Value, json};
@@ -46,18 +51,24 @@ const MAX_ROUNDS: usize = 5;
 struct Options {
     url: String,
     question: String,
-    expect: Option<String>,
+    expect: Vec<String>,
     runs: usize,
     old: bool,
+    retrieved: bool,
+    answer_may_mention: bool,
+    unseen: bool,
 }
 
 fn options() -> Result<Options, String> {
     let mut options = Options {
         url: String::new(),
         question: "real?".to_owned(),
-        expect: None,
+        expect: Vec::new(),
         runs: 5,
         old: false,
+        retrieved: false,
+        answer_may_mention: false,
+        unseen: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -65,13 +76,20 @@ fn options() -> Result<Options, String> {
         match flag.as_str() {
             "--url" => options.url = value,
             "--question" => options.question = value,
-            "--expect" => options.expect = Some(value.to_lowercase()),
+            "--expect" => {
+                options.expect = value.to_lowercase().split(',').map(str::to_owned).collect();
+            }
+            "--distraction" => options.retrieved = value == "retrieved",
+            "--answer-may-mention" => options.answer_may_mention = value == "yes",
             "--runs" => {
                 options.runs = value
                     .parse()
                     .map_err(|_| "--runs needs a number".to_owned())?;
             }
-            "--mode" => options.old = value == "old",
+            "--mode" => {
+                options.old = value == "old";
+                options.unseen = value == "unseen";
+            }
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -81,16 +99,22 @@ fn options() -> Result<Options, String> {
     Ok(options)
 }
 
-fn user_message(options: &Options, reply: &str) -> (String, Option<Vec<u8>>) {
+/// The turn's messages as the prompt builds them, the picture on the last one.
+fn turn_messages(options: &Options, reply: &str) -> Vec<ChatMessage> {
     let mut context = None;
     let mut image = None;
     if !options.old {
+        let wants_image = !options.unseen;
         let read = read_live_link_context(LinkContextRequest {
             text: &options.question,
             replied_text: Some(reply),
             own_links_known: false,
             own_image_url: None,
-            wants_image: true,
+            wants_image,
+        })
+        .unwrap_or_else(|error| {
+            println!("link reader failed: {error}");
+            LinkContext::default()
         });
         let attached = matches!(read.image, LinkImage::Attached { .. });
         let note = link_image_note(&read.image, attached, Locale::Es);
@@ -108,6 +132,13 @@ fn user_message(options: &Options, reply: &str) -> (String, Option<Vec<u8>>) {
             println!("diagnostic: {diagnostic}");
         }
     }
+    let distraction = || {
+        vec![HistoryMessage {
+            role: PromptRole::User,
+            text: DISTRACTION_MESSAGE.to_owned(),
+            tool_notes: Vec::new(),
+        }]
+    };
     let conversation = build_conversation_prompt(&ConversationPromptInput {
         locale: Locale::Es,
         chat_type: "supergroup".to_owned(),
@@ -122,38 +153,53 @@ fn user_message(options: &Options, reply: &str) -> (String, Option<Vec<u8>>) {
         link_context: context,
         enable_web_search: true,
         summary: None,
-        history: vec![HistoryMessage {
-            role: PromptRole::User,
-            text: DISTRACTION_MESSAGE.to_owned(),
-            tool_notes: Vec::new(),
-        }],
-        retrieved: Vec::new(),
+        history: if options.retrieved {
+            Vec::new()
+        } else {
+            distraction()
+        },
+        retrieved: if options.retrieved {
+            vec![RetrievedMessage {
+                role: "user".to_owned(),
+                text: DISTRACTION_MESSAGE.to_owned(),
+                timestamp: 0,
+            }]
+        } else {
+            Vec::new()
+        },
     });
-    let text = conversation
+    let mut messages = conversation
         .iter()
-        .map(|message| match &message.content {
-            PromptContent::Text(text) => text.clone(),
-            PromptContent::TextParts(parts) => parts.join("\n"),
-            _ => String::new(),
+        .map(|message| {
+            let role = match message.role {
+                PromptRole::System => ChatRole::System,
+                PromptRole::User => ChatRole::User,
+                PromptRole::Assistant => ChatRole::Assistant,
+                PromptRole::Tool => ChatRole::Tool,
+            };
+            let text = match &message.content {
+                PromptContent::Text(text) => text.clone(),
+                PromptContent::TextParts(parts) => parts.join("\n"),
+                _ => String::new(),
+            };
+            ChatMessage::text(role, text)
         })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    (text, image)
-}
-
-/// The turn's first user message, with the picture if there is one.
-fn first_message(text: String, image: Option<&[u8]>) -> ChatMessage {
-    let Some(image) = image else {
-        return ChatMessage::text(ChatRole::User, text);
-    };
-    let data_uri = format!("data:image/jpeg;base64,{}", BASE64_STANDARD.encode(image));
-    let mut message = ChatMessage::text(ChatRole::User, "");
-    message.content = Some(json!([
-        {"type": "text", "text": text},
-        {"type": "text", "text": "[Imagen adjunta]"},
-        {"type": "image_url", "image_url": {"url": data_uri}},
-    ]));
-    message
+        .collect::<Vec<_>>();
+    if let (Some(image), Some(last)) = (image.as_deref(), messages.last_mut()) {
+        let text = last.content.clone().unwrap_or(Value::Null);
+        let data_uri = format!("data:image/jpeg;base64,{}", BASE64_STANDARD.encode(image));
+        last.content = Some(json!([
+            {"type": "text", "text": text},
+            {"type": "text", "text": "[Imagen adjunta]"},
+            {"type": "image_url", "image_url": {"url": data_uri}},
+        ]));
+    }
+    println!(
+        "mode: {}, image: {} bytes",
+        if options.old { "old" } else { "new" },
+        image.as_ref().map_or(0, Vec::len)
+    );
+    messages
 }
 
 /// What the tool would have said. In old mode `web_fetch` gives the tweet's
@@ -190,14 +236,17 @@ fn run_once(
     api_key: &str,
     options: &Options,
     system: &str,
-    first: &ChatMessage,
+    turn: &[ChatMessage],
     cost: &mut f64,
 ) -> Result<(bool, String), String> {
-    let mut messages = vec![ChatMessage::text(ChatRole::System, system), first.clone()];
+    let mut messages = vec![ChatMessage::text(ChatRole::System, system)];
+    messages.extend_from_slice(turn);
     let mut clean = true;
     let mut trace = Vec::new();
     for _ in 0..MAX_ROUNDS {
         let mut request = ChatCompletionRequest::new(PRIMARY_CHAT_MODEL, messages.clone());
+        request.prefer_fast_providers();
+        request.avoid_image_garbling_providers();
         request.tools = catalog_schemas();
         let completion = complete(api_key, &request).map_err(|error| error.to_string())?;
         *cost += completion
@@ -206,11 +255,17 @@ fn run_once(
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
         if completion.tool_calls.is_empty() {
-            clean &= !distraction_in(&completion.text);
-            if let Some(word) = &options.expect {
-                clean &= completion.text.to_lowercase().contains(word);
+            if !options.answer_may_mention {
+                clean &= !distraction_in(&completion.text);
             }
-            trace.push(format!("answer: {}", completion.text));
+            let answer = completion.text.to_lowercase();
+            clean &= options.expect.is_empty()
+                || options.expect.iter().any(|word| answer.contains(word));
+            trace.push(format!(
+                "answer ({}): {}",
+                completion.upstream_provider.as_deref().unwrap_or("unknown"),
+                completion.text
+            ));
             return Ok((clean, trace.join("\n      ")));
         }
         let mut assistant = ChatMessage::text(ChatRole::Assistant, completion.text.clone());
@@ -245,12 +300,7 @@ fn main() -> ExitCode {
         }
     };
     let reply = format!("{}\n\ncompartido por @ana", options.url);
-    let (text, image) = user_message(&options, &reply);
-    println!(
-        "mode: {}, image: {} bytes",
-        if options.old { "old" } else { "new" },
-        image.as_ref().map_or(0, Vec::len)
-    );
+    let turn = turn_messages(&options, &reply);
     let system = build_system_prompt(
         "You are a friendly Argentine Telegram bot. Keep answers short.",
         Locale::Es,
@@ -258,10 +308,9 @@ fn main() -> ExitCode {
         true,
         false,
     );
-    let first = first_message(text, image.as_deref());
     let (mut passed, mut cost) = (0, 0.0);
     for run in 1..=options.runs {
-        match run_once(&api_key, &options, &system, &first, &mut cost) {
+        match run_once(&api_key, &options, &system, &turn, &mut cost) {
             Ok((clean, trace)) => {
                 passed += usize::from(clean);
                 println!(

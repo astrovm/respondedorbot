@@ -1887,6 +1887,37 @@ mod tests {
     }
 
     #[test]
+    fn id_only_tweet_links_read_straight_from_fxtwitter() {
+        let transport = scripted(vec![Ok(json_response(&synthetic_tweet_payload()))]);
+        let result = fetch_ai_url(
+            &transport,
+            &public_resolver(),
+            None,
+            "https://fixupx.com/status/42",
+            false,
+        );
+        assert!(matches!(
+            result,
+            Ok(AiFetchOutcome::Tweet(ref tweet)) if tweet.text == "A synthetic status."
+        ));
+        assert_eq!(transport.urls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn image_downloads_refuse_addresses_that_are_not_web_urls() {
+        assert_eq!(
+            fetch_public_image(
+                &scripted(Vec::new()),
+                &public_resolver(),
+                " file:///etc/passwd "
+            ),
+            Err(PublicFetchError::Blocked {
+                url: "file:///etc/passwd".to_owned(),
+            })
+        );
+    }
+
+    #[test]
     fn image_downloads_check_every_redirect_hop_is_public() {
         let hop_to = |location: &str| WebFetchResponse {
             status_code: 302,

@@ -441,23 +441,19 @@ struct NativeLinkReplacementSource<T, R, W> {
 }
 
 /// Runs the link reader the bot uses in production, for replaying real links.
-/// Empty when its HTTP clients can't be built.
-#[must_use]
-pub fn read_live_link_context(request: LinkContextRequest<'_>) -> LinkContext {
-    let (Ok(transport), Ok(context_transport), Ok(context_fetch)) = (
-        ReqwestLinkPreviewTransport::new(),
-        ReqwestLinkPreviewTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT),
-        ReqwestWebFetchTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT),
-    ) else {
-        return LinkContext::default();
-    };
-    NativeLinkReplacementSource {
-        transport,
-        context_transport,
+pub fn read_live_link_context(request: LinkContextRequest<'_>) -> Result<LinkContext, String> {
+    let debug = |failure: &dyn std::fmt::Debug| format!("{failure:?}");
+    Ok(NativeLinkReplacementSource {
+        transport: ReqwestLinkPreviewTransport::new().map_err(|error| debug(&error))?,
+        context_transport: ReqwestLinkPreviewTransport::with_timeout(
+            AI_LINK_CONTEXT_REQUEST_TIMEOUT,
+        )
+        .map_err(|error| debug(&error))?,
         context_resolver: SystemHostResolver,
-        context_fetch,
+        context_fetch: ReqwestWebFetchTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT)
+            .map_err(|error| debug(&error))?,
     }
-    .preview_context(request)
+    .preview_context(request))
 }
 
 /// Links whose previews may feed one AI turn, and the wall-clock budget for
@@ -609,11 +605,11 @@ fn format_link_context(previews: &[PreviewInspection]) -> Option<String> {
 
 /// Links in `text` the AI context reads. YouTube has its own transcript path.
 fn context_links(text: &str) -> Vec<&str> {
-    let Some(pattern) = bot_core::regex_cache::cached_regex(r"https?://[^\s<>]+") else {
-        return Vec::new();
-    };
     let mut urls = Vec::new();
-    for url in pattern.find_iter(text).map(|found| found.as_str()) {
+    let found = bot_core::regex_cache::cached_regex(r"https?://[^\s<>]+")
+        .into_iter()
+        .flat_map(|pattern| pattern.find_iter(text));
+    for url in found.map(|found| found.as_str()) {
         if !is_youtube_link(url) && !urls.contains(&url) {
             urls.push(url);
         }
@@ -4504,6 +4500,57 @@ mod tests {
     }
 
     #[test]
+    fn tweets_list_all_they_have_and_a_dead_media_link_reads_as_a_missing_picture() {
+        let full = r#"{"code":200,"tweet":{"url":"https://x.com/a/status/1","text":"Mirá.","created_at":"Thu Nov 05 2026","author":{"name":"Example"},"media":{"all":[{"type":"video","url":"https://video.twimg.com/a.mp4"}]},"quote":{"text":"El original.","author":{"name":"Otro"}}}}"#;
+        let mut source = link_source(RoutedFetchStub {
+            routes: vec![(
+                "https://api.fxtwitter.com/status/1",
+                fetched("application/json", full.as_bytes()),
+            )],
+            requests: std::cell::RefCell::new(Vec::new()),
+        });
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            own_links("https://x.com/a/status/1"),
+        );
+        assert_eq!(
+            context.text.as_deref(),
+            Some(
+                "LINKS DEL MENSAJE:\n1. https://x.com/a/status/1\nautor: Example\nfecha: Thu Nov 05 2026\ntexto: Mirá.\ncita a Otro: El original.\nvideos que no podés ver: 1"
+            )
+        );
+        assert_eq!(context.image, LinkImage::None);
+
+        let oembed = r#"{"author_name":"Example","html":"<blockquote><p>Mirá. pic.twitter.com/abc</p></blockquote>"}"#;
+        let mut source = link_source(RoutedFetchStub {
+            routes: vec![(
+                "https://publish.twitter.com/oembed",
+                fetched("application/json", oembed.as_bytes()),
+            )],
+            requests: std::cell::RefCell::new(Vec::new()),
+        });
+        let context = crate::dispatcher::LinkReplacementSource::preview_context(
+            &mut source,
+            own_links("https://x.com/a/status/1"),
+        );
+        assert_eq!(
+            context.image,
+            LinkImage::Unavailable {
+                source_url: "https://x.com/a/status/1".to_owned(),
+            }
+        );
+        assert_eq!(context.diagnostics, Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_live_link_reader_runs_without_touching_the_network_when_there_are_no_links() {
+        assert_eq!(
+            super::read_live_link_context(own_links("sin links")),
+            Ok(LinkContext::default())
+        );
+    }
+
+    #[test]
     fn link_downloads_stop_at_the_shared_deadline() {
         let expired = super::DeadlineWebFetchTransport {
             inner: &NoFetchStub,
@@ -4512,6 +4559,14 @@ mod tests {
         assert_eq!(
             expired.get("https://example.com"),
             Err(WebFetchTransportError::Timeout)
+        );
+        let down = super::DeadlineWebFetchTransport {
+            inner: &NoFetchStub,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        };
+        assert_eq!(
+            down.get("https://example.com"),
+            Err(WebFetchTransportError::Connection)
         );
         let routes = tweet_routes(Some(b"pixels"));
         let open = super::DeadlineWebFetchTransport {

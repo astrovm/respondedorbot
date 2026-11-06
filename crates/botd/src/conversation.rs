@@ -3926,9 +3926,7 @@ mod tests {
             PromptContent::Image { text_parts, image } => {
                 (text_parts.clone(), Some(image.clone()), diagnostics)
             }
-            PromptContent::Text(text) => (vec![text.clone()], None, diagnostics),
-            PromptContent::TextParts(parts) => (parts.clone(), None, diagnostics),
-            PromptContent::Empty => (Vec::new(), None, diagnostics),
+            other => (vec![format!("{other:?}")], None, diagnostics),
         }
     }
 
@@ -3959,6 +3957,21 @@ mod tests {
             part.contains("this link has an image you could not see: https://x.com/a/status/1")
         }));
         assert_eq!(diagnostics, vec!["AI link image: invalid image".to_owned()]);
+    }
+
+    #[test]
+    fn a_link_image_with_no_media_runtime_to_prepare_it_is_announced_as_missing() {
+        let mut service = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        );
+        let mut request = input();
+        request.link_image = attached(b"tweet photo");
+        assert!(service.prepare(request).is_ok());
+        let prompts = service.provider.prompts.borrow();
+        let last = format!("{:?}", prompts[0].last().must().content);
+        assert!(last.contains("this link has an image you could not see"));
+        assert!(!last.contains("Attached image"));
     }
 
     #[test]
