@@ -606,9 +606,8 @@ fn format_link_context(previews: &[PreviewInspection]) -> Option<String> {
 /// Links in `text` the AI context reads. YouTube has its own transcript path.
 fn context_links(text: &str) -> Vec<&str> {
     let mut urls = Vec::new();
-    let found = bot_core::regex_cache::cached_regex(r"https?://[^\s<>]+")
-        .into_iter()
-        .flat_map(|pattern| pattern.find_iter(text));
+    let pattern = bot_core::regex_cache::cached_regex(r"https?://[^\s<>]+");
+    let found = pattern.iter().flat_map(|pattern| pattern.find_iter(text));
     for url in found.map(|found| found.as_str()) {
         if !is_youtube_link(url) && !urls.contains(&url) {
             urls.push(url);
