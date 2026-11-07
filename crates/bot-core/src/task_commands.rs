@@ -722,6 +722,25 @@ mod tests {
     }
 
     #[test]
+    fn last_page_links_back_only() -> Result<(), TaskStateError> {
+        let tasks = (0..7)
+            .map(|i| task(&format!("last{i:04}"), TaskSchedule::Once, NEXT))
+            .collect::<Result<Vec<_>, _>>()?;
+        let rows = super::render_task_page(&tasks, Locale::En, 1)
+            .keyboard
+            .map_or(Vec::new(), |keyboard| keyboard.inline_keyboard);
+        let navigation = rows[2]
+            .iter()
+            .map(|button| (button.text.as_str(), button.callback_data.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            navigation,
+            vec![("‹", Some("task:page:0")), ("2 / 2", Some("task:page:1"))]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn first_page_links_forward_and_details_describe_recurrence() -> Result<(), TaskStateError> {
         let tasks = (0..6)
             .map(|i| task(&format!("page{i:04}"), TaskSchedule::Once, NEXT))

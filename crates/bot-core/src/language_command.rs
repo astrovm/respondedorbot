@@ -163,6 +163,27 @@ mod tests {
     }
 
     #[test]
+    fn settings_buttons_follow_the_language_just_chosen() {
+        let last_row = |input: &str, locale: Locale| {
+            let (message, _) = sent_message(plan(input, locale, false));
+            message
+                .reply_markup
+                .and_then(|markup| markup.inline_keyboard.last().cloned())
+                .map(|row| {
+                    row.into_iter()
+                        .map(|button| button.text)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(last_row("/idioma ES", Locale::En), ["‹ Volver", "Cerrar"]);
+        assert_eq!(last_row("/language en", Locale::Es), ["‹ Back", "Close"]);
+        // Without a change, the chat keeps its own language.
+        assert_eq!(last_row("/language", Locale::Es), ["‹ Volver", "Cerrar"]);
+        assert_eq!(last_row("/language nope", Locale::En), ["‹ Back", "Close"]);
+    }
+
+    #[test]
     fn leaves_groups_and_other_commands_for_their_owners() {
         assert_eq!(
             plan("/language en", Locale::Es, true),
