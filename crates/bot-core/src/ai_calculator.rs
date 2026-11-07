@@ -39,9 +39,10 @@ impl Number {
     fn render(self) -> String {
         match self {
             Self::Integer(value) => value.to_string(),
-            Self::Float(value) if value.is_finite() => {
+            Self::Float(value) => {
                 // Floats from 2^52 up are whole numbers already, and scaling a huge
-                // one by 1e8 would overflow to infinity.
+                // one by 1e8 would overflow to infinity. Infinity and NaN pass through
+                // both branches unchanged and print as `inf`, `-inf` and `NaN`.
                 let rounded = if value.abs() >= WHOLE_FLOAT_FROM {
                     value
                 } else {
@@ -55,7 +56,6 @@ impl Number {
                     rounded.to_string()
                 }
             }
-            Self::Float(value) => value.to_string(),
         }
     }
 }
@@ -566,6 +566,10 @@ mod tests {
         assert_eq!(calculate_expression("10 - 3", Locale::En), "7");
         assert_eq!(calculate_expression("1e308 * 10", Locale::En), "inf");
         assert_eq!(calculate_expression("0 - 1e308 * 10", Locale::En), "-inf");
+        assert_eq!(
+            calculate_expression("1e308 * 10 - 1e308 * 10", Locale::En),
+            "NaN"
+        );
     }
 
     #[test]
