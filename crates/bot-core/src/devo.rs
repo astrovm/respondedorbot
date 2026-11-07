@@ -76,18 +76,21 @@ pub fn parse_devo_input(input: &str) -> Result<DevoInput, UnsupportedNumericInpu
         let Some(purchase) = values.get(1).and_then(|value| parse_python_float(value)) else {
             return Ok(DevoInput::Usage);
         };
-        (fee / 100.0, purchase)
+        (fee, purchase)
     } else {
         let Some(fee) = parse_python_float(input) else {
             return Ok(DevoInput::Usage);
         };
-        (fee / 100.0, 0.0)
+        (fee, 0.0)
     };
-    // The fee is a percentage from 0 to 100 and the purchase a finite amount from 0.
-    if !(0.0..=1.0).contains(&fee) || !purchase.is_finite() || purchase < 0.0 {
+    // Validate before scaling, which can underflow a negative percentage to -0.0.
+    if !(0.0..=100.0).contains(&fee) || !purchase.is_finite() || purchase < 0.0 {
         return Ok(DevoInput::InputError);
     }
-    Ok(DevoInput::Valid { fee, purchase })
+    Ok(DevoInput::Valid {
+        fee: fee / 100.0,
+        purchase,
+    })
 }
 
 fn format_number(value: f64) -> String {
@@ -397,6 +400,13 @@ mod tests {
         }
 
         #[test]
+        fn every_representable_negative_fee_is_rejected(bits in 1_u64..=0x7fef_ffff_ffff_ffff_u64) {
+            let fee = -f64::from_bits(bits);
+            prop_assert_eq!(parse_devo_input(&fee.to_string()), Ok(DevoInput::InputError));
+            prop_assert_eq!(parse_devo_input(&format!("{fee}, 1")), Ok(DevoInput::InputError));
+        }
+
+        #[test]
         fn a_higher_fee_never_raises_the_profit(
             low in 0_u32..=100,
             extra in 0_u32..=100,
@@ -419,6 +429,9 @@ mod tests {
         for input in [
             "-5",
             "-0.01",
+            "-5e-324",
+            "-5e-323",
+            "-5e-323, 100",
             "-inf",
             "-infinity",
             "inf",
