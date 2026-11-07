@@ -748,6 +748,8 @@ mod tests {
         );
         let spaced = plan_stock_query("Example Holdings");
         assert!(spaced.full_query_fallback);
+        // One word is a plain symbol lookup, with no full-query fallback.
+        assert!(!plan_stock_query("AAPL").full_query_fallback);
         assert_eq!(spaced.queries.len(), 2);
         assert!(plan_stock_query(" ").needs_top_stocks);
         assert_eq!(
@@ -1014,6 +1016,13 @@ mod tests {
     const FRIDAY_CLOSE: i64 = 4 * DAY + 20 * 3_600;
 
     fn five_day_chart(extra_meta: serde_json::Value) -> serde_json::Value {
+        five_day_chart_with_closes(extra_meta, [15.5, 16.0, 17.0, 16.0, 20.0])
+    }
+
+    fn five_day_chart_with_closes(
+        extra_meta: serde_json::Value,
+        closes: [f64; 5],
+    ) -> serde_json::Value {
         let mut meta = json!({
             "symbol": "EXM",
             "regularMarketPrice": 20.0,
@@ -1028,7 +1037,7 @@ mod tests {
         chart(json!({
             "meta": meta,
             "timestamp": opens,
-            "indicators": {"quote": [{"close": [15.5, 16.0, 17.0, 16.0, 20.0]}]}
+            "indicators": {"quote": [{"close": closes}]}
         }))
     }
 
@@ -1242,5 +1251,18 @@ mod tests {
             "example corp",
             &listing("ABC", "Example Corp", "NYSE")
         ));
+    }
+
+    #[test]
+    fn zero_or_negative_session_closes_are_not_the_previous_close() {
+        // Thursday's bad close is skipped, so Wednesday's 17 is the base: +17.65%.
+        for bad in [0.0, -16.0] {
+            let chart = five_day_chart_with_closes(json!({}), [15.5, 16.0, 17.0, bad, 20.0]);
+            let variation = parse_yahoo_quote(&chart, "EXM").map(|quote| quote.variation);
+            assert!(
+                variation.is_some_and(|value| (value - 17.647_058_823_529_41).abs() < 1e-9),
+                "{bad}: {variation:?}"
+            );
+        }
     }
 }

@@ -188,6 +188,18 @@ mod tests {
             plan_dollar_command("7d"),
             DollarCommandPlan::InvalidTimeframe
         );
+        assert_eq!(
+            plan_dollar_command("9h"),
+            DollarCommandPlan::InvalidTimeframe
+        );
+        // Words and bare numbers are not timeframes, they fall back to 24h.
+        for word in ["hola", "12", "h", "d", "x9d", "1x"] {
+            assert_eq!(
+                plan_dollar_command(&format!("/dolar {word}")),
+                DollarCommandPlan::Load { hours_ago: 24 },
+                "{word}"
+            );
+        }
         assert_eq!(DOLLAR_TIMEFRAMES.len(), 5);
         assert_eq!(
             invalid_timeframe_message("7D", Locale::En),

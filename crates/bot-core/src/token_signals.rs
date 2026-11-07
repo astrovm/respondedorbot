@@ -2301,4 +2301,88 @@ mod tests {
         signal.candles = vec![vec![1.0, 1.0, 1.0 + f64::EPSILON, 1.0, 1.0]; 5];
         assert!(!has_usable_chart(&signal));
     }
+
+    #[test]
+    fn drawdown_is_measured_against_the_market_cap_when_there_is_one() {
+        let mut signal = signal();
+        signal.pair.price_usd = json!("1");
+        signal.pair.market_cap = json!(1_000_000);
+        signal.candles = vec![vec![1_700_000_000.0, 1.0, 2.0, 1.0, 1.0]; 3];
+        let caption = format_signal_caption(&signal, 1_700_086_400);
+        assert!(caption.contains("ATH <b>$2M ("), "{caption}");
+        assert!(caption.contains("-50%"), "{caption}");
+    }
+
+    #[test]
+    fn a_zero_price_does_not_turn_the_ath_into_infinity() {
+        let mut signal = signal();
+        signal.pair.price_usd = json!("0");
+        signal.pair.market_cap = json!(1_000_000);
+        signal.candles = vec![vec![1_700_000_000.0, 1.0, 2.0, 1.0, 1.0]; 3];
+        let caption = format_signal_caption(&signal, 1_700_086_400);
+        assert!(!caption.to_lowercase().contains("inf"), "{caption}");
+        assert!(caption.contains("ATH <b>$2 ("), "{caption}");
+    }
+
+    #[test]
+    fn hourly_trades_show_exact_counts_and_n_a_for_a_missing_side() {
+        let mut signal = signal();
+        let caption = format_signal_caption_for_period(&signal, 1_720_000_000, Some("1h"));
+        assert!(caption.contains("1h: 🟩 122 🟥 148"), "{caption}");
+        signal.pair.txns.h1.buys = json!(null);
+        signal.pair.txns.h1.sells = json!(4);
+        let caption = format_signal_caption_for_period(&signal, 1_720_000_000, Some("1h"));
+        assert!(caption.contains("1h: 🟩 N/A 🟥 4"), "{caption}");
+    }
+
+    #[test]
+    fn pair_socials_use_the_short_labels_and_do_not_repeat_pump_links() {
+        let mut pair = pair();
+        pair.info.socials = vec![
+            PairSocial {
+                kind: "twitter".to_owned(),
+                url: "https://x.com/pair".to_owned(),
+            },
+            PairSocial {
+                kind: "telegram".to_owned(),
+                url: "https://t.me/pair".to_owned(),
+            },
+        ];
+        let labels = |socials: BTreeMap<String, String>| socials.into_keys().collect::<Vec<_>>();
+        assert_eq!(labels(token_socials(&pair, None)), vec!["TG", "X"]);
+        let pump = PumpMetadata {
+            twitter: "https://x.com/pump".to_owned(),
+            telegram: "https://t.me/pump".to_owned(),
+            ..PumpMetadata::default()
+        };
+        let socials = token_socials(&pair, Some(&pump));
+        assert_eq!(
+            socials.iter().collect::<Vec<_>>(),
+            vec![
+                (&"TG".to_owned(), &"https://t.me/pump".to_owned()),
+                (&"X".to_owned(), &"https://x.com/pump".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn chart_candles_reject_zero_and_negative_prices_without_a_reference() {
+        let usable = super::is_usable_chart_candle;
+        assert!(!usable(&[1.0, 0.0, 0.0, 0.0, 0.0], None));
+        assert!(!usable(&[1.0, -1.0, -1.0, -1.0, -1.0], None));
+        assert!(!usable(&[1.0, -2.0, -1.0, -3.0, -2.0], None));
+        assert!(usable(&[1.0, 1.0, 1.0, 1.0, 1.0], None));
+    }
+
+    #[test]
+    fn a_url_followed_by_words_is_not_a_token_query() {
+        assert_eq!(
+            detect_signal_query("https://coinmarketcap.com/currencies/bitcoin/ is cool"),
+            None
+        );
+        assert_eq!(
+            detect_signal_query("https://coinmarketcap.com/currencies/bitcoin/"),
+            Some(SignalQuery::Slug("bitcoin".to_owned()))
+        );
+    }
 }
