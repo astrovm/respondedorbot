@@ -9,6 +9,8 @@ const MAX_INTEGER_EXPONENT: u32 = 100_000;
 /// About 301,000 decimal digits: room for `999 ** 100000`, and small enough to
 /// build and print quickly.
 const MAX_INTEGER_BITS: u64 = 1_000_000;
+/// 2^52: every finite float at or above this is a whole number.
+const WHOLE_FLOAT_FROM: f64 = 4_503_599_627_370_496.0;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Number {
@@ -37,8 +39,15 @@ impl Number {
     fn render(self) -> String {
         match self {
             Self::Integer(value) => value.to_string(),
-            Self::Float(value) if value.is_finite() => {
-                let rounded = (value * 100_000_000.0).round() / 100_000_000.0;
+            Self::Float(value) => {
+                // Floats from 2^52 up are whole numbers already, and scaling a huge
+                // one by 1e8 would overflow to infinity. Infinity and NaN pass through
+                // both branches unchanged and print as `inf`, `-inf` and `NaN`.
+                let rounded = if value.abs() >= WHOLE_FLOAT_FROM {
+                    value
+                } else {
+                    (value * 100_000_000.0).round() / 100_000_000.0
+                };
                 if rounded == 0.0 {
                     "0".to_owned()
                 } else if rounded.fract() == 0.0 {
@@ -47,7 +56,6 @@ impl Number {
                     rounded.to_string()
                 }
             }
-            Self::Float(value) => value.to_string(),
         }
     }
 }
@@ -558,6 +566,34 @@ mod tests {
         assert_eq!(calculate_expression("10 - 3", Locale::En), "7");
         assert_eq!(calculate_expression("1e308 * 10", Locale::En), "inf");
         assert_eq!(calculate_expression("0 - 1e308 * 10", Locale::En), "-inf");
+        assert_eq!(
+            calculate_expression("1e308 * 10 - 1e308 * 10", Locale::En),
+            "NaN"
+        );
+    }
+
+    #[test]
+    fn finite_floats_near_the_top_of_the_range_are_not_rendered_as_infinity() {
+        for (expression, value) in [
+            ("2e300", 2e300_f64),
+            ("-2e300", -2e300),
+            ("1e308", 1e308),
+            ("1.7e308", 1.7e308),
+            ("0 - 1.7e308", -1.7e308),
+            ("1e300 * 3", 3e300),
+            ("4503599627370496.0", 4_503_599_627_370_496.0),
+        ] {
+            assert_eq!(
+                calculate_expression(expression, Locale::En),
+                format!("{value:.0}"),
+                "{expression}"
+            );
+        }
+        assert_eq!(calculate_expression("2e-300", Locale::En), "0");
+        assert_eq!(
+            calculate_expression("4503599627370495.5", Locale::En),
+            "4503599627370495.5"
+        );
     }
 
     proptest! {
