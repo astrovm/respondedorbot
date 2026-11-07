@@ -57,14 +57,10 @@ pub enum DevoReply {
     LoadError,
 }
 
+/// Python's `float()` spellings. Rust's parser also takes `inf`, `infinity` and `nan` in any
+/// case, with an optional sign.
 fn parse_python_float(input: &str) -> Option<f64> {
-    let input = input.trim();
-    match input.to_ascii_lowercase().as_str() {
-        "inf" | "+inf" | "infinity" | "+infinity" => Some(f64::INFINITY),
-        "-inf" | "-infinity" => Some(f64::NEG_INFINITY),
-        "nan" | "+nan" | "-nan" => Some(f64::NAN),
-        _ => input.parse().ok(),
-    }
+    input.trim().parse().ok()
 }
 
 pub fn parse_devo_input(input: &str) -> Result<DevoInput, UnsupportedNumericInput> {
@@ -436,6 +432,33 @@ mod tests {
                 parse_devo_input(input),
                 Ok(DevoInput::InputError),
                 "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn infinity_and_nan_spellings_are_input_errors_in_any_case_and_sign() {
+        for input in [
+            "nan",
+            "+nan",
+            "-nan",
+            "NaN",
+            "inf",
+            "+inf",
+            "-inf",
+            "Infinity",
+            "+INFINITY",
+            "-Infinity",
+        ] {
+            assert_eq!(
+                parse_devo_input(input),
+                Ok(DevoInput::InputError),
+                "{input}"
+            );
+            assert_eq!(
+                parse_devo_input(&format!("5, {input}")),
+                Ok(DevoInput::InputError),
+                "5, {input}"
             );
         }
     }
