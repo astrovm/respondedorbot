@@ -52,4 +52,11 @@ case "${1:-}" in
         exit 2
         ;;
 esac
+# A mutant can allocate forever. Without a limit it fills the runner's memory and
+# GitHub shuts the runner down, which loses every mutant in the part. With one, the
+# test aborts and the mutant counts as caught. Only test programs get the limit,
+# not rustc. 8 GiB is half of a hosted runner.
+if command -v prlimit >/dev/null; then
+    export "CARGO_TARGET_$(uname -m | tr '[:lower:]' '[:upper:]')_UNKNOWN_LINUX_GNU_RUNNER=prlimit --as=$((8 << 30))"
+fi
 cargo mutants "${args[@]}"
