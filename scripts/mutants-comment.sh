@@ -11,15 +11,21 @@ lived=$(cat "$results/missed.txt" "$results/timeout.txt" 2>/dev/null | sort -u |
 caught=$(grep -c . "$results/caught.txt" 2>/dev/null || true)
 caught=${caught:-0}
 total=$((caught + $(grep -c . <<<"$lived" || true)))
-body="$marker
-**Mutation testing:** $caught of $total changes caught by a test.
-
-\`\`\`
-$lived
-\`\`\`
-
-Each one is a change to the code no test noticed. Not a blocker: real gaps get their own PR. [Full report]($RUN)"
-[[ -z $lived ]] || printf '%s\n' "$body" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+# A comment holds 65,536 characters and a step summary 1 MiB. A longer list is cut between
+# lines inside the code fence, and says how many rows are missing.
+make_body() {
+    local limit=$1 shown=$lived note=
+    if (($(printf '%s' "$lived" | LC_ALL=C wc -c) > limit)); then
+        shown=$(printf '%s\n' "$lived" | LC_ALL=C awk -v max="$limit" '{ n += length($0) + 1; if (n > max) exit; print }')
+        note="
+$(($(grep -c . <<<"$lived") - $(grep -c . <<<"$shown"))) more not shown here, see the full report."
+    fi
+    # shellcheck disable=SC2016 # the backticks are Markdown, not command substitution
+    printf '%s\n**Mutation testing:** %s of %s changes caught by a test.\n\n```\n%s\n```%s\n\nEach one is a change to the code no test noticed. Not a blocker: real gaps get their own PR. [Full report](%s)' \
+        "$marker" "$caught" "$total" "$shown" "$note" "$RUN"
+}
+body=$(make_body "${MUTANTS_COMMENT_LIMIT:-58000}")
+[[ -z $lived ]] || make_body 900000 >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
 [[ ${FORK:-false} != true ]] || exit 0
 old=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
     --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n 1)

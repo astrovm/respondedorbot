@@ -17,6 +17,8 @@ on:
       - .cargo/mutants.toml
       - scripts/mutants.sh
       - scripts/mutants-comment.sh
+      - scripts/mutants-post.sh
+      - scripts/mutants-post.test.sh
       - scripts/tests/mutants.sh
       - .github/workflows/mutants.yml
   schedule:
@@ -74,7 +76,7 @@ jobs:
         # A change to the setup itself gets a real run of part 0 of 64. Its
         # findings aren't in the comment: they aren't this pull request's.
         run: |
-          if git diff --quiet HEAD^1 -- .cargo/mutants.toml scripts/mutants.sh scripts/mutants-comment.sh .github/workflows/mutants.yml; then
+          if git diff --quiet HEAD^1 -- .cargo/mutants.toml scripts/mutants.sh scripts/mutants-comment.sh scripts/mutants-post.sh scripts/mutants-post.test.sh .github/workflows/mutants.yml; then
             echo "The setup didn't change."
           else
             status=0
@@ -163,11 +165,15 @@ jobs:
       contents: read
       issues: write
     steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download results
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: mutants-part-*
           path: results
+      - name: Test the report poster
+        run: bash scripts/mutants-post.test.sh
       - name: List what survived in the open issue
         env:
           GH_TOKEN: ${{ github.token }}
@@ -179,11 +185,20 @@ jobs:
           missed=$(cat results/*/missed.txt 2>/dev/null | sort -u || true)
           timeouts=$(cat results/*/timeout.txt 2>/dev/null | sort -u || true)
           parts=$(jq -r 'map(tostring) | join(", ")' <<< "$PARTS")
-          issue=$(gh issue list --state open --search 'in:title "Missed mutants"' --json number --jq '.[0].number // empty')
+          # A part that failed before it could upload leaves no results folder.
+          no_results=$(jq -r '.[]' <<< "$PARTS" | while read -r part; do
+            [[ -d results/mutants-part-$part ]] || echo "$part"
+          done | paste -sd, - | sed 's/,/, /g')
+          has_findings=false
+          [[ -z $missed && -z $timeouts ]] || has_findings=true
           {
             echo "Parts $parts of 64: [run]($RUN), jobs $JOBS."
             echo
-            if [[ -z $missed && -z $timeouts ]]; then
+            if [[ -n $no_results ]]; then
+              echo "No results from part(s) $no_results: those parts failed before reporting, so their mutants are untested."
+              echo
+            fi
+            if [[ $has_findings == false && -z $no_results ]]; then
               echo 'Every mutant in these parts was caught.'
             fi
             if [[ -n $missed ]]; then
@@ -200,9 +215,11 @@ jobs:
               echo '```'
             fi
           } > report.md
-          cat report.md >> "$GITHUB_STEP_SUMMARY"
-          if [[ -n $issue ]]; then
-            gh issue comment "$issue" --body-file report.md
-          elif [[ -n $missed || -n $timeouts ]]; then
-            gh issue create --title 'Missed mutants' --body-file report.md
+          # A step summary is capped at 1 MiB; the artifacts and the issue have everything.
+          if [[ $(wc -c < report.md) -gt 900000 ]]; then
+            { head -c 900000 report.md; printf '\n```\nCut here: the full list is in the issue and the mutants-part artifacts of the run.\n'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            cat report.md >> "$GITHUB_STEP_SUMMARY"
           fi
+          [[ -z $no_results ]] || has_findings=true
+          bash scripts/mutants-post.sh report.md "$has_findings"

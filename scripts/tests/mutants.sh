@@ -33,6 +33,8 @@ exit 0
 CARGO
 chmod +x "$work/bin/cargo"
 git -C "$repo" init -q -b main
+# The test commits are not Conventional Commits: keep any global commit hooks out.
+git -C "$repo" config core.hooksPath /dev/null
 git -C "$repo" add -A
 git -C "$repo" -c user.name=t -c user.email=t@example.com commit -q -m base
 git -C "$repo" checkout -q -b change
@@ -119,6 +121,18 @@ printf 'a.rs:1:1: replace f with g\n' >"$results/missed.txt"
 rm "$results/caught.txt"
 comment ''
 grep -q '0 of 1 changes caught by a test' "$work/calls" || fail 'no caught list is not zero'
+# A list too long for one comment is cut between lines, the fence stays closed, and the run page keeps every row.
+for i in $(seq 1 3000); do printf 'crates/bot-core/src/long_file_name.rs:%s:9: replace f with g\n' "$i"; done >"$results/missed.txt"
+comment ''
+body_size=$(wc -c <"$work/calls")
+((body_size <= 60000)) || fail "comment body is $body_size bytes"
+grep -q 'more not shown here' "$work/calls" || fail 'no note about the cut rows'
+[[ $(grep -c '^```$' "$work/calls") == 2 ]] || fail 'unbalanced fence after the cut'
+grep -q 'long_file_name.rs:1000:9' "$work/calls" || fail 'first row lost'
+grep -q 'long_file_name.rs:999:9' "$work/calls" && fail 'row past the limit kept'
+grep -q 'Full report' "$work/calls" || fail 'no link after the cut'
+[[ $(grep -c 'long_file_name' "$work/summary") -ge 3000 ]] || fail 'run summary lost rows'
+printf 'a.rs:1:1: replace f with g\n' >"$results/missed.txt"
 # Nothing to mutate leaves no results at all, which is the same as all caught.
 rm -r "$results"
 comment 99
