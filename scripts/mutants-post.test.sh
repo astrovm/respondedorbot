@@ -36,8 +36,7 @@ grep -q "Continued, 2 of $pieces" "$FAKE/post-1" || fail "no continuation line"
 
 # A short report on an open issue is one comment.
 run_case short; echo '[]' >/dev/null; echo 12 > "$FAKE/open"
-# shellcheck disable=SC2016 # the backticks are Markdown
-printf 'Parts 1\n\n### Lived (1)\n```\nsrc/a.ts:1 x\n```\n' > "$work/report.md"
+printf '%s\n' 'Parts 1' '' '### Lived (1)' '```' 'src/a.ts:1 x' '```' > "$work/report.md"
 "$here/mutants-post.sh" "$work/report.md" true > /dev/null
 [ "$(cat "$FAKE/commented")" = 12 ] || fail "not one comment on 12"
 [ ! -f "$FAKE/created" ] || fail "opened a second issue"

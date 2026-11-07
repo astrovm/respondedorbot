@@ -17,12 +17,11 @@ make_body() {
     local limit=$1 shown=$lived note=
     if (($(printf '%s' "$lived" | LC_ALL=C wc -c) > limit)); then
         shown=$(printf '%s\n' "$lived" | LC_ALL=C awk -v max="$limit" '{ n += length($0) + 1; if (n > max) exit; print }')
-        note="
-$(($(grep -c . <<<"$lived") - $(grep -c . <<<"$shown"))) more not shown here, see the full report."
+        note="$(($(grep -c . <<<"$lived") - $(grep -c . <<<"$shown"))) more not shown here, see the full report."
     fi
-    # shellcheck disable=SC2016 # the backticks are Markdown, not command substitution
-    printf '%s\n**Mutation testing:** %s of %s changes caught by a test.\n\n```\n%s\n```%s\n\nEach one is a change to the code no test noticed. Not a blocker: real gaps get their own PR. [Full report](%s)' \
-        "$marker" "$caught" "$total" "$shown" "$note" "$RUN"
+    printf '%s\n' "$marker" "**Mutation testing:** $caught of $total changes caught by a test." '' '```' "$shown" '```'
+    [[ -z $note ]] || printf '%s\n' "$note"
+    printf '\n%s' "Each one is a change to the code no test noticed. Not a blocker: real gaps get their own PR. [Full report]($RUN)"
 }
 body=$(make_body "${MUTANTS_COMMENT_LIMIT:-58000}")
 [[ -z $lived ]] || make_body 900000 >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
