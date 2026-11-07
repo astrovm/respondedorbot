@@ -87,7 +87,8 @@ pub fn parse_devo_input(input: &str) -> Result<DevoInput, UnsupportedNumericInpu
         };
         (fee / 100.0, 0.0)
     };
-    if fee.is_nan() || fee > 1.0 || purchase.is_nan() || purchase < 0.0 {
+    // The fee is a percentage from 0 to 100 and the purchase a finite amount from 0.
+    if !(0.0..=1.0).contains(&fee) || !purchase.is_finite() || purchase < 0.0 {
         return Ok(DevoInput::InputError);
     }
     Ok(DevoInput::Valid { fee, purchase })
@@ -415,6 +416,50 @@ mod tests {
             };
             prop_assert!(profit(low.saturating_add(extra).min(100))? <= profit(low)?);
         }
+    }
+
+    #[test]
+    fn fee_outside_zero_to_one_hundred_is_an_input_error() {
+        for input in [
+            "-5",
+            "-0.01",
+            "-inf",
+            "-infinity",
+            "inf",
+            "101",
+            "1e400",
+            "-1e400",
+            "-5, 10",
+            "-inf, 10",
+        ] {
+            assert_eq!(
+                parse_devo_input(input),
+                Ok(DevoInput::InputError),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn purchase_must_be_a_finite_amount_from_zero() {
+        for input in ["5, inf", "5, +infinity", "5, 1e400", "5, -inf", "5, -0.01"] {
+            assert_eq!(
+                parse_devo_input(input),
+                Ok(DevoInput::InputError),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_limits_and_plain_fees_are_valid() {
+        let valid = |fee, purchase| Ok(DevoInput::Valid { fee, purchase });
+        assert_eq!(parse_devo_input("0.5"), valid(0.005, 0.0));
+        assert_eq!(parse_devo_input("0"), valid(0.0, 0.0));
+        assert_eq!(parse_devo_input("100"), valid(1.0, 0.0));
+        assert_eq!(parse_devo_input("0, 0"), valid(0.0, 0.0));
+        assert_eq!(parse_devo_input("100, 1e6"), valid(1.0, 1_000_000.0));
+        assert_eq!(parse_devo_input("-0"), valid(-0.0, 0.0));
     }
 
     #[test]
