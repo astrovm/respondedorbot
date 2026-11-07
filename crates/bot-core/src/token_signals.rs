@@ -2311,6 +2311,10 @@ mod tests {
         let caption = format_signal_caption(&signal, 1_700_086_400);
         assert!(caption.contains("ATH <b>$2M ("), "{caption}");
         assert!(caption.contains("-50%"), "{caption}");
+        // Without a market cap, the price itself is measured against the ATH price.
+        signal.pair.market_cap = json!(null);
+        let caption = format_signal_caption(&signal, 1_700_086_400);
+        assert!(caption.contains("ATH <b>$2 (-50%"), "{caption}");
     }
 
     #[test]
