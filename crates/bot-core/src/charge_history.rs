@@ -891,6 +891,61 @@ mod tests {
     }
 
     #[test]
+    fn empty_page_and_page_buttons_have_text_in_each_locale() {
+        let empty = ChargeHistoryPage {
+            groups: Vec::new(),
+            has_newer: false,
+            has_older: false,
+            newer_cursor: None,
+            older_cursor: None,
+        };
+        // Telegram rejects empty message text, so a missing label would lose the reply.
+        for (locale, text) in [
+            (Locale::Es, "No tenés gastos de IA recientes"),
+            (Locale::En, "You have no recent AI spending"),
+        ] {
+            assert_eq!(
+                render_charge_history_page(&empty, 55, 10, 0, locale).0,
+                text
+            );
+        }
+        let middle = ChargeHistoryPage {
+            groups: vec![ChargeHistoryGroup {
+                cursor_id: 20,
+                created_at: "2026-08-26T17:32:00+00:00".to_owned(),
+                entries: vec![ChargeHistoryEntry {
+                    id: 20,
+                    event_type: "ai_settlement_result".to_owned(),
+                    metadata: json!({"charged_credit_units_total": 8, "payer_scope": "chat"}),
+                }],
+            }],
+            has_newer: true,
+            has_older: true,
+            newer_cursor: Some(20),
+            older_cursor: Some(20),
+        };
+        let navigation = |locale: Locale| {
+            let (text, keyboard) = render_charge_history_page(&middle, 55, 10, 0, locale);
+            let buttons = keyboard
+                .and_then(|keyboard| keyboard.inline_keyboard.first().cloned())
+                .unwrap_or_default();
+            (
+                text,
+                buttons
+                    .into_iter()
+                    .map(|button| button.text)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let (text, buttons) = navigation(Locale::Es);
+        assert!(text.ends_with("(grupo)"), "{text}");
+        assert_eq!(buttons, ["‹ Más recientes", "Más antiguos ›"]);
+        let (text, buttons) = navigation(Locale::En);
+        assert!(text.ends_with("(group)"), "{text}");
+        assert_eq!(buttons, ["‹ Newer", "Older ›"]);
+    }
+
+    #[test]
     fn renders_youtube_transcript_charge_in_each_locale() {
         let page = ChargeHistoryPage {
             groups: vec![ChargeHistoryGroup {
