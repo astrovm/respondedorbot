@@ -126,4 +126,23 @@ mod tests {
             "BTC: 1 USD (+1% 24h)"
         );
     }
+
+    #[test]
+    fn prices_below_one_keep_four_significant_digits() {
+        assert_eq!(price(0.123456), "0.1235");
+        assert_eq!(price(0.0123456), "0.01235");
+        assert_eq!(price(0.5), "0.5");
+        assert_eq!(price(1234.56789), "1234.5679");
+    }
+
+    #[test]
+    fn price_and_change_switch_format_exactly_on_their_limits() {
+        // 1e-12 is still written out in full, only smaller values use exponents.
+        assert_eq!(price(1e-12), "0.000000000001");
+        assert_eq!(price(9e-13), "9.0000e-13");
+        // A change of exactly 0.005 rounds to a visible +0.01, anything smaller is zero.
+        assert_eq!(change(Some(0.005)), "+0.01%");
+        assert_eq!(change(Some(-0.005)), "-0.01%");
+        assert_eq!(change(Some(0.004)), "+0%");
+    }
 }

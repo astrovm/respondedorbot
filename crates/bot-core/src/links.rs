@@ -751,4 +751,19 @@ mod tests {
         assert!(!profile("https://x.com/home"));
         assert!(!profile("https://x.com/someone/media/extra"));
     }
+
+    #[test]
+    fn plain_and_www_reddit_links_are_repaired_like_subdomains() {
+        let input = concat!(
+            "https://www.reddit.com/r/rust/comments/7?x=1 ",
+            "https://reddit.com/r/rust/comments/8?x=1"
+        );
+        let mut probed = Vec::new();
+        let result = replace(input, 7_200, |_| true, &mut probed);
+        assert!(result.changed);
+        assert_eq!(
+            result.text,
+            "https://rxddit.com/r/rust/comments/7 https://rxddit.com/r/rust/comments/8"
+        );
+    }
 }

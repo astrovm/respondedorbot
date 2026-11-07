@@ -4262,4 +4262,22 @@ mod tests {
         assert!(explicit_slug_requests("abc", &[named("Abc")]).is_empty());
         assert!(explicit_slug_requests("$examplecoin", &[named("Examplecoin")]).is_empty());
     }
+
+    #[test]
+    fn a_listing_with_a_dot_only_ranks_first_when_its_base_is_the_query() {
+        let quote = |symbol: &str, name: &str| listed_stock(symbol, name, "X", "USD");
+        let order = |quotes: &mut [StockQuote]| {
+            quotes.sort_by(|left, right| compare_stock_quotes("rock", left, right));
+            quotes
+                .iter()
+                .map(|quote| quote.symbol.clone())
+                .collect::<Vec<_>>()
+        };
+        // XYZ.L has nothing to do with "rock", so the real company comes first.
+        let mut unrelated_dotted = [quote("XYZ.L", "Unrelated"), quote("ZZZ", "Rock Inc")];
+        assert_eq!(order(&mut unrelated_dotted), vec!["ZZZ", "XYZ.L"]);
+        // A name that merely contains the query still beats a name that does not.
+        let mut contains = [quote("AAA", "Unrelated"), quote("ZZZ", "The rock")];
+        assert_eq!(order(&mut contains), vec!["ZZZ", "AAA"]);
+    }
 }
