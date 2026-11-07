@@ -176,6 +176,13 @@ mod tests {
     use crate::telegram_input::{ChatId, MessageId, UserId};
 
     #[test]
+    fn state_lifetimes_are_thirty_days_and_three_days() {
+        // docs/PERSISTENCE.md lists both. Chat memory must not expire early.
+        assert_eq!(super::CHAT_STATE_TTL_SECONDS, 2_592_000);
+        assert_eq!(super::BOT_MESSAGE_METADATA_TTL_SECONDS, 259_200);
+    }
+
+    #[test]
     fn incoming_plan_matches_user_history_and_group_member_contracts() {
         let plan = prepare_incoming_command_state(IncomingCommandState {
             chat_id: ChatId(-42),
