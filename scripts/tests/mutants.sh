@@ -28,6 +28,7 @@ cat >"$work/bin/cargo" <<'CARGO'
 #!/bin/bash
 if [[ $1 == mutants && $2 == --version ]]; then echo "cargo-mutants ${FAKE_VERSION:-27.1.0}"; exit 0; fi
 printf '%s\n' "$*" >>"$CARGO_CALLS"
+env | grep '_RUNNER=' >"$CARGO_CALLS.runner"
 [[ $1 == mutants ]] && exit "${FAKE_STATUS:-0}"
 exit 0
 CARGO
@@ -137,4 +138,9 @@ printf 'a.rs:1:1: replace f with g\n' >"$results/missed.txt"
 rm -r "$results"
 comment 99
 grep -q '^api -X DELETE repos/o/r/issues/comments/99$' "$work/calls" || fail 'comment kept with no results'
+# A test that allocates forever must abort, not take the runner down with it.
+if command -v prlimit >/dev/null; then
+    expect_code 0 mutants scripts/mutants.sh shard 0/64
+    grep -q 'prlimit --as=8589934592$' "$work/calls.runner" || fail 'tests run without a memory limit'
+fi
 echo 'PASS mutation helper scripts'
