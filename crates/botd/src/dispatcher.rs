@@ -9440,6 +9440,42 @@ mod tests {
     }
 
     #[test]
+    fn chart_timezone_uses_the_chat_offset_and_survives_config_failures() {
+        let dispatcher = |value| {
+            NativeDispatcher::new(
+                Config {
+                    value,
+                    chat_ids: Vec::new(),
+                },
+                Actions::default(),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+        };
+        let mut configured = dispatcher(Ok(ChatConfig {
+            timezone_offset: 5,
+            ..ChatConfig::default()
+        }));
+        assert_eq!(configured.chart_utc_offset("-100"), 5);
+        assert_eq!(configured.config.chat_ids, vec!["-100".to_owned()]);
+        assert!(configured.state_diagnostics.is_empty());
+
+        // A failed read still draws the chart, in the default timezone.
+        let mut failing = dispatcher(Err("synthetic config failure"));
+        assert_eq!(
+            failing.chart_utc_offset("-100"),
+            bot_core::chat_config::DEFAULT_TIMEZONE_OFFSET
+        );
+        assert_eq!(
+            failing.state_diagnostics,
+            vec!["chart timezone config unavailable: synthetic config failure".to_owned()]
+        );
+    }
+
+    #[test]
     fn configuration_and_action_errors_are_not_acknowledged() {
         let config = Config {
             value: Err("synthetic config failure"),
