@@ -12,7 +12,8 @@ use crate::telegram_input::{ChatId, MessageId};
 pub const TIMEZONE_OFFSET_MIN: i64 = -12;
 pub const TIMEZONE_OFFSET_MAX: i64 = 14;
 
-fn offset_text(offset: i64) -> String {
+#[must_use]
+pub fn offset_text(offset: i64) -> String {
     match offset.cmp(&0) {
         std::cmp::Ordering::Equal => "UTC".to_owned(),
         std::cmp::Ordering::Greater => format!("UTC+{offset}"),

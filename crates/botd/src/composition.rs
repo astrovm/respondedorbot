@@ -946,6 +946,7 @@ where
         &mut self,
         chart: &bot_core::market_prices::MarketChart,
         now_unix: i64,
+        utc_offset_hours: i64,
     ) -> Result<crate::dispatcher::MarketChartRender, String> {
         if chart.yahoo_symbol.trim().is_empty() {
             return Err("no verified market chart target".to_owned());
@@ -968,6 +969,7 @@ where
             &quote,
             &load.candles,
             period,
+            utc_offset_hours,
         )?;
         // Without a timeframe the candles span five days, so their change is
         // not a daily one. The quote text already carries the daily change and
@@ -1579,7 +1581,12 @@ where
             diagnostics,
         }
     }
-    fn render_chart(&mut self, quote: &StockQuote, now_unix: i64) -> Result<Vec<u8>, String> {
+    fn render_chart(
+        &mut self,
+        quote: &StockQuote,
+        now_unix: i64,
+        utc_offset_hours: i64,
+    ) -> Result<Vec<u8>, String> {
         let load = bot_adapters::yahoo_finance::load_chart(
             &self.yahoo_transport,
             &mut self.cache,
@@ -1587,7 +1594,7 @@ where
             now_unix,
             Some(bot_adapters::yahoo_finance::DEFAULT_CHART_PERIOD),
         );
-        bot_adapters::token_signal::render_market_chart(quote, &load.candles)
+        bot_adapters::token_signal::render_market_chart(quote, &load.candles, utc_offset_hours)
     }
 }
 
@@ -2980,8 +2987,9 @@ where
         signal: &bot_core::token_signals::TokenSignal,
         period: &str,
         now: i64,
+        utc_offset_hours: i64,
     ) -> Result<Vec<u8>, String> {
-        TokenSignalAdapter::render_period_photo(self, signal, period, now)
+        TokenSignalAdapter::render_period_photo(self, signal, period, now, utc_offset_hours)
     }
 
     fn period_candles(
@@ -6749,12 +6757,12 @@ mod tests {
             pump: None,
         };
         assert!(
-            TokenSignalSource::render_period_photo(&mut adapter, &signal, "24h", 1_800_000_000)
+            TokenSignalSource::render_period_photo(&mut adapter, &signal, "24h", 1_800_000_000, -3)
                 .is_err()
         );
 
         assert!(
-            TokenSignalSource::render_period_photo(&mut adapter, &signal, "7d", 1_800_000_000)
+            TokenSignalSource::render_period_photo(&mut adapter, &signal, "7d", 1_800_000_000, -3)
                 .is_err()
         );
         assert_eq!(
@@ -8277,7 +8285,7 @@ mod tests {
         assert!(failing_source.take_selection("market-key").is_err());
         assert!(failing_source.claim("market-key", "1", 60).is_err());
         assert!(failing_source.clear_selection("market-key").is_err());
-        assert!(source.render_chart(&chart, 1_700_000_000).is_err());
+        assert!(source.render_chart(&chart, 1_700_000_000, -3).is_err());
         // The resolver intentionally leaves unknown identities without a
         // guessed Yahoo symbol. Supply a verified fixture target to exercise
         // the renderer itself.
@@ -8295,7 +8303,7 @@ mod tests {
             .chart_responses
             .borrow_mut()
             .push(response());
-        let png = source.render_chart(&chart, 1_700_000_000)?;
+        let png = source.render_chart(&chart, 1_700_000_000, -3)?;
         assert!(png.photo.starts_with(b"\x89PNG"));
         // Without a timeframe the chart still shows five days of intraday
         // bars, extended hours included, instead of five daily candles.
@@ -8321,7 +8329,7 @@ mod tests {
             .chart_responses
             .borrow_mut()
             .push(response());
-        let ranged = source.render_chart(&ranged_chart, 1_700_000_000)?;
+        let ranged = source.render_chart(&ranged_chart, 1_700_000_000, -3)?;
         assert!(ranged.photo.starts_with(b"\x89PNG"));
         assert_eq!(ranged.caption.as_deref(), Some("EXM: 42 USD (+5% 1m)"));
         assert_eq!(
@@ -8344,7 +8352,12 @@ mod tests {
             variation: 5.0,
             change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
-        assert!(source.stocks.render_chart(&quote, 1_700_000_000).is_err());
+        assert!(
+            source
+                .stocks
+                .render_chart(&quote, 1_700_000_000, -3)
+                .is_err()
+        );
         source
             .stocks
             .yahoo_transport
@@ -8354,7 +8367,7 @@ mod tests {
         assert!(
             source
                 .stocks
-                .render_chart(&quote, 1_700_000_000)?
+                .render_chart(&quote, 1_700_000_000, -3)?
                 .starts_with(b"\x89PNG")
         );
         assert_eq!(
@@ -9302,14 +9315,20 @@ mod tests {
             candidate: None,
         };
         assert_eq!(
-            source.render_chart(&chart, 1_700_000_000).err().as_deref(),
+            source
+                .render_chart(&chart, 1_700_000_000, -3)
+                .err()
+                .as_deref(),
             Some("no verified market chart target")
         );
         assert!(source.stocks.yahoo_transport.charts.borrow().is_empty());
 
         chart.yahoo_symbol = "EXM-USD".to_owned();
         assert_eq!(
-            source.render_chart(&chart, 1_700_000_000).err().as_deref(),
+            source
+                .render_chart(&chart, 1_700_000_000, -3)
+                .err()
+                .as_deref(),
             Some("historical chart data unavailable")
         );
         // One five-day intraday request. The chart has no caption, so it
