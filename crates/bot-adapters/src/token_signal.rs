@@ -1301,7 +1301,10 @@ fn render_price_chart_with_fonts(
     let bottom = i32::try_from(height).map_err(|_| "chart height is too large")? - 82;
     let grid = Rgb([17, 24, 39]);
     let muted = Rgb([170, 185, 205]);
-    let price = flexible_number(&pair.price_usd).unwrap_or(0.0);
+    // A provider can send "inf" or "NaN" as text; treat it as no live price.
+    let price = flexible_number(&pair.price_usd)
+        .filter(|price| price.is_finite())
+        .unwrap_or(0.0);
     let symbol = if pair.base_token.symbol.is_empty() {
         "TOKEN".to_owned()
     } else {
@@ -1344,26 +1347,21 @@ fn render_price_chart_with_fonts(
     } else {
         candles.last().map_or(0.0, |candle| candle[4])
     };
-    let change = candles
-        .first()
-        .map(|candle| (current / candle[1] - 1.0) * 100.0)
-        .filter(|change| change.is_finite());
+    // Usable candles have a finite, positive open, so the change is finite.
+    let change = (current / candles[0][1] - 1.0) * 100.0;
 
     // Heading, with the change over the whole chart on the right.
     if let Some(font) = &fonts.bold {
-        let mut reserved = 0;
-        if let Some(change) = change {
-            let text = bot_core::output_format::change(Some(change));
-            let text_width = imageproc::drawing::text_size(34.0, &font, &text).0;
-            let color = if change >= 0.0 {
-                Rgb([18, 184, 166])
-            } else {
-                Rgb([255, 67, 86])
-            };
-            let x = i32::try_from(width.saturating_sub(24 + text_width)).unwrap_or(0);
-            draw_text_mut(&mut image, color, x, 20, 34.0, &font, &text);
-            reserved = text_width + 32;
-        }
+        let text = bot_core::output_format::change(Some(change));
+        let text_width = imageproc::drawing::text_size(34.0, &font, &text).0;
+        let color = if change >= 0.0 {
+            Rgb([18, 184, 166])
+        } else {
+            Rgb([255, 67, 86])
+        };
+        let x = i32::try_from(width.saturating_sub(24 + text_width)).unwrap_or(0);
+        draw_text_mut(&mut image, color, x, 20, 34.0, &font, &text);
+        let reserved = text_width + 32;
         let title = format!("{symbol}\n{price_text}");
         for (index, line) in heading.unwrap_or(&title).lines().take(2).enumerate() {
             let font_size = if index == 0 { 38.0 } else { 28.0 };
@@ -1587,6 +1585,70 @@ mod tests {
                 "BTC: 80 USD (N/A 1m)"
             );
         }
+    }
+
+    /// Hourly candles from 2026-11-06 00:00 UTC, rising or falling 0.1% each.
+    fn hourly_candles(hours: usize, rising: bool) -> Vec<Vec<f64>> {
+        (0..hours)
+            .map(|hour| {
+                let step = if rising { 1.001_f64 } else { 0.999 };
+                let open = 100.0 * step.powi(hour as i32);
+                let close = open * step;
+                vec![
+                    1_793_923_200.0 + hour as f64 * 3_600.0,
+                    open,
+                    open.max(close) * 1.0005,
+                    open.min(close) * 0.9995,
+                    close,
+                    10.0,
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chart_axes_cover_short_long_and_crowded_time_ranges() {
+        let quote = |price: f64| bot_core::stocks::StockQuote {
+            symbol: "EXM".into(),
+            name: "Example".into(),
+            price,
+            currency: "USD".into(),
+            exchange: "TEST".into(),
+            asset_type: String::new(),
+            variation: 0.0,
+            change_window: bot_core::stocks::ChangeWindow::PreviousClose,
+        };
+        let render = |candles: &[Vec<f64>], price: f64, period: &str| {
+            super::render_market_chart_for_period(&quote(price), candles, period, -3)
+        };
+        // Three rising days: a line per local day and a green change.
+        let short = hourly_candles(72, true);
+        assert!(render(&short, 0.0, "3d").is_ok_and(|png| png.starts_with(b"\x89PNG")));
+        // Thirty falling days: too many day lines, so only labeled ones show,
+        // and unlabeled day boundaries draw nothing.
+        let long = hourly_candles(30 * 24, false);
+        assert!(render(&long, 0.0, "30d").is_ok_and(|png| png.starts_with(b"\x89PNG")));
+        // One late candle before a new day puts two labels on top of each
+        // other; the second is skipped instead of overlapping.
+        let mut crowded = hourly_candles(48, true);
+        crowded[0][0] -= 3_600.0;
+        assert!(render(&crowded[..30], 0.0, "1d").is_ok_and(|png| png.starts_with(b"\x89PNG")));
+        // A provider's "inf" price falls back to the last close.
+        let pair = bot_core::token_signals::TokenPair {
+            price_usd: serde_json::json!("inf"),
+            ..bot_core::token_signals::TokenPair::default()
+        };
+        assert_eq!(
+            super::render_price_chart(&pair, &short, None, None, (1_280, 900), 0),
+            super::render_price_chart(
+                &bot_core::token_signals::TokenPair::default(),
+                &short,
+                None,
+                None,
+                (1_280, 900),
+                0
+            )
+        );
     }
 
     #[test]
