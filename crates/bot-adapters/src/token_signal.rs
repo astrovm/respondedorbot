@@ -1711,14 +1711,14 @@ mod tests {
             &candles,
             bot_core::stocks::stock_change_period(&unknown),
             -3,
-        )?;
+        );
         let candle_change = bot_core::stocks::StockQuote {
             variation: (100.0 / 99.0 - 1.0) * 100.0,
             ..quote
         };
         assert_eq!(
             from_candles,
-            super::render_market_chart(&candle_change, &candles, -3)?
+            super::render_market_chart(&candle_change, &candles, -3)
         );
         Ok(())
     }

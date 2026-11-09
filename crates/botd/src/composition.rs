@@ -9374,6 +9374,21 @@ mod tests {
                 (false, day)
             ]
         );
+        // A timeframe chart with a quote but no history fails the same way.
+        source
+            .stocks
+            .yahoo_transport
+            .chart_responses
+            .borrow_mut()
+            .push(yahoo_chart("EXM-USD"));
+        chart.timeframe = Some("7d".to_owned());
+        assert_eq!(
+            source
+                .render_chart(&chart, 1_700_000_000, -3)
+                .err()
+                .as_deref(),
+            Some("historical chart data unavailable")
+        );
     }
 
     #[test]
