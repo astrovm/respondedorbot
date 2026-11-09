@@ -869,6 +869,7 @@ where
         signal: &TokenSignal,
         period: &str,
         now: i64,
+        utc_offset_hours: i64,
     ) -> Result<Vec<u8>, String> {
         let history = self.load_period_history(signal, period, now)?;
         let shown = history
@@ -883,7 +884,14 @@ where
                 );
                 let mut pair = signal.pair.clone();
                 pair.price_usd = json!(flat[1][4]);
-                return render_price_chart(&pair, &flat, Some(&title), None, 1280, 900);
+                return render_price_chart(
+                    &pair,
+                    &flat,
+                    Some(&title),
+                    None,
+                    (1280, 900),
+                    utc_offset_hours,
+                );
             }
             return Err("requested token history unavailable".into());
         }
@@ -896,8 +904,8 @@ where
             &history.windowed,
             Some(&title),
             None,
-            1280,
-            900,
+            (1280, 900),
+            utc_offset_hours,
         )
     }
 
@@ -1161,15 +1169,28 @@ pub fn render_signal_chart(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, String> {
-    render_price_chart(&signal.pair, &signal.candles, None, None, width, height)
+    render_price_chart(
+        &signal.pair,
+        &signal.candles,
+        None,
+        None,
+        (width, height),
+        bot_core::chat_config::DEFAULT_TIMEZONE_OFFSET,
+    )
 }
 
 /// Render the default market chart using the same drawing engine as token cards.
 pub fn render_market_chart(
     quote: &bot_core::stocks::StockQuote,
     candles: &[Vec<f64>],
+    utc_offset_hours: i64,
 ) -> Result<Vec<u8>, String> {
-    render_market_chart_for_period(quote, candles, crate::yahoo_finance::DEFAULT_CHART_PERIOD)
+    render_market_chart_for_period(
+        quote,
+        candles,
+        crate::yahoo_finance::DEFAULT_CHART_PERIOD,
+        utc_offset_hours,
+    )
 }
 
 /// Keep chart captions aligned with the requested chart period.
@@ -1200,6 +1221,7 @@ pub fn render_market_chart_for_period(
     quote: &bot_core::stocks::StockQuote,
     candles: &[Vec<f64>],
     period: &str,
+    utc_offset_hours: i64,
 ) -> Result<Vec<u8>, String> {
     if candles.is_empty() {
         return Err("historical chart data unavailable".to_owned());
@@ -1214,8 +1236,8 @@ pub fn render_market_chart_for_period(
         candles,
         Some(&title),
         Some(&quote.currency),
-        1_280,
-        900,
+        (1_280, 900),
+        utc_offset_hours,
     )
 }
 
@@ -1233,14 +1255,22 @@ fn render_price_chart(
     candles: &[Vec<f64>],
     heading: Option<&str>,
     currency: Option<&str>,
-    width: u32,
-    height: u32,
+    (width, height): (u32, u32),
+    utc_offset_hours: i64,
 ) -> Result<Vec<u8>, String> {
     let fonts = ChartFonts {
         bold: chart_font(true),
         regular: chart_font(false),
     };
-    render_price_chart_with_fonts(pair, candles, heading, currency, (width, height), &fonts)
+    render_price_chart_with_fonts(
+        pair,
+        candles,
+        heading,
+        currency,
+        (width, height),
+        utc_offset_hours,
+        &fonts,
+    )
 }
 
 /// Fonts are optional: without system fonts the chart still renders, only
@@ -1256,8 +1286,11 @@ fn render_price_chart_with_fonts(
     heading: Option<&str>,
     currency: Option<&str>,
     (width, height): (u32, u32),
+    utc_offset_hours: i64,
     fonts: &ChartFonts,
 ) -> Result<Vec<u8>, String> {
+    use bot_core::chart_layout::{merge_candles, price_ticks, time_ticks};
+
     if width < 320 || height < 240 {
         return Err("token chart dimensions are too small".to_owned());
     }
@@ -1266,27 +1299,77 @@ fn render_price_chart_with_fonts(
     let right = i32::try_from(width).map_err(|_| "chart width is too large")? - 200;
     let top = 130_i32;
     let bottom = i32::try_from(height).map_err(|_| "chart height is too large")? - 82;
+    let grid = Rgb([17, 24, 39]);
+    let muted = Rgb([170, 185, 205]);
     let price = flexible_number(&pair.price_usd).unwrap_or(0.0);
     let symbol = if pair.base_token.symbol.is_empty() {
         "TOKEN".to_owned()
     } else {
         pair.base_token.symbol.to_ascii_uppercase()
     };
-    let price_label = |value| match currency {
-        Some(currency) => format!(
-            "{} {currency}",
-            format_money(value, true).trim_start_matches('$')
-        ),
-        None => format_money(value, true),
+    let price_label = |value| {
+        let number = bot_core::output_format::readable_number(
+            format_money(value, true).trim_start_matches('$'),
+        );
+        match currency {
+            Some(currency) => format!("{number} {currency}"),
+            None => format!("${number}"),
+        }
+    };
+    let tick_label = |value: f64, decimals: usize| {
+        let number = bot_core::output_format::readable_number(&format!("{value:.decimals$}"));
+        match currency {
+            Some(currency) => format!("{number} {currency}"),
+            None => format!("${number}"),
+        }
     };
     let price_text = price_label(price);
+    let reference_price = pair_reference_price(pair);
+    let mut candles = filter_chart_candles(candles.to_vec(), reference_price);
+    if candles
+        .first()
+        .zip(candles.last())
+        .is_some_and(|(first, last)| first[0] > last[0])
+    {
+        candles.reverse();
+    }
+    if candles.is_empty() {
+        return Err("token chart history unavailable".to_owned());
+    }
+    let chart_width = (right - left).max(1);
+    // Six pixels per candle keeps bodies apart; denser data is merged.
+    let candles = merge_candles(candles, usize::try_from(chart_width / 6).unwrap_or(1));
+    let current = if price != 0.0 {
+        price
+    } else {
+        candles.last().map_or(0.0, |candle| candle[4])
+    };
+    let change = candles
+        .first()
+        .map(|candle| (current / candle[1] - 1.0) * 100.0)
+        .filter(|change| change.is_finite());
+
+    // Heading, with the change over the whole chart on the right.
     if let Some(font) = &fonts.bold {
+        let mut reserved = 0;
+        if let Some(change) = change {
+            let text = bot_core::output_format::change(Some(change));
+            let text_width = imageproc::drawing::text_size(34.0, &font, &text).0;
+            let color = if change >= 0.0 {
+                Rgb([18, 184, 166])
+            } else {
+                Rgb([255, 67, 86])
+            };
+            let x = i32::try_from(width.saturating_sub(24 + text_width)).unwrap_or(0);
+            draw_text_mut(&mut image, color, x, 20, 34.0, &font, &text);
+            reserved = text_width + 32;
+        }
         let title = format!("{symbol}\n{price_text}");
         for (index, line) in heading.unwrap_or(&title).lines().take(2).enumerate() {
             let font_size = if index == 0 { 38.0 } else { 28.0 };
             let mut label = line.to_owned();
             while imageproc::drawing::text_size(font_size, &font, &label).0
-                > width.saturating_sub(48)
+                > width.saturating_sub(48 + reserved)
                 && label.chars().count() > 1
             {
                 label.pop();
@@ -1302,137 +1385,134 @@ fn render_price_chart_with_fonts(
             );
         }
     }
-    for index in 0..6 {
-        let y = top + (bottom - top) * index / 5;
-        draw_line(&mut image, left, y, right, y, Rgb([17, 24, 39]));
+
+    // Price scale with round steps.
+    let low = candles
+        .iter()
+        .map(|candle| candle[3])
+        .fold(f64::INFINITY, f64::min);
+    let high = candles
+        .iter()
+        .map(|candle| candle[2])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut range = high - low;
+    if !range.is_finite() || range.abs() <= f64::EPSILON {
+        range = high.abs().max(1e-12) * 0.02;
     }
-    for index in 0..7 {
-        let x = left + (right - left) * index / 6;
-        draw_line(&mut image, x, top, x, bottom, Rgb([17, 24, 39]));
+    let minimum = low - range * 0.08;
+    let maximum = high + range * 0.08;
+    let span = (maximum - minimum).max(f64::EPSILON);
+    let y_for = |value: f64| top + (((maximum - value) / span) * f64::from(bottom - top)) as i32;
+    let ticks = price_ticks(minimum, maximum, 5);
+    for value in &ticks.values {
+        let y = y_for(*value);
+        draw_line(&mut image, left, y, right, y, grid);
     }
-    let reference_price = pair_reference_price(pair);
-    let mut candles = filter_chart_candles(candles.to_vec(), reference_price);
-    if candles
-        .first()
-        .zip(candles.last())
-        .is_some_and(|(first, last)| first[0] > last[0])
-    {
-        candles.reverse();
-    }
-    if candles.is_empty() {
-        return Err("token chart history unavailable".to_owned());
-    } else {
-        let low = candles
-            .iter()
-            .map(|candle| candle[3])
-            .fold(f64::INFINITY, f64::min);
-        let high = candles
-            .iter()
-            .map(|candle| candle[2])
-            .fold(f64::NEG_INFINITY, f64::max);
-        let mut range = high - low;
-        if !range.is_finite() || range.abs() <= f64::EPSILON {
-            range = high.abs().max(1e-12) * 0.02;
+
+    // Time axis in the chat's timezone: labeled lines, plus a faint line where
+    // each local day starts when days are far enough apart to read.
+    let count = i32::try_from(candles.len()).unwrap_or(i32::MAX).max(1);
+    let step = f64::from(chart_width) / f64::from(count);
+    let times = candles.iter().map(|candle| candle[0]).collect::<Vec<_>>();
+    let time_marks = time_ticks(&times, utc_offset_hours, 7);
+    let day_lines = time_marks.iter().filter(|tick| tick.day_start).count();
+    // A line per day reads well up to about ten days; past that only labels.
+    let show_day_lines = day_lines <= 10;
+    let boundary_x =
+        |index: usize| left + (f64::from(i32::try_from(index).unwrap_or(i32::MAX)) * step) as i32;
+    for tick in &time_marks {
+        if tick.index == 0 {
+            continue;
         }
-        let minimum = low - range * 0.08;
-        let maximum = high + range * 0.08;
-        let span = (maximum - minimum).max(f64::EPSILON);
-        let y_for =
-            |value: f64| top + (((maximum - value) / span) * f64::from(bottom - top)) as i32;
-        let chart_width = (right - left).max(1);
-        let count = i32::try_from(candles.len()).unwrap_or(i32::MAX).max(1);
-        let step = f64::from(chart_width) / f64::from(count);
-        let body_width = ((step * 0.58) as i32).max(4);
-        for (index, candle) in candles.iter().enumerate() {
-            let index = i32::try_from(index).unwrap_or(i32::MAX);
-            let x = left + (f64::from(index) * step + step / 2.0) as i32;
-            let color = if candle[4] >= candle[1] {
-                Rgb([18, 184, 166])
-            } else {
-                Rgb([255, 67, 86])
-            };
-            draw_line(&mut image, x, y_for(candle[3]), x, y_for(candle[2]), color);
-            let body_top = y_for(candle[1].max(candle[4]));
-            let body_bottom = y_for(candle[1].min(candle[4])).max(body_top + 2);
-            fill_rectangle(
-                &mut image,
-                x - body_width / 2,
-                body_top,
-                x + body_width / 2,
-                body_bottom,
-                color,
-            );
+        let x = boundary_x(tick.index);
+        if tick.day_start && show_day_lines {
+            draw_line(&mut image, x, top, x, bottom, Rgb([40, 52, 70]));
+        } else if tick.label.is_some() {
+            draw_line(&mut image, x, top, x, bottom, grid);
         }
-        let current = if price != 0.0 {
-            price
+    }
+
+    let body_width = ((step * 0.58) as i32).max(3);
+    for (index, candle) in candles.iter().enumerate() {
+        let index = i32::try_from(index).unwrap_or(i32::MAX);
+        let x = left + (f64::from(index) * step + step / 2.0) as i32;
+        let color = if candle[4] >= candle[1] {
+            Rgb([18, 184, 166])
         } else {
-            candles.last().map_or(0.0, |candle| candle[4])
+            Rgb([255, 67, 86])
         };
-        let current_y = y_for(current).clamp(top, bottom);
-        draw_line(
+        draw_line(&mut image, x, y_for(candle[3]), x, y_for(candle[2]), color);
+        let body_top = y_for(candle[1].max(candle[4]));
+        let body_bottom = y_for(candle[1].min(candle[4])).max(body_top + 2);
+        fill_rectangle(
             &mut image,
-            left,
-            current_y,
-            right,
-            current_y,
-            Rgb([0, 184, 148]),
+            x - body_width / 2,
+            body_top,
+            x + body_width / 2,
+            body_bottom,
+            color,
         );
-        if let Some(font) = &fonts.regular {
-            for index in 0..6 {
-                let value = maximum - span * f64::from(index) / 5.0;
-                let y = top + (bottom - top) * index / 5;
-                if (y - current_y).abs() > 32 {
-                    draw_text_mut(
-                        &mut image,
-                        Rgb([170, 185, 205]),
-                        right + 12,
-                        y - 12,
-                        chart_label_size(
-                            font,
-                            &price_label(value),
-                            24.0,
-                            width.saturating_sub((right + 24) as u32),
-                        ),
-                        &font,
-                        &price_label(value),
-                    );
-                }
-            }
-            draw_text_mut(
-                &mut image,
-                Rgb([54, 224, 195]),
-                right + 12,
-                current_y - 12,
-                chart_label_size(
-                    font,
-                    &price_text,
-                    26.0,
-                    width.saturating_sub((right + 24) as u32),
-                ),
-                &font,
-                &price_text,
-            );
-        }
     }
+    let current_y = y_for(current).clamp(top, bottom);
+    draw_line(
+        &mut image,
+        left,
+        current_y,
+        right,
+        current_y,
+        Rgb([0, 184, 148]),
+    );
+
     if let Some(font) = &fonts.regular {
-        for (candle, x) in [
-            (candles.first(), left),
-            (candles.last(), right.saturating_sub(250)),
-        ] {
-            if let Some(candle) = candle
-                && let Some(date) = chrono::DateTime::from_timestamp(candle[0] as i64, 0)
-            {
-                draw_text_mut(
-                    &mut image,
-                    Rgb([170, 185, 205]),
-                    x,
-                    bottom + 24,
-                    24.0,
-                    &font,
-                    &date.format("%Y-%m-%d %H:%M UTC").to_string(),
-                );
+        let label_space = width.saturating_sub((right + 24) as u32);
+        for value in &ticks.values {
+            let y = y_for(*value);
+            if (y - current_y).abs() > 32 {
+                let text = tick_label(*value, ticks.decimals);
+                let size = chart_label_size(font, &text, 24.0, label_space);
+                draw_text_mut(&mut image, muted, right + 12, y - 12, size, &font, &text);
             }
         }
+        draw_text_mut(
+            &mut image,
+            Rgb([54, 224, 195]),
+            right + 12,
+            current_y - 12,
+            chart_label_size(font, &price_text, 26.0, label_space),
+            &font,
+            &price_text,
+        );
+        // Time labels, skipped when they would touch the previous one.
+        let mut free_from = left;
+        for tick in &time_marks {
+            let Some(text) = &tick.label else {
+                continue;
+            };
+            let text_width = i32::try_from(imageproc::drawing::text_size(22.0, &font, text).0)
+                .unwrap_or(i32::MAX);
+            let x = (boundary_x(tick.index) - text_width / 2)
+                .max(left)
+                .min(right - text_width);
+            if x < free_from {
+                continue;
+            }
+            let color = if tick.day_start || tick.index == 0 {
+                Rgb([220, 231, 244])
+            } else {
+                muted
+            };
+            draw_text_mut(&mut image, color, x, bottom + 22, 22.0, &font, text);
+            free_from = x + text_width + 18;
+        }
+        draw_text_mut(
+            &mut image,
+            muted,
+            right + 12,
+            bottom + 22,
+            22.0,
+            &font,
+            &bot_core::config_command::offset_text(utc_offset_hours),
+        );
     }
     let border = Rgb([42, 52, 66]);
     draw_line(&mut image, left, top, right, top, border);
@@ -1521,9 +1601,9 @@ mod tests {
             variation: 1.0,
             change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
-        assert!(super::render_market_chart(&quote, &[]).is_err());
+        assert!(super::render_market_chart(&quote, &[], -3).is_err());
         let png =
-            super::render_market_chart(&quote, &[vec![1.0, 99.0, 102.0, 98.0, 100.0, 1000.0]])?;
+            super::render_market_chart(&quote, &[vec![1.0, 99.0, 102.0, 98.0, 100.0, 1000.0]], -3)?;
         assert!(png.starts_with(b"\x89PNG"));
         Ok(())
     }
@@ -1756,7 +1836,7 @@ mod tests {
             );
             assert!(
                 adapter
-                    .render_period_photo(&signal, "1h", 1800000000)?
+                    .render_period_photo(&signal, "1h", 1800000000, 0)?
                     .starts_with(b"\x89PNG")
             );
         }
@@ -1803,7 +1883,7 @@ mod tests {
             );
             assert!(
                 adapter
-                    .render_period_photo(&signal, period, 1800000000)?
+                    .render_period_photo(&signal, period, 1800000000, 0)?
                     .starts_with(b"\x89PNG")
             );
         }
@@ -1817,7 +1897,7 @@ mod tests {
                 TokenSignalAdapter::new(pump_history(missing, "1m"), Cache::default());
             assert!(
                 adapter
-                    .render_period_photo(&signal, "1h", 1800000000)
+                    .render_period_photo(&signal, "1h", 1800000000, 0)
                     .is_err()
             );
         }
@@ -1853,7 +1933,7 @@ mod tests {
         for period in ["1h", "1d", "7d", "1m", "1y", "5y"] {
             assert!(
                 adapter
-                    .render_period_photo(&signal, period, 1_800_000_000)?
+                    .render_period_photo(&signal, period, 1_800_000_000, 0)?
                     .starts_with(b"\x89PNG")
             );
             assert!(
@@ -1870,7 +1950,7 @@ mod tests {
         drop(calls);
         assert!(
             adapter
-                .render_period_photo(&signal, "bad", 1_800_000_000)
+                .render_period_photo(&signal, "bad", 1_800_000_000, 0)
                 .is_err()
         );
         assert!(
@@ -1880,7 +1960,7 @@ mod tests {
         );
         assert!(
             adapter
-                .render_period_photo(&signal, "2m", 1_900_000_000)
+                .render_period_photo(&signal, "2m", 1_900_000_000, 0)
                 .is_err()
         );
         Ok(())
@@ -1948,7 +2028,7 @@ mod tests {
             assert!(!caption.contains("geckoterminal.com"));
             assert!(
                 adapter
-                    .render_period_photo(&signal, "24h", 1_800_000_000)
+                    .render_period_photo(&signal, "24h", 1_800_000_000, 0)
                     .is_err()
             );
         }
@@ -2031,7 +2111,7 @@ mod tests {
         assert!(signal.candles.is_empty());
         assert!(
             adapter
-                .render_period_photo(&signal, "24h", 1_800_000_000)
+                .render_period_photo(&signal, "24h", 1_800_000_000, 0)
                 .is_err()
         );
         let caption = bot_core::token_signals::format_signal_caption(&signal, 0);
@@ -2528,7 +2608,7 @@ mod tests {
             socials: BTreeMap::new(),
             pump: None,
         };
-        let photo = adapter.render_period_photo(&signal, "24h", 1_800_000_000);
+        let photo = adapter.render_period_photo(&signal, "24h", 1_800_000_000, 0);
         assert!(photo.is_err());
     }
 
@@ -2732,6 +2812,7 @@ mod tests {
             Some("SYN (1d)"),
             Some("USD"),
             (640, 480),
+            0,
             &no_fonts,
         );
         assert!(plain.as_ref().is_ok_and(|png| png.starts_with(b"\x89PNG")));

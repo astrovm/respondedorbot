@@ -18,7 +18,10 @@ use crate::request_cache::{
 const CHART_URL: &str = "https://query1.finance.yahoo.com/v8/finance/chart";
 const SEARCH_URL: &str = "https://query1.finance.yahoo.com/v1/finance/search";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Symbol searches and daily or weekly bars change slowly.
 const CACHE_TTL_SECONDS: i64 = 300;
+/// Prices and intraday bars move every minute, like the other price sources.
+const LIVE_CACHE_TTL_SECONDS: i64 = 60;
 const BASIC_SEARCH_QUOTES_COUNT: usize = 5;
 const EXPANDED_SEARCH_QUOTES_COUNT: usize = 20;
 const MAX_SEARCH_CANDIDATES: usize = 10;
@@ -249,10 +252,14 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
         Some(period) => format!("{}:history:{period}", cache_key(symbol)),
         None => cache_key(symbol),
     };
+    let ttl = match request.window.as_ref().map(|window| window.2.as_str()) {
+        Some("1d" | "1wk") => CACHE_TTL_SECONDS,
+        _ => LIVE_CACHE_TTL_SECONDS,
+    };
     let load = load_cached_json(
         cache,
         &key,
-        CACHE_TTL_SECONDS,
+        ttl,
         now_unix,
         &format!("Yahoo chart request symbol={symbol}"),
         || {
@@ -331,7 +338,7 @@ fn load_intraday<T: YahooFinanceTransport, C: RequestCache>(
     let load = load_cached_json(
         cache,
         &format!("{}:intraday", cache_key(symbol)),
-        CACHE_TTL_SECONDS,
+        LIVE_CACHE_TTL_SECONDS,
         now_unix,
         &format!("Yahoo intraday request symbol={symbol}"),
         || {
@@ -726,6 +733,11 @@ mod tests {
         );
         assert_ne!(cache.writes[0].0, cache.writes[1].0);
         assert_ne!(cache.writes[1].0, cache.writes[2].0);
+        // Intraday bars refresh every minute; weekly bars keep five minutes.
+        assert_eq!(
+            cache.writes.iter().map(|write| write.2).collect::<Vec<_>>(),
+            vec![60, 60, 300]
+        );
     }
 
     #[test]
@@ -872,7 +884,8 @@ mod tests {
         );
         assert!(load.diagnostics.is_empty());
         assert_eq!(transport.requests.borrow()[0].symbol, "BZ=F");
-        assert_eq!(cache.writes[0].2, 300);
+        // Quotes refresh every minute, like the other price sources.
+        assert_eq!(cache.writes[0].2, 60);
     }
 
     #[test]

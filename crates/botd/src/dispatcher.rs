@@ -561,6 +561,7 @@ pub trait StockPriceSource {
         &mut self,
         _quote: &bot_core::stocks::StockQuote,
         _now_unix: i64,
+        _utc_offset_hours: i64,
     ) -> Result<Vec<u8>, String> {
         Err("stock chart unavailable".to_owned())
     }
@@ -968,6 +969,7 @@ pub trait MarketPriceSource {
         &mut self,
         _chart: &bot_core::market_prices::MarketChart,
         _now_unix: i64,
+        _utc_offset_hours: i64,
     ) -> Result<MarketChartRender, String> {
         Err("market chart unavailable".to_owned())
     }
@@ -1119,6 +1121,7 @@ pub trait TokenSignalSource {
         _signal: &TokenSignal,
         _period: &str,
         _now: i64,
+        _utc_offset_hours: i64,
     ) -> Result<Vec<u8>, String> {
         Err("requested token history unavailable".into())
     }
@@ -2517,10 +2520,13 @@ where
                     } else {
                         load.text.clone()
                     };
-                    let photo = self
-                        .market_price_source
-                        .as_mut()
-                        .and_then(|source| source.render_chart(chart, timestamp).ok());
+                    let utc_offset_hours = message
+                        .chat_id
+                        .map(|chat_id| self.chart_utc_offset(&chat_id.0.to_string()))
+                        .unwrap_or(bot_core::chat_config::DEFAULT_TIMEZONE_OFFSET);
+                    let photo = self.market_price_source.as_mut().and_then(|source| {
+                        source.render_chart(chart, timestamp, utc_offset_hours).ok()
+                    });
                     if let Some(rendered) = photo {
                         if let Some(chart_caption) = rendered.caption {
                             caption = chart_caption;
@@ -2715,11 +2721,32 @@ where
         signal: &TokenSignal,
         timeframe: Option<&str>,
         timestamp: i64,
+        utc_offset_hours: i64,
     ) -> Result<Vec<u8>, String> {
         self.token_signal_source.as_mut().map_or(
             Err("native token-signal source disappeared".to_owned()),
-            |source| source.render_period_photo(signal, timeframe.unwrap_or("24h"), timestamp),
+            |source| {
+                source.render_period_photo(
+                    signal,
+                    timeframe.unwrap_or("24h"),
+                    timestamp,
+                    utc_offset_hours,
+                )
+            },
         )
+    }
+
+    /// The chat's UTC offset for chart time labels. A failed config read keeps
+    /// the default offset: the chart stays right, only its clock labels move.
+    fn chart_utc_offset(&mut self, chat_id: &str) -> i64 {
+        match self.config.get(chat_id) {
+            Ok(config) => config.timezone_offset,
+            Err(error) => {
+                self.state_diagnostics
+                    .push(format!("chart timezone config unavailable: {error}"));
+                bot_core::chat_config::DEFAULT_TIMEZONE_OFFSET
+            }
+        }
     }
 
     fn period_change_history(
@@ -2774,16 +2801,21 @@ where
             Some(history.1.as_str()),
             history.0.as_deref(),
         );
-        let photo =
-            match self.render_token_signal_photo(signal, Some(history.1.as_str()), timestamp) {
-                Ok(photo) => photo,
-                Err(_) => {
-                    return TokenSignalPhotoDelivery::Failed {
-                        caption,
-                        failure: TokenSignalPhotoFailure::HistoryUnavailable,
-                    };
-                }
-            };
+        let utc_offset_hours = self.chart_utc_offset(&chat_id.0.to_string());
+        let photo = match self.render_token_signal_photo(
+            signal,
+            Some(history.1.as_str()),
+            timestamp,
+            utc_offset_hours,
+        ) {
+            Ok(photo) => photo,
+            Err(_) => {
+                return TokenSignalPhotoDelivery::Failed {
+                    caption,
+                    failure: TokenSignalPhotoFailure::HistoryUnavailable,
+                };
+            }
+        };
         match self.actions.try_photo(TelegramAction::SendPhoto {
             chat_id,
             photo: photo.into(),
@@ -3108,7 +3140,12 @@ where
             return Ok(DispatchOutcome::Handled);
         };
         let history = self.period_change_history(&signal, state.chart_period.as_deref(), timestamp);
-        let photo = self.render_token_signal_photo(&signal, Some(history.1.as_str()), timestamp);
+        let photo = self.render_token_signal_photo(
+            &signal,
+            Some(history.1.as_str()),
+            timestamp,
+            config.timezone_offset,
+        );
         let edited = match photo {
             Ok(photo) => match self.actions.try_edit(TelegramAction::EditMessagePhoto {
                 chat_id: ChatId(chat_id),
@@ -3429,7 +3466,7 @@ where
         if let Some(chart) = load.chart.as_ref() {
             let rendered = match self.market_price_source.as_mut().map_or(
                 Err("market price source disappeared".to_owned()),
-                |source| source.render_chart(chart, timestamp),
+                |source| source.render_chart(chart, timestamp, config.timezone_offset),
             ) {
                 Ok(rendered) => Some(rendered),
                 Err(error) => {
@@ -6508,7 +6545,7 @@ where
                 && rows.len() == 1
                 && let Some(quote) = &rows[0].1
                 && let Some(source) = self.stock_price_source.as_mut()
-                && let Ok(photo) = source.render_chart(quote, timestamp)
+                && let Ok(photo) = source.render_chart(quote, timestamp, config.timezone_offset)
                 && let Ok(Some(receipt)) = self.actions.try_photo(TelegramAction::SendPhoto {
                     chat_id,
                     photo: photo.into(),
@@ -8155,6 +8192,7 @@ mod tests {
             _: &TokenSignal,
             _: &str,
             _: i64,
+            _utc_offset_hours: i64,
         ) -> Result<Vec<u8>, String> {
             self.photo.clone()
         }
@@ -8195,6 +8233,7 @@ mod tests {
             _signal: &TokenSignal,
             period: &str,
             _now: i64,
+            _utc_offset_hours: i64,
         ) -> Result<Vec<u8>, String> {
             self.periods.borrow_mut().push(period.to_owned());
             self.photo.clone()
@@ -8257,6 +8296,7 @@ mod tests {
             _signal: &TokenSignal,
             period: &str,
             _now: i64,
+            _utc_offset_hours: i64,
         ) -> Result<Vec<u8>, String> {
             self.periods.borrow_mut().push(period.to_owned());
             Ok(b"stateful-token-card".to_vec())
@@ -8315,6 +8355,7 @@ mod tests {
             _signal: &TokenSignal,
             _period: &str,
             _now: i64,
+            _utc_offset_hours: i64,
         ) -> Result<Vec<u8>, String> {
             self.photo.clone()
         }
@@ -12006,6 +12047,7 @@ mod tests {
             &mut self,
             chart: &bot_core::market_prices::MarketChart,
             _: i64,
+            _utc_offset_hours: i64,
         ) -> Result<super::MarketChartRender, String> {
             self.charts.borrow_mut().push(format!(
                 "{}:{}",
@@ -12046,6 +12088,7 @@ mod tests {
             &mut self,
             chart: &bot_core::market_prices::MarketChart,
             _: i64,
+            _utc_offset_hours: i64,
         ) -> Result<super::MarketChartRender, String> {
             self.rendered.borrow_mut().push(chart.timeframe.clone());
             Ok(super::MarketChartRender {
@@ -12099,6 +12142,7 @@ mod tests {
             &mut self,
             _: &bot_core::market_prices::MarketChart,
             _: i64,
+            _utc_offset_hours: i64,
         ) -> Result<super::MarketChartRender, String> {
             Err("synthetic chart unavailable".to_owned())
         }
@@ -12289,6 +12333,7 @@ mod tests {
             &mut self,
             _: &bot_core::market_prices::MarketChart,
             _: i64,
+            _utc_offset_hours: i64,
         ) -> Result<super::MarketChartRender, String> {
             if self.render_success {
                 Ok(super::MarketChartRender {
@@ -13441,7 +13486,7 @@ mod tests {
             change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
         assert_eq!(
-            BareStock.render_chart(&quote, 1_700_000_000),
+            BareStock.render_chart(&quote, 1_700_000_000, -3),
             Err("stock chart unavailable".to_owned())
         );
         assert_eq!(
@@ -13515,6 +13560,7 @@ mod tests {
                         candidate: None,
                     },
                     1_700_000_000,
+                    -3,
                 )
                 .is_err_and(|error| error == "market chart unavailable")
         );
@@ -16889,7 +16935,7 @@ mod tests {
                     diagnostics: vec![],
                 }
             }
-            fn render_chart(&mut self, _: &StockQuote, _: i64) -> Result<Vec<u8>, String> {
+            fn render_chart(&mut self, _: &StockQuote, _: i64, _: i64) -> Result<Vec<u8>, String> {
                 Ok(vec![1, 2, 3])
             }
         }
@@ -21451,7 +21497,7 @@ mod tests {
         assert_eq!(candidates.signals, [token_signal()]);
         assert!(candidates.diagnostics.is_empty());
         assert_eq!(
-            source.render_period_photo(&token_signal(), "24h", 1_672_531_200),
+            source.render_period_photo(&token_signal(), "24h", 1_672_531_200, -3),
             Err("requested token history unavailable".to_owned())
         );
         assert_eq!(
@@ -21700,6 +21746,7 @@ mod tests {
             _: &TokenSignal,
             _: &str,
             _: i64,
+            _utc_offset_hours: i64,
         ) -> Result<Vec<u8>, String> {
             self.photo.clone()
         }
