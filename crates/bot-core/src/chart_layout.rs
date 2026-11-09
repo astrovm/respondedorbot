@@ -12,18 +12,12 @@ pub fn merge_candles(candles: Vec<Vec<f64>>, max: usize) -> Vec<Vec<f64>> {
         return candles;
     }
     let size = candles.len().div_ceil(max);
-    let mut end = match candles.len() % size {
-        0 => size,
-        partial => partial,
-    };
-    let mut start = 0;
-    let mut merged = Vec::with_capacity(max);
-    while start < candles.len() {
-        merged.extend(merge_group(&candles[start..end]));
-        start = end;
-        end = (end + size).min(candles.len());
-    }
-    merged
+    // The partial group, if any, is the oldest one; an empty one merges to nothing.
+    let (oldest, rest) = candles.split_at(candles.len() % size);
+    std::iter::once(oldest)
+        .chain(rest.chunks(size))
+        .filter_map(merge_group)
+        .collect()
 }
 
 fn merge_group(group: &[Vec<f64>]) -> Option<Vec<f64>> {
@@ -68,24 +62,21 @@ pub fn price_ticks(minimum: f64, maximum: f64, target: usize) -> PriceTicks {
             decimals: 0,
         };
     }
-    let magnitude = 10_f64.powf((span / target as f64).log10().floor());
-    // The round step whose tick count lands closest to the target.
-    let count = |step: f64| (maximum / step).floor() - (minimum / step).ceil() + 1.0;
-    let step = [1.0, 2.0, 2.5, 5.0, 10.0]
+    let exponent = (span / target as f64).log10().floor() as i32;
+    let step = |(digits, power): (u8, i32)| f64::from(digits) * 10_f64.powi(power);
+    let miss = |candidate| {
+        let count = (maximum / step(candidate)).floor() - (minimum / step(candidate)).ceil() + 1.0;
+        (count - target as f64).abs()
+    };
+    // Round steps as digits × 10^power (1, 2, 2.5, 5, 10 times the
+    // magnitude), so the decimals come out exact. The closest count wins.
+    let (digits, power) = [(1, 0), (2, 0), (25, -1), (5, 0), (1, 1)]
         .into_iter()
-        .map(|nice| nice * magnitude)
-        .min_by(|left, right| {
-            (count(*left) - target as f64)
-                .abs()
-                .total_cmp(&(count(*right) - target as f64).abs())
-        })
-        .unwrap_or(magnitude);
-    let decimals = (0..=16)
-        .find(|decimals| {
-            let scaled = step * 10_f64.powi(*decimals);
-            (scaled - scaled.round()).abs() < 1e-6 * scaled.max(1.0)
-        })
-        .unwrap_or(16) as usize;
+        .map(|(digits, shift)| (digits, exponent + shift))
+        .min_by(|left, right| miss(*left).total_cmp(&miss(*right)))
+        .unwrap_or((1, exponent));
+    let decimals = usize::try_from(-power).unwrap_or(0);
+    let step = step((digits, power));
     let first = (minimum / step).ceil() as i64;
     let last = (maximum / step).floor() as i64;
     PriceTicks {
@@ -269,6 +260,26 @@ mod tests {
     }
 
     #[test]
+    fn price_ticks_pick_the_round_step_closest_to_the_target_count() {
+        // (range, expected ticks, decimals) for each kind of round step.
+        let cases: [((f64, f64), &[f64], usize); 5] = [
+            ((0.5, 8.5), &[2.0, 4.0, 6.0, 8.0], 0),
+            ((1.2, 13.9), &[2.5, 5.0, 7.5, 10.0, 12.5], 1),
+            ((0.6, 2.2), &[0.75, 1.0, 1.25, 1.5, 1.75, 2.0], 2),
+            ((12.0, 61.0), &[20.0, 30.0, 40.0, 50.0, 60.0], 0),
+            ((11.0, 49.0), &[15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0], 0),
+        ];
+        for ((minimum, maximum), expected, decimals) in cases {
+            let ticks = price_ticks(minimum, maximum, 5);
+            assert_eq!(ticks.decimals, decimals, "{minimum}..{maximum}");
+            assert_eq!(ticks.values.len(), expected.len(), "{minimum}..{maximum}");
+            for (value, expected) in ticks.values.iter().zip(expected) {
+                assert!((value - expected).abs() < 1e-9, "{minimum}..{maximum}");
+            }
+        }
+    }
+
+    #[test]
     fn price_ticks_pick_round_steps() {
         let ticks = price_ticks(177.67, 232.652, 5);
         assert_eq!(ticks.values, vec![180.0, 190.0, 200.0, 210.0, 220.0, 230.0]);
@@ -328,6 +339,75 @@ mod tests {
                     || tick.label.as_deref() == Some("12/2026"))
         );
         assert!(ticks.iter().filter(|tick| tick.label.is_some()).count() <= 7);
+    }
+
+    fn labels(ticks: &[TimeTick]) -> Vec<&str> {
+        ticks
+            .iter()
+            .filter_map(|tick| tick.label.as_deref())
+            .collect()
+    }
+
+    fn series(start: f64, step: f64, count: usize) -> Vec<f64> {
+        (0..count)
+            .map(|index| start + step * index as f64)
+            .collect()
+    }
+
+    #[test]
+    fn time_ticks_switch_units_at_two_days_and_four_months() {
+        // 36 hours still reads in hours; 3 days reads in dates.
+        let hours = time_ticks(&series(FRIDAY, 3_600.0, 37), 0, 7);
+        assert!(
+            labels(&hours)[1..]
+                .iter()
+                .any(|label| label.ends_with(":00"))
+        );
+        let days = time_ticks(&series(FRIDAY, 3_600.0, 72), 0, 7);
+        assert!(labels(&days).iter().all(|label| !label.contains(':')));
+        // 100 days still reads in dates; 130 days reads in months.
+        let dates = time_ticks(&series(FRIDAY, 86_400.0, 101), 0, 7);
+        assert!(labels(&dates).iter().all(|label| label.len() == 5));
+        let months = time_ticks(&series(FRIDAY, 86_400.0, 131), 0, 7);
+        assert!(labels(&months)[1..].iter().all(|label| label.len() == 7));
+    }
+
+    #[test]
+    fn hour_labels_follow_local_hours() {
+        // 24 hourly candles from 21:00 local fit a 4-hour step aligned to
+        // UTC-3 local time; local midnight shows the new date instead.
+        let ticks = time_ticks(&series(FRIDAY, 3_600.0, 24), -3, 7);
+        assert_eq!(
+            labels(&ticks),
+            ["05/11", "06/11", "04:00", "08:00", "12:00", "16:00", "20:00"]
+        );
+    }
+
+    #[test]
+    fn month_labels_name_each_new_month() {
+        // 400 days from 6 Nov 2026: 13 new months, every third one labeled.
+        let ticks = time_ticks(&series(FRIDAY, 86_400.0, 400), 0, 7);
+        assert_eq!(
+            labels(&ticks),
+            [
+                "06/11", "12/2026", "03/2027", "06/2027", "09/2027", "12/2027"
+            ]
+        );
+    }
+
+    #[test]
+    fn time_ticks_never_exceed_the_label_limit() {
+        for offset in [-3, 0, 5] {
+            for count in 2..60 {
+                for step in [900.0, 3_600.0, 21_600.0, 86_400.0] {
+                    let ticks = time_ticks(&series(FRIDAY, step, count), offset, 7);
+                    assert!(
+                        labels(&ticks).len() <= 7,
+                        "{count} candles every {step}s at UTC{offset:+}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
