@@ -1187,6 +1187,21 @@ mod tests {
     }
 
     #[test]
+    fn latest_price_is_the_newest_trade() {
+        // An after-hours bar newer than the regular trade wins.
+        let chart = intraday_chart(
+            json!({}),
+            &[FRIDAY_CLOSE - 300, FRIDAY_CLOSE + 3_600],
+            json!([19.0, 24.0]),
+        );
+        assert_eq!(super::yahoo_latest_price(&chart), Some(24.0));
+        // A regular trade newer than the last bar wins.
+        let chart = intraday_chart(json!({}), &[FRIDAY_CLOSE - 300], json!([19.0]));
+        assert_eq!(super::yahoo_latest_price(&chart), Some(20.0));
+        assert_eq!(super::yahoo_latest_price(&json!({})), None);
+    }
+
+    #[test]
     fn day_change_needs_a_trade_from_24_hours_ago() {
         let recent = intraday_chart(json!({}), &[FRIDAY_CLOSE - 300], json!([19.0]));
         assert_eq!(yahoo_24h_change(&recent), None);

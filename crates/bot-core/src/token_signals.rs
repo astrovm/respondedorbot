@@ -1616,6 +1616,31 @@ mod tests {
     }
 
     #[test]
+    fn period_change_is_the_one_the_quote_shows() {
+        let mut signal = signal();
+        signal.pair.price_change.h1 = json!(-11.7);
+        // DexScreener's own change wins for 1h.
+        assert_eq!(
+            super::signal_period_change(&signal, Some("1h"), None),
+            Some(-11.7)
+        );
+        // Without it, the change comes from the candles.
+        signal.pair.price_change.h1 = serde_json::Value::Null;
+        let candles = [
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_700_003_600.0, 2.0, 2.0, 2.0, 125.0],
+        ];
+        assert_eq!(
+            super::signal_period_change(&signal, Some("1h"), Some(&candles)),
+            Some(25.0)
+        );
+        assert_eq!(
+            super::signal_period_change(&signal, Some("nope"), None),
+            None
+        );
+    }
+
+    #[test]
     fn unparsed_periods_stay_unavailable() {
         let quote = format_signal_quote(&signal(), Some("nope"));
         assert!(quote.contains("N/A nope"), "{quote}");
