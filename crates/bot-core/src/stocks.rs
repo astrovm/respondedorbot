@@ -313,20 +313,33 @@ pub fn yahoo_is_futures(chart: &Value) -> bool {
 /// trade at least 24 hours before `now_unix`.
 #[must_use]
 pub fn yahoo_24h_change(chart: &Value, now_unix: i64) -> Option<(f64, f64)> {
-    let result = chart_result(chart)?;
-    let meta = result.get("meta")?.as_object()?;
-    let bars = timed_closes(result);
-    let (latest_time, latest_bar) = bars.iter().copied().max_by_key(|(time, _)| *time)?;
-    let (_, base) = bars
+    let latest = yahoo_latest_price(chart)?;
+    let (_, base) = timed_closes(chart_result(chart)?)
         .into_iter()
         .filter(|(time, _)| *time <= now_unix - 86_400)
         .max_by_key(|(time, _)| *time)?;
-    // Bars lag the regular session's last trade by up to one interval.
-    let latest = number(meta.get("regularMarketPrice"))
-        .filter(|price| price.is_finite() && *price > 0.0)
-        .filter(|_| integer(meta.get("regularMarketTime")).is_some_and(|time| time > latest_time))
-        .unwrap_or(latest_bar);
     Some((latest, (latest / base - 1.0) * 100.0))
+}
+
+/// The latest trade in a chart that may include pre-market and after-hours
+/// bars. Yahoo's `regularMarketPrice` only wins when it is newer than the last
+/// bar, so an extended-hours bar is never hidden behind the regular close.
+#[must_use]
+pub fn yahoo_latest_price(chart: &Value) -> Option<f64> {
+    let result = chart_result(chart)?;
+    let meta = result.get("meta")?.as_object()?;
+    let (latest_time, latest_bar) = timed_closes(result)
+        .into_iter()
+        .max_by_key(|(time, _)| *time)?;
+    // Bars lag the regular session's last trade by up to one interval.
+    Some(
+        number(meta.get("regularMarketPrice"))
+            .filter(|price| price.is_finite() && *price > 0.0)
+            .filter(|_| {
+                integer(meta.get("regularMarketTime")).is_some_and(|time| time > latest_time)
+            })
+            .unwrap_or(latest_bar),
+    )
 }
 
 fn normalize_currency(value: &str) -> String {

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bot_core::stocks::{
     ChangeWindow, StockQuote, StockSearchCandidate, parse_yahoo_quote, rank_yahoo_candidates,
-    select_yahoo_candidates, yahoo_24h_change, yahoo_is_futures,
+    select_yahoo_candidates, yahoo_24h_change, yahoo_is_futures, yahoo_latest_price,
 };
 use reqwest::blocking::Client;
 use serde_json::json;
@@ -126,6 +126,10 @@ impl YahooFinanceTransport for ReqwestYahooFinanceTransport {
                 ("period1", start.to_string()),
                 ("period2", end.to_string()),
                 ("interval", interval.clone()),
+                // Intraday charts show pre-market and after-hours trades too, so
+                // overnight moves are candles instead of empty jumps. Yahoo
+                // ignores it for daily and weekly bars.
+                ("includePrePost", "true".into()),
             ],
             None if request.intraday => vec![
                 ("range", "2d".into()),
@@ -266,6 +270,10 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
     if timeframe.is_some()
         && let Some(quote) = quote.as_mut()
     {
+        // Match the price line to the newest bar, extended hours included.
+        if let Some(price) = load.data.as_ref().and_then(yahoo_latest_price) {
+            quote.price = price;
+        }
         let opening_price = candles
             .iter()
             .filter_map(|candle| {
@@ -740,6 +748,39 @@ mod tests {
     }
 
     #[test]
+    fn ranged_quotes_price_the_newest_trade_including_extended_hours() {
+        // The regular session closed at 130 (t=200), then an after-hours bar
+        // traded at 120 (t=300). A newer regular trade (t=400) wins again.
+        let after_hours = r#"{"chart":{"result":[{"meta":{"symbol":"EXM","regularMarketPrice":130,"regularMarketTime":200,"currency":"USD"},"timestamp":[100,200,300],"indicators":{"quote":[{"open":[100,110,125],"high":[105,135,126],"low":[95,105,119],"close":[102,130,120],"volume":[10,20,5]}]}}]}}"#;
+        let regular =
+            after_hours.replace(r#""regularMarketTime":200"#, r#""regularMarketTime":400"#);
+        for (body, price, period) in [
+            (after_hours.to_owned(), 120.0, "1m"),
+            (regular, 130.0, "7d"),
+        ] {
+            let transport = Transport {
+                responses: RefCell::new(VecDeque::from([response(&body)])),
+                requests: RefCell::default(),
+                searches: RefCell::default(),
+            };
+            let load = super::load_chart(
+                &transport,
+                &mut Cache::default(),
+                "EXM",
+                1_800_000_000,
+                Some(period),
+            );
+            let quote = load.quote.ok_or("missing quote");
+            assert_eq!(quote.as_ref().map(|quote| quote.price), Ok(price));
+            assert_eq!(
+                quote.map(|quote| (quote.variation - (price / 100.0 - 1.0) * 100.0).abs() < 1e-9),
+                Ok(true)
+            );
+            assert_eq!(load.candles.len(), 3);
+        }
+    }
+
+    #[test]
     fn candle_parser_skips_missing_prices_and_keeps_real_ohlc() {
         let payload = serde_json::json!({"chart":{"result":[{
             "timestamp":[100,200,300], "indicators":{"quote":[{
@@ -973,7 +1014,7 @@ mod tests {
             for expected in [
                 "/chart/EXM?range=5d&interval=1d",
                 "/search?q=Synthetic+Company&quotesCount=5&newsCount=0",
-                "/chart/EXM?period1=100&period2=200&interval=1h",
+                "/chart/EXM?period1=100&period2=200&interval=1h&includePrePost=true",
                 "/search?q=Synthetic+Company&quotesCount=20&newsCount=0",
                 "/chart/EXM?range=2d&interval=5m&includePrePost=true",
             ] {
