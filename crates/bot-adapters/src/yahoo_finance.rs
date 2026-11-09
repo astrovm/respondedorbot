@@ -205,9 +205,9 @@ pub struct YahooSymbolLoad {
     pub diagnostics: Vec<String>,
 }
 
-/// The period a chart covers when the user names none: five days of
-/// 15-minute bars, pre-market and after-hours trades included.
-pub const DEFAULT_CHART_PERIOD: &str = "5d";
+/// The period a chart covers when the user names none. It is the window of
+/// the quote's own change, so the chart and the quote text agree.
+pub const DEFAULT_CHART_PERIOD: &str = "24h";
 
 #[must_use]
 pub fn load_quote<T: YahooFinanceTransport, C: RequestCache>(
@@ -217,6 +217,40 @@ pub fn load_quote<T: YahooFinanceTransport, C: RequestCache>(
     now_unix: i64,
 ) -> YahooQuoteLoad {
     load_chart(transport, cache, symbol, now_unix, None)
+}
+
+/// Load the quote and the chart for a request without a timeframe.
+///
+/// The quote is the same one the quote text shows, and the candles cover the
+/// window of its change: the 24 hours before the latest trade. Futures keep
+/// Yahoo's roll-safe change since the previous close, so their candles are the
+/// last 24 hours and the period reads `1d`, like their quote text.
+#[must_use]
+pub fn load_default_chart<T: YahooFinanceTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    symbol: &str,
+    now_unix: i64,
+) -> YahooQuoteLoad {
+    let mut load = load_quote(transport, cache, symbol, now_unix);
+    // Without a 24-hour change (futures, or no intraday bars), or without a
+    // quote at all, the chart still shows the last 24 hours.
+    if !load
+        .quote
+        .as_ref()
+        .is_some_and(|quote| quote.change_window == ChangeWindow::Hours24)
+    {
+        let day = load_chart(
+            transport,
+            cache,
+            symbol,
+            now_unix,
+            Some(DEFAULT_CHART_PERIOD),
+        );
+        load.candles = day.candles;
+        load.diagnostics.extend(day.diagnostics);
+    }
+    load
 }
 
 pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
@@ -277,7 +311,7 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
         .data
         .as_ref()
         .and_then(|data| parse_yahoo_quote(&json!({"data": data}), symbol));
-    let candles = load.data.as_ref().map(parse_candles).unwrap_or_default();
+    let mut candles = load.data.as_ref().map(parse_candles).unwrap_or_default();
     if timeframe.is_some()
         && let Some(quote) = quote.as_mut()
     {
@@ -303,13 +337,18 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
     let mut diagnostics = load.diagnostics;
     if let (Some(quote), Some(data), None) = (quote.as_mut(), load.data.as_ref(), timeframe)
         && !yahoo_is_futures(data)
-        && let Some((price, variation)) =
-            load_intraday(transport, cache, symbol, now_unix, &mut diagnostics)
-                .and_then(|data| yahoo_24h_change(&data, now_unix))
+        && let Some(intraday) = load_intraday(transport, cache, symbol, now_unix, &mut diagnostics)
+        && let Some(day) = yahoo_24h_change(&intraday)
     {
-        quote.price = price;
-        quote.variation = variation;
+        quote.price = day.price;
+        quote.variation = day.variation;
         quote.change_window = ChangeWindow::Hours24;
+        // The candles are the same day the change covers, so a chart drawn
+        // from them agrees with the quote text.
+        candles = parse_candles(&intraday)
+            .into_iter()
+            .filter(|candle| candle[0] > day.since as f64)
+            .collect();
     }
     if quote.is_none() {
         diagnostics.push(format!("Yahoo chart had no usable quote for {symbol}"));
@@ -640,6 +679,63 @@ mod tests {
             [false, true]
         );
         assert_eq!(cache.writes[1].0, format!("{}:intraday", cache_key("EXM")));
+        Ok(())
+    }
+
+    #[test]
+    fn default_charts_cover_the_window_of_the_quote_change() -> TestResult {
+        // Stocks: the candles are the bars after the 24-hour base, from the
+        // same intraday data as the quote, with no extra request.
+        let none = serde_json::json!({});
+        let transport = fake_transport([
+            response(&session_chart(none.clone(), &[500], &[20.0])),
+            response(&session_chart(
+                none,
+                &[400, 500, DAY + 500, DAY + 900],
+                &[15.0, 16.0, 20.0, 24.0],
+            )),
+        ]);
+        let load = super::load_default_chart(&transport, &mut Cache::default(), "EXM", DAY + 960);
+        let quote = load.quote.ok_or("missing quote")?;
+        assert_eq!(
+            (quote.price, quote.variation, quote.change_window),
+            (24.0, 50.0, ChangeWindow::Hours24)
+        );
+        assert_eq!(
+            load.candles
+                .iter()
+                .map(|candle| candle[0] as i64)
+                .collect::<Vec<_>>(),
+            [DAY + 500, DAY + 900]
+        );
+        assert_eq!(transport.requests.borrow().len(), 2);
+
+        // Futures keep their 1d change, and the chart loads the last 24 hours.
+        let futures = serde_json::json!({"instrumentType": "FUTURE"});
+        let transport = fake_transport([
+            response(&session_chart(futures.clone(), &[500], &[20.0])),
+            response(&session_chart(
+                futures,
+                &[DAY + 100, DAY + 900],
+                &[19.0, 20.0],
+            )),
+        ]);
+        let load = super::load_default_chart(&transport, &mut Cache::default(), "EXM", DAY + 960);
+        let quote = load.quote.ok_or("missing quote")?;
+        assert_eq!(
+            (quote.price, quote.variation, quote.change_window),
+            (20.0, 2.5, ChangeWindow::PreviousClose)
+        );
+        assert_eq!(load.candles.len(), 2);
+        assert_eq!(
+            transport
+                .requests
+                .borrow()
+                .iter()
+                .map(|request| request.window.clone())
+                .collect::<Vec<_>>(),
+            [None, Some((960, DAY + 960, "1m".to_owned()))]
+        );
         Ok(())
     }
 

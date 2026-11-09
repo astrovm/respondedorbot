@@ -403,6 +403,17 @@ pub fn signal_market_values_with_candles(
     (price, format!("{change} {period}"))
 }
 
+/// The % change a token caption shows for a period, so a chart drawn for the
+/// same period shows the same number.
+#[must_use]
+pub fn signal_period_change(
+    signal: &TokenSignal,
+    timeframe: Option<&str>,
+    candles: Option<&[Vec<f64>]>,
+) -> Option<f64> {
+    signal_change_for_timeframe(signal, timeframe, candles).0
+}
+
 fn signal_change_for_timeframe(
     signal: &TokenSignal,
     timeframe: Option<&str>,
@@ -1602,6 +1613,31 @@ mod tests {
         assert!(caption.contains("ATH <b>$2.50B"), "{caption}");
         assert!(caption.contains("231d"), "{caption}");
         assert!(caption.contains("-11.7% 1h"), "{caption}");
+    }
+
+    #[test]
+    fn period_change_is_the_one_the_quote_shows() {
+        let mut signal = signal();
+        signal.pair.price_change.h1 = json!(-11.7);
+        // DexScreener's own change wins for 1h.
+        assert_eq!(
+            super::signal_period_change(&signal, Some("1h"), None),
+            Some(-11.7)
+        );
+        // Without it, the change comes from the candles.
+        signal.pair.price_change.h1 = serde_json::Value::Null;
+        let candles = [
+            vec![1_700_000_000.0, 1.0, 1.0, 1.0, 100.0],
+            vec![1_700_003_600.0, 2.0, 2.0, 2.0, 125.0],
+        ];
+        assert_eq!(
+            super::signal_period_change(&signal, Some("1h"), Some(&candles)),
+            Some(25.0)
+        );
+        assert_eq!(
+            super::signal_period_change(&signal, Some("nope"), None),
+            None
+        );
     }
 
     #[test]

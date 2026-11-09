@@ -8,7 +8,8 @@ use ab_glyph::FontArc;
 use bot_core::token_signals::{
     PumpMetadata, SIGNAL_STATE_TTL_SECONDS, SignalQuery, SignalState, TokenAddress, TokenPair,
     TokenSignal, TokenSignalCandidates, format_money, is_usable_chart_candle, normalize_token_name,
-    pair_rank, signal_state_key, token_from_pair, token_image_url, token_socials,
+    pair_rank, signal_period_change, signal_state_key, token_from_pair, token_image_url,
+    token_socials,
 };
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use imageproc::drawing::draw_text_mut;
@@ -864,6 +865,7 @@ where
         }
     }
 
+    /// Render a token chart for a period. Its % change is the caption's.
     pub fn render_period_photo(
         &mut self,
         signal: &TokenSignal,
@@ -887,8 +889,11 @@ where
                 return render_price_chart(
                     &pair,
                     &flat,
-                    Some(&title),
-                    None,
+                    ChartText {
+                        heading: Some(&title),
+                        change: signal_period_change(signal, Some(period), Some(&flat)),
+                        ..ChartText::default()
+                    },
                     (1280, 900),
                     utc_offset_hours,
                 );
@@ -899,11 +904,15 @@ where
             "{} ({shown})\nAvailable history",
             signal.pair.base_token.symbol
         );
+        // The caption reads its change from the same candles, so both agree.
         render_price_chart(
             &signal.pair,
             &history.windowed,
-            Some(&title),
-            None,
+            ChartText {
+                heading: Some(&title),
+                change: signal_period_change(signal, Some(period), Some(&history.windowed)),
+                ..ChartText::default()
+            },
             (1280, 900),
             utc_offset_hours,
         )
@@ -1172,23 +1181,25 @@ pub fn render_signal_chart(
     render_price_chart(
         &signal.pair,
         &signal.candles,
-        None,
-        None,
+        ChartText::default(),
         (width, height),
         bot_core::chat_config::DEFAULT_TIMEZONE_OFFSET,
     )
 }
 
-/// Render the default market chart using the same drawing engine as token cards.
+/// Render the chart for a quote without a timeframe, using the same drawing
+/// engine as token cards.
 pub fn render_market_chart(
     quote: &bot_core::stocks::StockQuote,
     candles: &[Vec<f64>],
     utc_offset_hours: i64,
 ) -> Result<Vec<u8>, String> {
+    // The chart covers the window of the quote's own change, so its title
+    // names that window: `24h`, or `1d` for futures.
     render_market_chart_for_period(
         quote,
         candles,
-        crate::yahoo_finance::DEFAULT_CHART_PERIOD,
+        bot_core::stocks::stock_change_period(quote),
         utc_offset_hours,
     )
 }
@@ -1234,8 +1245,11 @@ pub fn render_market_chart_for_period(
     render_price_chart(
         &pair,
         candles,
-        Some(&title),
-        Some(&quote.currency),
+        ChartText {
+            heading: Some(&title),
+            currency: Some(&quote.currency),
+            change: Some(quote.variation),
+        },
         (1_280, 900),
         utc_offset_hours,
     )
@@ -1250,11 +1264,19 @@ fn chart_label_size(font: &FontArc, text: &str, preferred: f32, available: u32) 
     size
 }
 
+/// The text a chart draws around its candles. Without a `change`, the chart
+/// shows the change over its own candles.
+#[derive(Default, Clone, Copy)]
+struct ChartText<'a> {
+    heading: Option<&'a str>,
+    currency: Option<&'a str>,
+    change: Option<f64>,
+}
+
 fn render_price_chart(
     pair: &TokenPair,
     candles: &[Vec<f64>],
-    heading: Option<&str>,
-    currency: Option<&str>,
+    text: ChartText<'_>,
     (width, height): (u32, u32),
     utc_offset_hours: i64,
 ) -> Result<Vec<u8>, String> {
@@ -1265,8 +1287,7 @@ fn render_price_chart(
     render_price_chart_with_fonts(
         pair,
         candles,
-        heading,
-        currency,
+        text,
         (width, height),
         utc_offset_hours,
         &fonts,
@@ -1283,8 +1304,11 @@ struct ChartFonts {
 fn render_price_chart_with_fonts(
     pair: &TokenPair,
     candles: &[Vec<f64>],
-    heading: Option<&str>,
-    currency: Option<&str>,
+    ChartText {
+        heading,
+        currency,
+        change,
+    }: ChartText<'_>,
     (width, height): (u32, u32),
     utc_offset_hours: i64,
     fonts: &ChartFonts,
@@ -1348,7 +1372,17 @@ fn render_price_chart_with_fonts(
         candles.last().map_or(0.0, |candle| candle[4])
     };
     // Usable candles have a finite, positive open, so the change is finite.
-    let change = (current / candles[0][1] - 1.0) * 100.0;
+    // A caller's change wins: it is the one its quote text shows.
+    let change = change
+        .filter(|change| change.is_finite())
+        .unwrap_or((current / candles[0][1] - 1.0) * 100.0);
+    // The price line and its label take the change's color, so a falling
+    // price never reads as green.
+    let (price_line, price_label_color) = if change >= 0.0 {
+        (Rgb([0, 184, 148]), Rgb([54, 224, 195]))
+    } else {
+        (Rgb([255, 67, 86]), Rgb([255, 128, 140]))
+    };
 
     // Heading, with the change over the whole chart on the right.
     if let Some(font) = &fonts.bold {
@@ -1452,14 +1486,7 @@ fn render_price_chart_with_fonts(
         );
     }
     let current_y = y_for(current).clamp(top, bottom);
-    draw_line(
-        &mut image,
-        left,
-        current_y,
-        right,
-        current_y,
-        Rgb([0, 184, 148]),
-    );
+    draw_line(&mut image, left, current_y, right, current_y, price_line);
 
     if let Some(font) = &fonts.regular {
         let label_space = width.saturating_sub((right + 24) as u32);
@@ -1473,7 +1500,7 @@ fn render_price_chart_with_fonts(
         }
         draw_text_mut(
             &mut image,
-            Rgb([54, 224, 195]),
+            price_label_color,
             right + 12,
             current_y - 12,
             chart_label_size(font, &price_text, 26.0, label_space),
@@ -1639,12 +1666,11 @@ mod tests {
             ..bot_core::token_signals::TokenPair::default()
         };
         assert_eq!(
-            super::render_price_chart(&pair, &short, None, None, (1_280, 900), 0),
+            super::render_price_chart(&pair, &short, super::ChartText::default(), (1_280, 900), 0),
             super::render_price_chart(
                 &bot_core::token_signals::TokenPair::default(),
                 &short,
-                None,
-                None,
+                super::ChartText::default(),
                 (1_280, 900),
                 0
             )
@@ -1664,9 +1690,36 @@ mod tests {
             change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
         assert!(super::render_market_chart(&quote, &[], -3).is_err());
-        let png =
-            super::render_market_chart(&quote, &[vec![1.0, 99.0, 102.0, 98.0, 100.0, 1000.0]], -3)?;
+        let candles = [vec![1.0, 99.0, 102.0, 98.0, 100.0, 1000.0]];
+        let png = super::render_market_chart(&quote, &candles, -3)?;
         assert!(png.starts_with(b"\x89PNG"));
+        // The chart shows the quote's change, not the one over its candles:
+        // a falling quote draws a red change and price line.
+        let falling = bot_core::stocks::StockQuote {
+            variation: -5.0,
+            ..quote.clone()
+        };
+        let unknown = bot_core::stocks::StockQuote {
+            variation: f64::NAN,
+            ..quote.clone()
+        };
+        let falling_png = super::render_market_chart(&falling, &candles, -3)?;
+        assert_ne!(falling_png, png);
+        // Without a usable change, the chart falls back to its candles.
+        let from_candles = super::render_market_chart_for_period(
+            &unknown,
+            &candles,
+            bot_core::stocks::stock_change_period(&unknown),
+            -3,
+        );
+        let candle_change = bot_core::stocks::StockQuote {
+            variation: (100.0 / 99.0 - 1.0) * 100.0,
+            ..quote
+        };
+        assert_eq!(
+            from_candles,
+            super::render_market_chart(&candle_change, &candles, -3)
+        );
         Ok(())
     }
 
@@ -1902,6 +1955,22 @@ mod tests {
                     .starts_with(b"\x89PNG")
             );
         }
+        // The chart shows the caption's change: DexScreener's 1h change wins
+        // over the candles' own rise, as it does in the caption.
+        let mut falling = signal.clone();
+        falling.pair.price_change.h1 = json!(-40.0);
+        assert_eq!(
+            bot_core::token_signals::signal_period_change(&falling, Some("1h"), None),
+            Some(-40.0)
+        );
+        let photo = |signal: &TokenSignal| {
+            TokenSignalAdapter::new(
+                pump_history(json!([candle(1_799_999_970_000_i64)]), "1m"),
+                Cache::default(),
+            )
+            .render_period_photo(signal, "1h", 1800000000, 0)
+        };
+        assert_ne!(photo(&falling)?, photo(&signal)?);
         let mut idle = TokenSignalAdapter::new(
             pump_history(json!([candle(1_799_900_000_000_i64)]), "1m"),
             Cache::default(),
@@ -2871,8 +2940,11 @@ mod tests {
         let plain = super::render_price_chart_with_fonts(
             &pair,
             &candles,
-            Some("SYN (1d)"),
-            Some("USD"),
+            super::ChartText {
+                heading: Some("SYN (1d)"),
+                currency: Some("USD"),
+                change: None,
+            },
             (640, 480),
             0,
             &no_fonts,
