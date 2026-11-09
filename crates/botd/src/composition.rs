@@ -950,12 +950,16 @@ where
         if chart.yahoo_symbol.trim().is_empty() {
             return Err("no verified market chart target".to_owned());
         }
+        let period = chart
+            .timeframe
+            .as_deref()
+            .unwrap_or(bot_adapters::yahoo_finance::DEFAULT_CHART_PERIOD);
         let load = bot_adapters::yahoo_finance::load_chart(
             &self.stocks.yahoo_transport,
             &mut self.stocks.cache,
             &chart.yahoo_symbol,
             now_unix,
-            chart.timeframe.as_deref(),
+            Some(period),
         );
         let mut quote = load.quote.ok_or("market chart quote unavailable")?;
         quote.symbol = chart.symbol.clone();
@@ -963,7 +967,7 @@ where
         let photo = bot_adapters::token_signal::render_market_chart_for_period(
             &quote,
             &load.candles,
-            chart.timeframe.as_deref().unwrap_or("5d"),
+            period,
         )?;
         // Without a timeframe the candles span five days, so their change is
         // not a daily one. The quote text already carries the daily change and
@@ -1576,11 +1580,12 @@ where
         }
     }
     fn render_chart(&mut self, quote: &StockQuote, now_unix: i64) -> Result<Vec<u8>, String> {
-        let load = load_yahoo_quote(
+        let load = bot_adapters::yahoo_finance::load_chart(
             &self.yahoo_transport,
             &mut self.cache,
             &quote.symbol,
             now_unix,
+            Some(bot_adapters::yahoo_finance::DEFAULT_CHART_PERIOD),
         );
         bot_adapters::token_signal::render_market_chart(quote, &load.candles)
     }
@@ -8292,6 +8297,19 @@ mod tests {
             .push(response());
         let png = source.render_chart(&chart, 1_700_000_000)?;
         assert!(png.photo.starts_with(b"\x89PNG"));
+        // Without a timeframe the chart still shows five days of intraday
+        // bars, extended hours included, instead of five daily candles.
+        let default_window = Some((1_699_567_200, 1_700_000_000, "15m".to_owned()));
+        assert_eq!(
+            source
+                .stocks
+                .yahoo_transport
+                .charts
+                .borrow()
+                .last()
+                .and_then(|request| request.window.clone()),
+            default_window
+        );
         // The five-day candles are not a daily change, so the quote text
         // stays the caption.
         assert_eq!(png.caption, None);
@@ -8338,6 +8356,16 @@ mod tests {
                 .stocks
                 .render_chart(&quote, 1_700_000_000)?
                 .starts_with(b"\x89PNG")
+        );
+        assert_eq!(
+            source
+                .stocks
+                .yahoo_transport
+                .charts
+                .borrow()
+                .last()
+                .and_then(|request| request.window.clone()),
+            default_window
         );
         Ok(())
     }
@@ -9284,8 +9312,9 @@ mod tests {
             source.render_chart(&chart, 1_700_000_000).err().as_deref(),
             Some("historical chart data unavailable")
         );
-        // The daily chart, then the intraday bars for the 24-hour change.
-        assert_eq!(source.stocks.yahoo_transport.charts.borrow().len(), 2);
+        // One five-day intraday request. The chart has no caption, so it
+        // needs no separate 24-hour quote.
+        assert_eq!(source.stocks.yahoo_transport.charts.borrow().len(), 1);
     }
 
     #[test]

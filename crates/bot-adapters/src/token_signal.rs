@@ -1164,12 +1164,12 @@ pub fn render_signal_chart(
     render_price_chart(&signal.pair, &signal.candles, None, None, width, height)
 }
 
-/// Render daily market candles using the same drawing engine as token cards.
+/// Render the default market chart using the same drawing engine as token cards.
 pub fn render_market_chart(
     quote: &bot_core::stocks::StockQuote,
     candles: &[Vec<f64>],
 ) -> Result<Vec<u8>, String> {
-    render_market_chart_for_period(quote, candles, "5d")
+    render_market_chart_for_period(quote, candles, crate::yahoo_finance::DEFAULT_CHART_PERIOD)
 }
 
 /// Keep chart captions aligned with the requested chart period.

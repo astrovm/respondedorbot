@@ -202,6 +202,10 @@ pub struct YahooSymbolLoad {
     pub diagnostics: Vec<String>,
 }
 
+/// The period a chart covers when the user names none: five days of
+/// 15-minute bars, pre-market and after-hours trades included.
+pub const DEFAULT_CHART_PERIOD: &str = "5d";
+
 #[must_use]
 pub fn load_quote<T: YahooFinanceTransport, C: RequestCache>(
     transport: &T,
