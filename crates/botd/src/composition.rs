@@ -8324,12 +8324,12 @@ mod tests {
             .yahoo_transport
             .chart_responses
             .borrow_mut()
-            .push(response());
+            .extend([response(), response()]);
         let png = source.render_chart(&chart, 1_700_000_000, -3)?;
         assert!(png.photo.starts_with(b"\x89PNG"));
-        // Without a timeframe the chart still shows five days of intraday
-        // bars, extended hours included, instead of five daily candles.
-        let default_window = Some((1_699_567_200, 1_700_000_000, "15m".to_owned()));
+        // Without intraday bars the quote keeps its 1d change, and the chart
+        // shows the last 24 hours of 1-minute bars, extended hours included.
+        let default_window = Some((1_699_913_580, 1_700_000_000, "1m".to_owned()));
         assert_eq!(
             source
                 .stocks
@@ -8340,8 +8340,8 @@ mod tests {
                 .and_then(|request| request.window.clone()),
             default_window
         );
-        // The five-day candles are not a daily change, so the quote text
-        // stays the caption.
+        // The chart shows the quote text's own change, so the text stays the
+        // caption.
         assert_eq!(png.caption, None);
         let mut ranged_chart = chart.clone();
         ranged_chart.timeframe = Some("1m".to_owned());
@@ -8385,7 +8385,7 @@ mod tests {
             .yahoo_transport
             .chart_responses
             .borrow_mut()
-            .push(response());
+            .extend([response(), response()]);
         assert!(
             source
                 .stocks
@@ -9353,9 +9353,27 @@ mod tests {
                 .as_deref(),
             Some("historical chart data unavailable")
         );
-        // One five-day intraday request. The chart has no caption, so it
-        // needs no separate 24-hour quote.
-        assert_eq!(source.stocks.yahoo_transport.charts.borrow().len(), 1);
+        // The quote text's own loads: the daily quote and the intraday bars.
+        // Without a 24-hour change, the chart loads 24 hours of 1-minute bars,
+        // retried once when they fail.
+        let requests = source
+            .stocks
+            .yahoo_transport
+            .charts
+            .borrow()
+            .iter()
+            .map(|request| (request.intraday, request.window.clone()))
+            .collect::<Vec<_>>();
+        let day = Some((1_699_913_580, 1_700_000_000, "1m".to_owned()));
+        assert_eq!(
+            requests,
+            vec![
+                (false, None),
+                (true, None),
+                (false, day.clone()),
+                (false, day)
+            ]
+        );
     }
 
     #[test]

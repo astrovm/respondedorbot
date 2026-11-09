@@ -8,7 +8,8 @@ use ab_glyph::FontArc;
 use bot_core::token_signals::{
     PumpMetadata, SIGNAL_STATE_TTL_SECONDS, SignalQuery, SignalState, TokenAddress, TokenPair,
     TokenSignal, TokenSignalCandidates, format_money, is_usable_chart_candle, normalize_token_name,
-    pair_rank, signal_state_key, token_from_pair, token_image_url, token_socials,
+    pair_rank, signal_period_change, signal_state_key, token_from_pair, token_image_url,
+    token_socials,
 };
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use imageproc::drawing::draw_text_mut;
@@ -864,6 +865,7 @@ where
         }
     }
 
+    /// Render a token chart for a period. Its % change is the caption's.
     pub fn render_period_photo(
         &mut self,
         signal: &TokenSignal,
@@ -889,6 +891,7 @@ where
                     &flat,
                     ChartText {
                         heading: Some(&title),
+                        change: signal_period_change(signal, Some(period), Some(&flat)),
                         ..ChartText::default()
                     },
                     (1280, 900),
@@ -901,11 +904,13 @@ where
             "{} ({shown})\nAvailable history",
             signal.pair.base_token.symbol
         );
+        // The caption reads its change from the same candles, so both agree.
         render_price_chart(
             &signal.pair,
             &history.windowed,
             ChartText {
                 heading: Some(&title),
+                change: signal_period_change(signal, Some(period), Some(&history.windowed)),
                 ..ChartText::default()
             },
             (1280, 900),
@@ -1685,9 +1690,36 @@ mod tests {
             change_window: bot_core::stocks::ChangeWindow::PreviousClose,
         };
         assert!(super::render_market_chart(&quote, &[], -3).is_err());
-        let png =
-            super::render_market_chart(&quote, &[vec![1.0, 99.0, 102.0, 98.0, 100.0, 1000.0]], -3)?;
+        let candles = [vec![1.0, 99.0, 102.0, 98.0, 100.0, 1000.0]];
+        let png = super::render_market_chart(&quote, &candles, -3)?;
         assert!(png.starts_with(b"\x89PNG"));
+        // The chart shows the quote's change, not the one over its candles:
+        // a falling quote draws a red change and price line.
+        let falling = bot_core::stocks::StockQuote {
+            variation: -5.0,
+            ..quote.clone()
+        };
+        let unknown = bot_core::stocks::StockQuote {
+            variation: f64::NAN,
+            ..quote.clone()
+        };
+        let falling_png = super::render_market_chart(&falling, &candles, -3)?;
+        assert_ne!(falling_png, png);
+        // Without a usable change, the chart falls back to its candles.
+        let from_candles = super::render_market_chart_for_period(
+            &unknown,
+            &candles,
+            bot_core::stocks::stock_change_period(&unknown),
+            -3,
+        )?;
+        let candle_change = bot_core::stocks::StockQuote {
+            variation: (100.0 / 99.0 - 1.0) * 100.0,
+            ..quote
+        };
+        assert_eq!(
+            from_candles,
+            super::render_market_chart(&candle_change, &candles, -3)?
+        );
         Ok(())
     }
 
@@ -1923,6 +1955,22 @@ mod tests {
                     .starts_with(b"\x89PNG")
             );
         }
+        // The chart shows the caption's change: DexScreener's 1h change wins
+        // over the candles' own rise, as it does in the caption.
+        let mut falling = signal.clone();
+        falling.pair.price_change.h1 = json!(-40.0);
+        assert_eq!(
+            bot_core::token_signals::signal_period_change(&falling, Some("1h"), None),
+            Some(-40.0)
+        );
+        let mut photo = |signal: &TokenSignal| {
+            TokenSignalAdapter::new(
+                pump_history(json!([candle(1_799_999_970_000_i64)]), "1m"),
+                Cache::default(),
+            )
+            .render_period_photo(signal, "1h", 1800000000, 0)
+        };
+        assert_ne!(photo(&falling)?, photo(&signal)?);
         let mut idle = TokenSignalAdapter::new(
             pump_history(json!([candle(1_799_900_000_000_i64)]), "1m"),
             Cache::default(),

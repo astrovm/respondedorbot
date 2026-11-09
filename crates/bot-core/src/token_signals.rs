@@ -403,6 +403,17 @@ pub fn signal_market_values_with_candles(
     (price, format!("{change} {period}"))
 }
 
+/// The % change a token caption shows for a period, so a chart drawn for the
+/// same period shows the same number.
+#[must_use]
+pub fn signal_period_change(
+    signal: &TokenSignal,
+    timeframe: Option<&str>,
+    candles: Option<&[Vec<f64>]>,
+) -> Option<f64> {
+    signal_change_for_timeframe(signal, timeframe, candles).0
+}
+
 fn signal_change_for_timeframe(
     signal: &TokenSignal,
     timeframe: Option<&str>,
