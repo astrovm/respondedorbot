@@ -92,9 +92,6 @@ fn format_bcra_value(value: &str, percentage: bool) -> String {
             format!("{number:.2}%")
         };
     }
-    if number >= 1_000_000.0 {
-        return grouped(number / 1_000.0, 0);
-    }
     if number >= 1_000.0 {
         return grouped(number, 0);
     }
@@ -153,11 +150,11 @@ fn variable_line(
     let line = if matches(description, r"base\s*monetaria") {
         match locale {
             Locale::Es => format!(
-                "Base monetaria: ${} mill. pesos",
+                "Base monetaria: ${} millones",
                 format_bcra_value(value, false)
             ),
             Locale::En => format!(
-                "Monetary base: ${} million pesos",
+                "Monetary base: ${} million",
                 format_bcra_value(value, false)
             ),
         }
@@ -427,7 +424,7 @@ mod tests {
     #[test]
     fn renders_every_indicator_family_enrichment_and_staleness() {
         let variables = [
-            ("Base monetaria", "5.000.000,50"),
+            ("Base monetaria", "46.998.823,00"),
             ("Inflación mensual", "5,2"),
             ("Inflación interanual", "150,5"),
             ("Inflación esperada", "3,1"),
@@ -474,7 +471,7 @@ mod tests {
         let text = render_bcra(&snapshot, Locale::Es, days_from_civil(2025, 1, 20));
         for expected in [
             "Indicadores del BCRA al 15/01/25\n\n",
-            "Base monetaria: $5,000 mill. pesos\n",
+            "Base monetaria: $46,998,823 millones\n",
             "Inflación mensual: 5.20% (31/12/24)",
             "Inflación interanual: 150.5%",
             "Inflación esperada: 3.10%",
@@ -613,7 +610,7 @@ mod tests {
     #[test]
     fn renders_every_english_indicator_with_iso_dates_and_notes() {
         let variables = [
-            ("Base monetaria", "5.000.000,50"),
+            ("Base monetaria", "46.998.823,00"),
             ("Inflación mensual", "5,2"),
             ("Inflación interanual", "150,5"),
             ("Inflación esperada", "3,1"),
@@ -651,7 +648,7 @@ mod tests {
         assert_eq!(
             text,
             "BCRA indicators as of 2025-01-15\n\n\
-             Monetary base: $5,000 million pesos\n\
+             Monetary base: $46,998,823 million\n\
              Monthly inflation: 5.20%\n\
              Yearly inflation: 150.5%\n\
              Expected inflation: 3.10%\n\
@@ -690,7 +687,7 @@ mod tests {
         assert_eq!(
             text,
             "Indicadores del BCRA\n\n\
-             Base monetaria: $s/d mill. pesos (sin fecha)\n\
+             Base monetaria: $s/d millones (sin fecha)\n\
              TAMAR: n/a% (15/01/25)\n\
              Reservas: USD 1,500 millones (2025-01)\n\
              TCRM: 101 (15/01/25)"

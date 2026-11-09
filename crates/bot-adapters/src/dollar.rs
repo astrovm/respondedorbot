@@ -231,13 +231,14 @@ fn path_number(value: &Value, path: &[&str]) -> Option<f64> {
     number(Some(current))
 }
 
+/// The change since the bot's own hourly snapshot from `hours_ago` hours ago.
+/// CriptoYa's `variation` has its own window (often since the previous close),
+/// so it only fills in for the 24h view when no snapshot exists.
 fn change(current: f64, daily: Option<f64>, history: Option<f64>, hours_ago: i64) -> Option<f64> {
-    if hours_ago == 24 {
-        return daily;
-    }
     history
         .filter(|historical| *historical != 0.0)
         .map(|historical| ((current - historical) / historical) * 100.0)
+        .or(daily.filter(|_| hours_ago == 24))
 }
 
 fn parse_rates(current: &Value, history: Option<&Value>, hours_ago: i64) -> Vec<DollarRate> {
@@ -433,9 +434,7 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
         &hour_key(now_unix.saturating_sub(hours_ago.saturating_mul(3_600))),
         request_hash(),
     );
-    let history = (hours_ago != 24)
-        .then(|| cached_value(cache, &history_key, &mut diagnostics))
-        .flatten();
+    let history = cached_value(cache, &history_key, &mut diagnostics);
     let load = load_cached_json(
         cache,
         &request_key(),
@@ -662,6 +661,31 @@ mod tests {
             cache.claim("other", "value", 60),
             Err("synthetic cache write failure")
         );
+    }
+
+    #[test]
+    fn day_changes_use_the_snapshot_from_24_hours_ago() {
+        let current = serde_json::json!({
+            "blue": {"ask": 1_100.0, "variation": 6.0},
+            "oficial": {"price": 1_000.0, "variation": 2.0},
+        });
+        // Blue has a snapshot from 24 hours ago, Oficial has none.
+        let history = serde_json::json!({"blue": {"ask": 1_000.0}});
+        let rates = super::parse_rates(&current, Some(&history), 24);
+        let change = |name: &str| {
+            rates
+                .iter()
+                .find(|rate| rate.name == name)
+                .and_then(|rate| rate.change)
+                .map(|change| (change * 1_000.0).round() / 1_000.0)
+        };
+        // A real 24h change, not CriptoYa's own window.
+        assert_eq!(change("Blue"), Some(10.0));
+        // Without a snapshot, CriptoYa's change fills in.
+        assert_eq!(change("Oficial"), Some(2.0));
+        // Other windows never fall back to CriptoYa's change.
+        let rates = super::parse_rates(&current, None, 48);
+        assert!(rates.iter().all(|rate| rate.change.is_none()));
     }
 
     #[test]
