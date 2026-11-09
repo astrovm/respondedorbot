@@ -1963,7 +1963,7 @@ mod tests {
             bot_core::token_signals::signal_period_change(&falling, Some("1h"), None),
             Some(-40.0)
         );
-        let mut photo = |signal: &TokenSignal| {
+        let photo = |signal: &TokenSignal| {
             TokenSignalAdapter::new(
                 pump_history(json!([candle(1_799_999_970_000_i64)]), "1m"),
                 Cache::default(),
