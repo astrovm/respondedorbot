@@ -308,17 +308,32 @@ pub fn yahoo_is_futures(chart: &Value) -> bool {
         == Some("FUTURE")
 }
 
-/// The latest price and its change over the last 24 hours, read from an
-/// intraday chart with pre-market and after-hours bars. The base is the last
-/// trade at least 24 hours before `now_unix`.
+/// A price and its change over the 24 hours before it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DayChange {
+    pub price: f64,
+    pub variation: f64,
+    /// The time of the base trade. Bars after it are the day the change covers.
+    pub since: i64,
+}
+
+/// The latest price and its change over the 24 hours before the latest trade,
+/// read from an intraday chart with pre-market and after-hours bars. The base
+/// is the last trade at least 24 hours older than the latest one. A closed
+/// market (a weekend, a night) keeps its last session's move instead of a flat
+/// day.
 #[must_use]
-pub fn yahoo_24h_change(chart: &Value, now_unix: i64) -> Option<(f64, f64)> {
-    let latest = yahoo_latest_price(chart)?;
-    let (_, base) = timed_closes(chart_result(chart)?)
+pub fn yahoo_24h_change(chart: &Value) -> Option<DayChange> {
+    let (latest_time, price) = yahoo_latest_trade(chart)?;
+    let (since, base) = timed_closes(chart_result(chart)?)
         .into_iter()
-        .filter(|(time, _)| *time <= now_unix - 86_400)
+        .filter(|(time, _)| *time <= latest_time - 86_400)
         .max_by_key(|(time, _)| *time)?;
-    Some((latest, (latest / base - 1.0) * 100.0))
+    Some(DayChange {
+        price,
+        variation: (price / base - 1.0) * 100.0,
+        since,
+    })
 }
 
 /// The latest trade in a chart that may include pre-market and after-hours
@@ -326,20 +341,22 @@ pub fn yahoo_24h_change(chart: &Value, now_unix: i64) -> Option<(f64, f64)> {
 /// bar, so an extended-hours bar is never hidden behind the regular close.
 #[must_use]
 pub fn yahoo_latest_price(chart: &Value) -> Option<f64> {
+    yahoo_latest_trade(chart).map(|(_, price)| price)
+}
+
+fn yahoo_latest_trade(chart: &Value) -> Option<(i64, f64)> {
     let result = chart_result(chart)?;
     let meta = result.get("meta")?.as_object()?;
-    let (latest_time, latest_bar) = timed_closes(result)
+    let latest_bar = timed_closes(result)
         .into_iter()
         .max_by_key(|(time, _)| *time)?;
     // Bars lag the regular session's last trade by up to one interval.
-    Some(
-        number(meta.get("regularMarketPrice"))
-            .filter(|price| price.is_finite() && *price > 0.0)
-            .filter(|_| {
-                integer(meta.get("regularMarketTime")).is_some_and(|time| time > latest_time)
-            })
-            .unwrap_or(latest_bar),
-    )
+    let regular = number(meta.get("regularMarketPrice"))
+        .filter(|price| price.is_finite() && *price > 0.0)
+        .zip(integer(meta.get("regularMarketTime")))
+        .filter(|(_, time)| *time > latest_bar.0)
+        .map(|(price, time)| (time, price));
+    Some(regular.unwrap_or(latest_bar))
 }
 
 fn normalize_currency(value: &str) -> String {
@@ -605,7 +622,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ChangeWindow, StockQuery, StockQueryPlan, StockQuote, StockSearchCandidate,
+        ChangeWindow, DayChange, StockQuery, StockQueryPlan, StockQuote, StockSearchCandidate,
         classify_oil_command, classify_stock_command, parse_yahoo_quote, plan_stock_query,
         rank_stock_quotes, rank_yahoo_candidates, render_oil_quotes, render_stock_quote,
         render_stock_quotes, select_yahoo_candidates, select_yahoo_symbol, yahoo_24h_change,
@@ -1107,6 +1124,14 @@ mod tests {
         }]}})
     }
 
+    fn day(price: f64, variation: f64, since: i64) -> Option<DayChange> {
+        Some(DayChange {
+            price,
+            variation,
+            since,
+        })
+    }
+
     #[test]
     fn day_change_compares_the_latest_trade_with_the_one_24_hours_earlier() {
         // Thursday's trades, Friday's last regular bar, then after-hours.
@@ -1117,20 +1142,27 @@ mod tests {
             FRIDAY_CLOSE + 3_600,
         ];
         let chart = intraday_chart(json!({}), &timestamps, json!([15.0, 16.0, 19.0, 24.0]));
+        // The base is 24 hours before the after-hours trade, not before now:
+        // a weekend keeps Friday's move instead of a flat day.
         assert_eq!(
-            yahoo_24h_change(&chart, FRIDAY_CLOSE + 3_660),
-            Some((24.0, 50.0))
+            yahoo_24h_change(&chart),
+            day(24.0, 50.0, FRIDAY_CLOSE - DAY)
         );
-        // A day without trades is flat.
+        // Without the after-hours bar, the base moves back to the older trade.
+        let chart = intraday_chart(
+            json!({"regularMarketTime": FRIDAY_CLOSE - 300}),
+            &timestamps[..3],
+            json!([15.0, 16.0, 19.0]),
+        );
         assert_eq!(
-            yahoo_24h_change(&chart, FRIDAY_CLOSE + 2 * DAY),
-            Some((24.0, 0.0))
+            yahoo_24h_change(&chart),
+            day(19.0, (19.0 / 15.0 - 1.0) * 100.0, FRIDAY_CLOSE - DAY - 600)
         );
         // The regular session's last trade is newer than the last bar.
         let chart = intraday_chart(json!({}), &timestamps[..3], json!([15.0, 16.0, 19.0]));
         assert_eq!(
-            yahoo_24h_change(&chart, FRIDAY_CLOSE + 60),
-            Some((20.0, 25.0))
+            yahoo_24h_change(&chart),
+            day(20.0, 25.0, FRIDAY_CLOSE - DAY)
         );
         // A regular trade no newer than the last bar keeps the bar.
         let chart = intraday_chart(
@@ -1139,8 +1171,8 @@ mod tests {
             json!([16.0, 19.0]),
         );
         assert_eq!(
-            yahoo_24h_change(&chart, FRIDAY_CLOSE + 60),
-            Some((19.0, 18.75))
+            yahoo_24h_change(&chart),
+            day(19.0, 18.75, FRIDAY_CLOSE - DAY)
         );
         // An unusable regular price keeps the last bar.
         let chart = intraday_chart(
@@ -1149,27 +1181,24 @@ mod tests {
             json!([15.0, 16.0, 19.0]),
         );
         assert_eq!(
-            yahoo_24h_change(&chart, FRIDAY_CLOSE + 60),
-            Some((19.0, 18.75))
+            yahoo_24h_change(&chart),
+            day(19.0, (19.0 / 15.0 - 1.0) * 100.0, FRIDAY_CLOSE - DAY - 600)
         );
     }
 
     #[test]
     fn day_change_needs_a_trade_from_24_hours_ago() {
         let recent = intraday_chart(json!({}), &[FRIDAY_CLOSE - 300], json!([19.0]));
-        assert_eq!(yahoo_24h_change(&recent, FRIDAY_CLOSE), None);
+        assert_eq!(yahoo_24h_change(&recent), None);
         let empty = intraday_chart(json!({}), &[], json!([]));
-        assert_eq!(yahoo_24h_change(&empty, FRIDAY_CLOSE), None);
+        assert_eq!(yahoo_24h_change(&empty), None);
         let mut untimed = intraday_chart(json!({}), &[FRIDAY_CLOSE - DAY], json!([16.0]));
         if let Some(result) = untimed["chart"]["result"][0].as_object_mut() {
             result.remove("timestamp");
         }
-        assert_eq!(yahoo_24h_change(&untimed, FRIDAY_CLOSE), None);
-        assert_eq!(yahoo_24h_change(&json!({}), FRIDAY_CLOSE), None);
-        assert_eq!(
-            yahoo_24h_change(&chart(json!({"meta": []})), FRIDAY_CLOSE),
-            None
-        );
+        assert_eq!(yahoo_24h_change(&untimed), None);
+        assert_eq!(yahoo_24h_change(&json!({})), None);
+        assert_eq!(yahoo_24h_change(&chart(json!({"meta": []}))), None);
     }
 
     #[test]

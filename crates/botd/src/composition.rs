@@ -951,33 +951,49 @@ where
         if chart.yahoo_symbol.trim().is_empty() {
             return Err("no verified market chart target".to_owned());
         }
-        let period = chart
-            .timeframe
-            .as_deref()
-            .unwrap_or(bot_adapters::yahoo_finance::DEFAULT_CHART_PERIOD);
-        let load = bot_adapters::yahoo_finance::load_chart(
-            &self.stocks.yahoo_transport,
-            &mut self.stocks.cache,
-            &chart.yahoo_symbol,
-            now_unix,
-            Some(period),
-        );
+        let transport = &self.stocks.yahoo_transport;
+        let cache = &mut self.stocks.cache;
+        let symbol = &chart.yahoo_symbol;
+        let load = match chart.timeframe.as_deref() {
+            Some(period) => bot_adapters::yahoo_finance::load_chart(
+                transport,
+                cache,
+                symbol,
+                now_unix,
+                Some(period),
+            ),
+            None => {
+                bot_adapters::yahoo_finance::load_default_chart(transport, cache, symbol, now_unix)
+            }
+        };
         let mut quote = load.quote.ok_or("market chart quote unavailable")?;
         quote.symbol = chart.symbol.clone();
         quote.name = chart.name.clone();
+        let Some(period) = chart.timeframe.as_deref() else {
+            // The chart covers the quote text's own change window and uses the
+            // same cached quote, so the text needs no caption.
+            let photo = bot_adapters::token_signal::render_market_chart(
+                &quote,
+                &load.candles,
+                utc_offset_hours,
+            )?;
+            return Ok(crate::dispatcher::MarketChartRender {
+                photo,
+                caption: None,
+            });
+        };
         let photo = bot_adapters::token_signal::render_market_chart_for_period(
             &quote,
             &load.candles,
             period,
             utc_offset_hours,
         )?;
-        // Without a timeframe the candles span five days, so their change is
-        // not a daily one. The quote text already carries the daily change and
-        // any extended-hours price.
-        let caption = chart.timeframe.as_deref().map(|period| {
-            bot_adapters::token_signal::market_chart_caption(&quote, &load.candles, period)
-        });
-        Ok(crate::dispatcher::MarketChartRender { photo, caption })
+        let caption =
+            bot_adapters::token_signal::market_chart_caption(&quote, &load.candles, period);
+        Ok(crate::dispatcher::MarketChartRender {
+            photo,
+            caption: Some(caption),
+        })
     }
 }
 
@@ -1587,14 +1603,20 @@ where
         now_unix: i64,
         utc_offset_hours: i64,
     ) -> Result<Vec<u8>, String> {
-        let load = bot_adapters::yahoo_finance::load_chart(
+        // The same cached quote as the text, with the candles of its change.
+        let load = bot_adapters::yahoo_finance::load_default_chart(
             &self.yahoo_transport,
             &mut self.cache,
             &quote.symbol,
             now_unix,
-            Some(bot_adapters::yahoo_finance::DEFAULT_CHART_PERIOD),
         );
-        bot_adapters::token_signal::render_market_chart(quote, &load.candles, utc_offset_hours)
+        let mut quote = quote.clone();
+        if let Some(loaded) = &load.quote {
+            quote.price = loaded.price;
+            quote.variation = loaded.variation;
+            quote.change_window = loaded.change_window;
+        }
+        bot_adapters::token_signal::render_market_chart(&quote, &load.candles, utc_offset_hours)
     }
 }
 

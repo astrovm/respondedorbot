@@ -887,8 +887,10 @@ where
                 return render_price_chart(
                     &pair,
                     &flat,
-                    Some(&title),
-                    None,
+                    ChartText {
+                        heading: Some(&title),
+                        ..ChartText::default()
+                    },
                     (1280, 900),
                     utc_offset_hours,
                 );
@@ -902,8 +904,10 @@ where
         render_price_chart(
             &signal.pair,
             &history.windowed,
-            Some(&title),
-            None,
+            ChartText {
+                heading: Some(&title),
+                ..ChartText::default()
+            },
             (1280, 900),
             utc_offset_hours,
         )
@@ -1172,23 +1176,25 @@ pub fn render_signal_chart(
     render_price_chart(
         &signal.pair,
         &signal.candles,
-        None,
-        None,
+        ChartText::default(),
         (width, height),
         bot_core::chat_config::DEFAULT_TIMEZONE_OFFSET,
     )
 }
 
-/// Render the default market chart using the same drawing engine as token cards.
+/// Render the chart for a quote without a timeframe, using the same drawing
+/// engine as token cards.
 pub fn render_market_chart(
     quote: &bot_core::stocks::StockQuote,
     candles: &[Vec<f64>],
     utc_offset_hours: i64,
 ) -> Result<Vec<u8>, String> {
+    // The chart covers the window of the quote's own change, so its title
+    // names that window: `24h`, or `1d` for futures.
     render_market_chart_for_period(
         quote,
         candles,
-        crate::yahoo_finance::DEFAULT_CHART_PERIOD,
+        bot_core::stocks::stock_change_period(quote),
         utc_offset_hours,
     )
 }
@@ -1234,8 +1240,11 @@ pub fn render_market_chart_for_period(
     render_price_chart(
         &pair,
         candles,
-        Some(&title),
-        Some(&quote.currency),
+        ChartText {
+            heading: Some(&title),
+            currency: Some(&quote.currency),
+            change: Some(quote.variation),
+        },
         (1_280, 900),
         utc_offset_hours,
     )
@@ -1250,11 +1259,19 @@ fn chart_label_size(font: &FontArc, text: &str, preferred: f32, available: u32) 
     size
 }
 
+/// The text a chart draws around its candles. Without a `change`, the chart
+/// shows the change over its own candles.
+#[derive(Default, Clone, Copy)]
+struct ChartText<'a> {
+    heading: Option<&'a str>,
+    currency: Option<&'a str>,
+    change: Option<f64>,
+}
+
 fn render_price_chart(
     pair: &TokenPair,
     candles: &[Vec<f64>],
-    heading: Option<&str>,
-    currency: Option<&str>,
+    text: ChartText<'_>,
     (width, height): (u32, u32),
     utc_offset_hours: i64,
 ) -> Result<Vec<u8>, String> {
@@ -1265,8 +1282,7 @@ fn render_price_chart(
     render_price_chart_with_fonts(
         pair,
         candles,
-        heading,
-        currency,
+        text,
         (width, height),
         utc_offset_hours,
         &fonts,
@@ -1283,8 +1299,11 @@ struct ChartFonts {
 fn render_price_chart_with_fonts(
     pair: &TokenPair,
     candles: &[Vec<f64>],
-    heading: Option<&str>,
-    currency: Option<&str>,
+    ChartText {
+        heading,
+        currency,
+        change,
+    }: ChartText<'_>,
     (width, height): (u32, u32),
     utc_offset_hours: i64,
     fonts: &ChartFonts,
@@ -1348,7 +1367,10 @@ fn render_price_chart_with_fonts(
         candles.last().map_or(0.0, |candle| candle[4])
     };
     // Usable candles have a finite, positive open, so the change is finite.
-    let change = (current / candles[0][1] - 1.0) * 100.0;
+    // A caller's change wins: it is the one its quote text shows.
+    let change = change
+        .filter(|change| change.is_finite())
+        .unwrap_or((current / candles[0][1] - 1.0) * 100.0);
 
     // Heading, with the change over the whole chart on the right.
     if let Some(font) = &fonts.bold {
@@ -1639,12 +1661,11 @@ mod tests {
             ..bot_core::token_signals::TokenPair::default()
         };
         assert_eq!(
-            super::render_price_chart(&pair, &short, None, None, (1_280, 900), 0),
+            super::render_price_chart(&pair, &short, super::ChartText::default(), (1_280, 900), 0),
             super::render_price_chart(
                 &bot_core::token_signals::TokenPair::default(),
                 &short,
-                None,
-                None,
+                super::ChartText::default(),
                 (1_280, 900),
                 0
             )
@@ -2871,8 +2892,11 @@ mod tests {
         let plain = super::render_price_chart_with_fonts(
             &pair,
             &candles,
-            Some("SYN (1d)"),
-            Some("USD"),
+            super::ChartText {
+                heading: Some("SYN (1d)"),
+                currency: Some("USD"),
+                change: None,
+            },
             (640, 480),
             0,
             &no_fonts,

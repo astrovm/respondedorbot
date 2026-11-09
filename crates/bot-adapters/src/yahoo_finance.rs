@@ -205,9 +205,9 @@ pub struct YahooSymbolLoad {
     pub diagnostics: Vec<String>,
 }
 
-/// The period a chart covers when the user names none: five days of
-/// 15-minute bars, pre-market and after-hours trades included.
-pub const DEFAULT_CHART_PERIOD: &str = "5d";
+/// The period a chart covers when the user names none. It is the window of
+/// the quote's own change, so the chart and the quote text agree.
+pub const DEFAULT_CHART_PERIOD: &str = "24h";
 
 #[must_use]
 pub fn load_quote<T: YahooFinanceTransport, C: RequestCache>(
@@ -217,6 +217,38 @@ pub fn load_quote<T: YahooFinanceTransport, C: RequestCache>(
     now_unix: i64,
 ) -> YahooQuoteLoad {
     load_chart(transport, cache, symbol, now_unix, None)
+}
+
+/// Load the quote and the chart for a request without a timeframe.
+///
+/// The quote is the same one the quote text shows, and the candles cover the
+/// window of its change: the 24 hours before the latest trade. Futures keep
+/// Yahoo's roll-safe change since the previous close, so their candles are the
+/// last 24 hours and the period reads `1d`, like their quote text.
+#[must_use]
+pub fn load_default_chart<T: YahooFinanceTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    symbol: &str,
+    now_unix: i64,
+) -> YahooQuoteLoad {
+    let mut load = load_quote(transport, cache, symbol, now_unix);
+    if load
+        .quote
+        .as_ref()
+        .is_some_and(|quote| quote.change_window == ChangeWindow::PreviousClose)
+    {
+        let day = load_chart(
+            transport,
+            cache,
+            symbol,
+            now_unix,
+            Some(DEFAULT_CHART_PERIOD),
+        );
+        load.candles = day.candles;
+        load.diagnostics.extend(day.diagnostics);
+    }
+    load
 }
 
 pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
@@ -277,7 +309,7 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
         .data
         .as_ref()
         .and_then(|data| parse_yahoo_quote(&json!({"data": data}), symbol));
-    let candles = load.data.as_ref().map(parse_candles).unwrap_or_default();
+    let mut candles = load.data.as_ref().map(parse_candles).unwrap_or_default();
     if timeframe.is_some()
         && let Some(quote) = quote.as_mut()
     {
@@ -303,13 +335,18 @@ pub fn load_chart<T: YahooFinanceTransport, C: RequestCache>(
     let mut diagnostics = load.diagnostics;
     if let (Some(quote), Some(data), None) = (quote.as_mut(), load.data.as_ref(), timeframe)
         && !yahoo_is_futures(data)
-        && let Some((price, variation)) =
-            load_intraday(transport, cache, symbol, now_unix, &mut diagnostics)
-                .and_then(|data| yahoo_24h_change(&data, now_unix))
+        && let Some(intraday) = load_intraday(transport, cache, symbol, now_unix, &mut diagnostics)
+        && let Some(day) = yahoo_24h_change(&intraday)
     {
-        quote.price = price;
-        quote.variation = variation;
+        quote.price = day.price;
+        quote.variation = day.variation;
         quote.change_window = ChangeWindow::Hours24;
+        // The candles are the same day the change covers, so a chart drawn
+        // from them agrees with the quote text.
+        candles = parse_candles(&intraday)
+            .into_iter()
+            .filter(|candle| candle[0] > day.since as f64)
+            .collect();
     }
     if quote.is_none() {
         diagnostics.push(format!("Yahoo chart had no usable quote for {symbol}"));
