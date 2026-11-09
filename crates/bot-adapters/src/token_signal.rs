@@ -1371,6 +1371,13 @@ fn render_price_chart_with_fonts(
     let change = change
         .filter(|change| change.is_finite())
         .unwrap_or((current / candles[0][1] - 1.0) * 100.0);
+    // The price line and its label take the change's color, so a falling
+    // price never reads as green.
+    let (price_line, price_label_color) = if change >= 0.0 {
+        (Rgb([0, 184, 148]), Rgb([54, 224, 195]))
+    } else {
+        (Rgb([255, 67, 86]), Rgb([255, 128, 140]))
+    };
 
     // Heading, with the change over the whole chart on the right.
     if let Some(font) = &fonts.bold {
@@ -1474,14 +1481,7 @@ fn render_price_chart_with_fonts(
         );
     }
     let current_y = y_for(current).clamp(top, bottom);
-    draw_line(
-        &mut image,
-        left,
-        current_y,
-        right,
-        current_y,
-        Rgb([0, 184, 148]),
-    );
+    draw_line(&mut image, left, current_y, right, current_y, price_line);
 
     if let Some(font) = &fonts.regular {
         let label_space = width.saturating_sub((right + 24) as u32);
@@ -1495,7 +1495,7 @@ fn render_price_chart_with_fonts(
         }
         draw_text_mut(
             &mut image,
-            Rgb([54, 224, 195]),
+            price_label_color,
             right + 12,
             current_y - 12,
             chart_label_size(font, &price_text, 26.0, label_space),
