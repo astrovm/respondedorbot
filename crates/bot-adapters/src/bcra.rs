@@ -13,6 +13,7 @@ use serde_json::{Map, Value, json};
 use std::sync::OnceLock;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::dollar::{hour_key, tcrm_history};
 use crate::request_cache::{
     JsonHttpResponse, RequestCache, load_cached_json, python_json_string, python_request_cache_key,
 };
@@ -129,6 +130,7 @@ pub struct BcraLoad {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DollarReferencesLoad {
     pub tcrm_100: Option<f64>,
+    pub tcrm_100_previous_day: Option<f64>,
     pub bands: Option<BcraBands>,
     pub itcrm: Option<ItcrmDetails>,
     pub diagnostics: Vec<String>,
@@ -197,14 +199,6 @@ fn display(day: i64) -> String {
 }
 fn ba_day(now: i64) -> i64 {
     floor(now.saturating_sub(10_800), 86_400)
-}
-fn hour_key(now: i64) -> String {
-    let local = now.saturating_sub(10_800);
-    let (y, m, d) = civil(floor(local, 86_400));
-    format!(
-        "{y:04}-{m:02}-{d:02}-{:02}",
-        floor(local, 3_600).rem_euclid(24)
-    )
 }
 fn now_iso(now: i64) -> String {
     let (y, m, d) = civil(floor(now, 86_400));
@@ -540,8 +534,17 @@ pub fn load_dollar_references<T: BcraTransport, C: RequestCache>(
     let bands = bands(transport, cache, &items, now, &mut diagnostics);
     let itcrm = itcrm(transport, cache, &mut diagnostics);
     persist_market(cache, &variables, itcrm.as_ref(), now, &mut diagnostics);
+    let tcrm_100 = calculate_tcrm(&variables, itcrm.as_ref());
+    let tcrm_100_previous_day = if tcrm_100.is_some()
+        && tcrm_history(cache, now.saturating_sub(86_400), &mut diagnostics).is_none()
+    {
+        tcrm_daily_baseline(transport, cache, &items, now, &mut diagnostics)
+    } else {
+        None
+    };
     DollarReferencesLoad {
-        tcrm_100: calculate_tcrm(&variables, itcrm.as_ref()),
+        tcrm_100,
+        tcrm_100_previous_day,
         bands,
         itcrm,
         diagnostics,
@@ -632,6 +635,35 @@ fn itcrm<T: BcraTransport, C: RequestCache>(
             date: v.get("date")?.as_str()?.to_owned(),
         });
     }
+    let values = itcrm_series(transport, cache, d)?;
+    let (day, value) = values.last_key_value()?;
+    let result = ItcrmDetails {
+        value: *value,
+        date: display(*day),
+    };
+    if let Err(error) = cache.set(
+        "latest_itcrm_details",
+        &json!({"value":result.value,"date":result.date}).to_string(),
+        ITCRM_CACHE_TTL_SECONDS,
+    ) {
+        d.push(format!(
+            "could not write BCRA cache latest_itcrm_details: {error}"
+        ));
+    }
+    Some(result)
+}
+
+fn itcrm_series<T: BcraTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    d: &mut Vec<String>,
+) -> Option<BTreeMap<i64, f64>> {
+    if let Some(cached) = read(cache, "itcrm_daily_history", d) {
+        let values = series(&cached);
+        if !values.is_empty() {
+            return Some(values);
+        }
+    }
     let response = match transport.get(&BcraRequest::Itcrm) {
         Ok(r) if r.status_code < 400 => r,
         Ok(r) => {
@@ -650,21 +682,62 @@ fn itcrm<T: BcraTransport, C: RequestCache>(
             return None;
         }
     };
-    let (day, value) = values.last_key_value()?;
-    let result = ItcrmDetails {
-        value: *value,
-        date: display(*day),
-    };
+    let rows = values
+        .iter()
+        .rev()
+        .take(32)
+        .map(|(day, value)| json!({"fecha":iso(*day),"valor":value}))
+        .collect::<Vec<_>>();
     if let Err(error) = cache.set(
-        "latest_itcrm_details",
-        &json!({"value":result.value,"date":result.date}).to_string(),
+        "itcrm_daily_history",
+        &json!({"results":[{"detalle":rows}]}).to_string(),
         ITCRM_CACHE_TTL_SECONDS,
     ) {
         d.push(format!(
-            "could not write BCRA cache latest_itcrm_details: {error}"
+            "could not write BCRA cache itcrm_daily_history: {error}"
         ));
     }
-    Some(result)
+    Some(values)
+}
+
+fn tcrm_daily_baseline<T: BcraTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    variables: &[&Map<String, Value>],
+    now: i64,
+    d: &mut Vec<String>,
+) -> Option<f64> {
+    let id = variables
+        .iter()
+        .find(|variable| {
+            variable
+                .get("descripcion")
+                .and_then(Value::as_str)
+                .is_some_and(|description| norm(description).contains("tipo de cambio mayorista"))
+        })?
+        .get("idVariable")?
+        .as_i64()?;
+    let wholesale = series(&request_json(
+        transport,
+        cache,
+        &BcraRequest::Series { id, limit: 32 },
+        now,
+        d,
+    )?);
+    let indices = itcrm_series(transport, cache, d)?;
+    // Daily observations carry forward across weekends and holidays.
+    let day = ba_day(now.saturating_sub(86_400));
+    let (_, wholesale) = wholesale.range(..=day).next_back()?;
+    let (_, index) = indices.range(..=day).next_back()?;
+    tcrm_value(*wholesale, *index)
+}
+
+fn tcrm_value(wholesale: f64, index: f64) -> Option<f64> {
+    if wholesale <= 0.0 || index <= 0.0 {
+        return None;
+    }
+    let result = wholesale * 100.0 / index;
+    (result.is_finite() && result > 0.0).then_some(result)
 }
 
 fn calculate_tcrm(variables: &[BcraVariable], itcrm: Option<&ItcrmDetails>) -> Option<f64> {
@@ -673,11 +746,7 @@ fn calculate_tcrm(variables: &[BcraVariable], itcrm: Option<&ItcrmDetails>) -> O
         .find(|value| norm(&value.description).contains("tipo de cambio mayorista"))
         .and_then(|value| number(Some(&Value::String(value.value.clone()))))?;
     let index = itcrm?.value;
-    if index <= 0.0 {
-        return None;
-    }
-    let result = wholesale * 100.0 / index;
-    result.is_finite().then_some(result)
+    tcrm_value(wholesale, index)
 }
 
 fn persist_market<C: RequestCache>(
@@ -867,6 +936,86 @@ mod tests {
             Some("29/10 12:34")
         );
         assert!(parse_workbook(b"invalid").is_err());
+    }
+
+    #[test]
+    fn tcrm_snapshots_use_the_same_utc_hour_as_the_dollar_reader() {
+        let now = 1_725_000_000;
+        let mut cache = Cache::default();
+        let mut diagnostics = Vec::new();
+        persist_market(
+            &mut cache,
+            &[BcraVariable {
+                description: "Tipo de cambio mayorista".to_owned(),
+                value: "1100".to_owned(),
+                date: "2024-08-30".to_owned(),
+            }],
+            Some(&ItcrmDetails {
+                value: 100.0,
+                date: "2024-08-30".to_owned(),
+            }),
+            now,
+            &mut diagnostics,
+        );
+        assert!(diagnostics.is_empty());
+        let key = request_cache_history_key("2024-08-30-06", "tcrm_100");
+        assert!(cache.values.contains_key(&key), "{:?}", cache.values.keys());
+    }
+
+    #[test]
+    fn daily_tcrm_uses_only_observations_available_on_the_target_date() {
+        let now = days(2024, 9, 1) * 86_400 + 15 * 3_600;
+        let variable = json!({"idVariable":5,"descripcion":"Tipo de cambio mayorista"});
+        let variables = variable.as_object().into_iter().collect::<Vec<_>>();
+        let request = BcraRequest::Series { id: 5, limit: 32 };
+        let key = python_request_cache_key(&arguments(&request).unwrap_or_default());
+        for (date, wholesale, index, expected) in [
+            ("2024-08-30", 1000.0, 125.0, Some(800.0)),
+            ("2024-09-01", 1000.0, 125.0, None),
+            ("2024-08-30", 1000.0, 0.0, None),
+            ("2024-08-30", -1000.0, 125.0, None),
+            ("2024-08-30", f64::MAX, 0.01, None),
+        ] {
+            let mut cache = Cache::default();
+            cache.values.insert(
+                key.clone(),
+                json!({"timestamp":now,"data":{"results":[{"detalle":[
+                    {"fecha":date,"valor":wholesale},
+                    {"fecha":"2024-09-02","valor":5000.0}
+                ]}]}})
+                .to_string(),
+            );
+            cache.values.insert(
+                "itcrm_daily_history".to_owned(),
+                json!({"results":[{"detalle":[
+                    {"fecha":date,"valor":index},
+                    {"fecha":"2024-09-02","valor":250.0}
+                ]}]})
+                .to_string(),
+            );
+            let transport = Transport {
+                responses: RefCell::new(VecDeque::new()),
+            };
+            let mut diagnostics = Vec::new();
+            assert_eq!(
+                tcrm_daily_baseline(&transport, &mut cache, &variables, now, &mut diagnostics),
+                expected
+            );
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn daily_tcrm_scales_with_wholesale_and_inversely_with_the_index(
+            wholesale in 1.0_f64..100_000.0,
+            index in 1.0_f64..1000.0,
+            factor in 0.1_f64..10.0,
+        ) {
+            let value = tcrm_value(wholesale, index).ok_or_else(|| proptest::test_runner::TestCaseError::fail("valid TCRM rejected"))?;
+            let scaled = tcrm_value(wholesale * factor, index * factor).ok_or_else(|| proptest::test_runner::TestCaseError::fail("scaled TCRM rejected"))?;
+            proptest::prop_assert!((value - scaled).abs() <= value * 1e-12);
+        }
     }
 
     #[test]

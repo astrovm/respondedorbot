@@ -126,21 +126,21 @@ pub fn render_dollar_rates(
                 _ => rate.name,
             };
             let number = |value: &str| crate::output_format::readable_number(value);
-            let change = rate.change.map_or_else(
-                || crate::menu_ui::localized(locale, "sin datos", "no data").to_owned(),
-                |change| {
+            let change = rate
+                .change
+                .map(|change| {
                     let change_text = number(&signed(change));
                     if change_text == "+0" {
-                        "0%".to_owned()
+                        " (0%)".to_owned()
                     } else {
-                        format!("{change_text}%")
+                        format!(" ({change_text}%)")
                     }
-                },
-            );
+                })
+                .unwrap_or_default();
             let price = number(&trimmed(rate.price, 2));
             match locale {
-                Locale::Es => format!("{name}: ${price} ({change})"),
-                Locale::En => format!("{name}: {price} ({change})"),
+                Locale::Es => format!("{name}: ${price}{change}"),
+                Locale::En => format!("{name}: {price}{change}"),
             }
         })
         .collect::<Vec<_>>();
@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(
             render_dollar_rates(&rates, Some(&bands), 6, Locale::En).as_deref(),
             Some(
-                "Dollar in pesos, 6h change\n\nLower band: 900 (no data)\nOfficial: 1,000 (no data)\nUpper band: 1,100 (no data)\n\nNo 6h history yet. Try again later"
+                "Dollar in pesos, 6h change\n\nLower band: 900\nOfficial: 1,000\nUpper band: 1,100\n\nNo 6h history yet. Try again later"
             )
         );
         assert_eq!(render_dollar_rates(&[], None, 24, Locale::Es), None);
@@ -281,9 +281,33 @@ mod tests {
         assert_eq!(
             render_dollar_rates(&rates, None, 12, Locale::Es).as_deref(),
             Some(
-                "Dólar en pesos, variación 12h\n\nOficial: $1,000 (sin datos)\n\nTodavía no tengo historial de 12h. Probá más tarde"
+                "Dólar en pesos, variación 12h\n\nOficial: $1,000\n\nTodavía no tengo historial de 12h. Probá más tarde"
             )
         );
+    }
+
+    #[test]
+    fn missing_changes_show_only_the_price_in_both_languages() {
+        let rates = [DollarRate {
+            name: "TCRM 100",
+            price: 1814.14,
+            change: None,
+        }];
+        for (locale, expected) in [
+            (
+                Locale::Es,
+                "Dólar en pesos, variación 24h\n\nTCRM 100: $1,814.14",
+            ),
+            (
+                Locale::En,
+                "Dollar in pesos, 24h change\n\nTCRM 100: 1,814.14",
+            ),
+        ] {
+            assert_eq!(
+                render_dollar_rates(&rates, None, 24, locale).as_deref(),
+                Some(expected)
+            );
+        }
     }
 
     #[test]
