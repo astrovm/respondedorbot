@@ -2,6 +2,7 @@
 
 use std::fmt::Debug;
 
+use bot_adapters::bcra::{BcraTransport, ReqwestBcraTransport, load_dollar_references};
 use bot_adapters::coinmarketcap::{
     CoinMarketCapMarketTransport, ReqwestCoinMarketCapTransport, refresh_market_snapshot,
 };
@@ -73,6 +74,23 @@ where
 struct OilJob<Transport, Cache> {
     transport: Transport,
     cache: Cache,
+}
+
+/// Refreshes the BCRA references used by `/dolar`, including its TCRM history.
+struct BcraJob<Transport, Cache> {
+    transport: Transport,
+    cache: Cache,
+}
+
+impl<Transport, Cache> PriceRefreshJob for BcraJob<Transport, Cache>
+where
+    Transport: BcraTransport + Send,
+    Cache: RequestCache + Send,
+{
+    fn refresh(&mut self, now_epoch_seconds: i64) -> Result<(), String> {
+        let load = load_dollar_references(&self.transport, &mut self.cache, now_epoch_seconds);
+        diagnostics("BCRA dollar references refresh", load.diagnostics)
+    }
 }
 
 impl<Transport, Cache> PriceRefreshJob for OilJob<Transport, Cache>
@@ -160,6 +178,13 @@ pub fn production_price_refresh_worker(
             cache: cache()?,
         }),
     }];
+    jobs.push(NamedJob {
+        name: "bcra",
+        job: Box::new(BcraJob {
+            transport: ReqwestBcraTransport::new().map_err(construction_error("BCRA"))?,
+            cache: cache()?,
+        }),
+    });
     if let Some(api_key) = coinmarketcap_key.filter(|value| !value.is_empty()) {
         for (name, currency) in [("crypto-ars", "ARS"), ("crypto-usd", "USD")] {
             jobs.push(NamedJob {
@@ -202,13 +227,17 @@ fn refresh_oil(mut load_quote: impl FnMut(&str) -> YahooQuoteLoad) -> Result<(),
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use bot_adapters::bcra::{BcraRequest, BcraTransport, HttpResponse, TransportFailureKind};
+    use bot_adapters::dollar::DollarCache;
+    use bot_adapters::request_cache::RequestCache;
     use bot_adapters::yahoo_finance::YahooQuoteLoad;
     use bot_core::stocks::StockQuote;
 
     use super::{
-        CryptoJob, DollarJob, NamedJob, OilJob, PriceCacheRefreshWorker, PriceRefreshJob,
+        BcraJob, CryptoJob, DollarJob, NamedJob, OilJob, PriceCacheRefreshWorker, PriceRefreshJob,
         construction_error, production_price_refresh_worker, refresh_oil,
     };
 
@@ -280,23 +309,168 @@ mod tests {
             password: Some("synthetic-password".to_owned()),
         };
         let without_crypto = production_price_refresh_worker(&endpoint, None)?;
-        assert_eq!(without_crypto.jobs.len(), 2);
+        assert_eq!(without_crypto.jobs.len(), 3);
         assert_eq!(without_crypto.jobs[0].name, "dollar");
-        assert_eq!(without_crypto.jobs[1].name, "oil");
+        assert_eq!(without_crypto.jobs[1].name, "bcra");
+        assert_eq!(without_crypto.jobs[2].name, "oil");
 
         let with_crypto = production_price_refresh_worker(&endpoint, Some("synthetic-market-key"))?;
-        assert_eq!(with_crypto.jobs.len(), 4);
+        assert_eq!(with_crypto.jobs.len(), 5);
         assert_eq!(
             with_crypto
                 .jobs
                 .iter()
                 .map(|job| job.name)
                 .collect::<Vec<_>>(),
-            ["dollar", "crypto-ars", "crypto-usd", "oil"]
+            ["dollar", "bcra", "crypto-ars", "crypto-usd", "oil"]
         );
         let empty_key = production_price_refresh_worker(&endpoint, Some(""))?;
-        assert_eq!(empty_key.jobs.len(), 2);
+        assert_eq!(empty_key.jobs.len(), 3);
         Ok(())
+    }
+
+    #[derive(Clone, Default)]
+    struct MemoryCache(Arc<Mutex<HashMap<String, String>>>);
+
+    impl RequestCache for MemoryCache {
+        type Error = &'static str;
+
+        fn get(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
+            Ok(self.0.lock().map_err(|_| "cache lock")?.get(key).cloned())
+        }
+
+        fn set(&mut self, key: &str, value: &str, _ttl: i64) -> Result<(), Self::Error> {
+            self.0
+                .lock()
+                .map_err(|_| "cache lock")?
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        fn take(&mut self, key: &str) -> Result<Option<String>, Self::Error> {
+            Ok(self.0.lock().map_err(|_| "cache lock")?.remove(key))
+        }
+
+        fn claim(&mut self, key: &str, value: &str, _ttl: i64) -> Result<bool, Self::Error> {
+            let mut values = self.0.lock().map_err(|_| "cache lock")?;
+            if values.contains_key(key) {
+                return Ok(false);
+            }
+            values.insert(key.to_owned(), value.to_owned());
+            Ok(true)
+        }
+    }
+
+    impl DollarCache for MemoryCache {
+        fn set_if_absent(&mut self, key: &str, value: &str, ttl: i64) -> Result<bool, Self::Error> {
+            self.claim(key, value, ttl)
+        }
+    }
+
+    struct BcraFake(Arc<Mutex<Vec<BcraRequest>>>);
+
+    impl BcraTransport for BcraFake {
+        fn get(&self, request: &BcraRequest) -> Result<HttpResponse, TransportFailureKind> {
+            self.0
+                .lock()
+                .map_err(|_| TransportFailureKind::Request)?
+                .push(request.clone());
+            match request {
+                BcraRequest::Variables => Ok(HttpResponse {
+                    status_code: 200,
+                    body: br#"{"results":[{"categoria":"Principales Variables","idVariable":5,"descripcion":"Tipo de cambio mayorista","ultFechaInformada":"2025-09-19","ultValorInformado":1450.0}]}"#.to_vec(),
+                }),
+                _ => Err(TransportFailureKind::Request),
+            }
+        }
+    }
+
+    #[test]
+    fn bcra_refresh_writes_history_each_cycle_when_dollar_provider_fails()
+    -> crate::test_env::TestResult {
+        let mut cache = MemoryCache::default();
+        cache.set(
+            "latest_itcrm_details",
+            r#"{"value":100.0,"date":"19/09/25"}"#,
+            1800,
+        )?;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut worker = PriceCacheRefreshWorker::new(vec![
+            NamedJob {
+                name: "dollar",
+                job: Box::new(DollarJob {
+                    transport: OfflineTransport,
+                    cache: MemoryCache::default(),
+                }),
+            },
+            NamedJob {
+                name: "bcra",
+                job: Box::new(BcraJob {
+                    transport: BcraFake(Arc::clone(&calls)),
+                    cache: cache.clone(),
+                }),
+            },
+        ]);
+        let first = 1_758_297_600;
+        assert_eq!(worker.run_once(first), Ok(()));
+        assert_eq!(worker.run_once(first + 3600), Ok(()));
+        assert_eq!(
+            calls.lock().map_err(|_| "calls lock")?.as_slice(),
+            [BcraRequest::Variables, BcraRequest::Variables]
+        );
+        let values = cache.0.lock().map_err(|_| "cache lock")?;
+        let current: serde_json::Value =
+            serde_json::from_str(values.get("tcrm_100").ok_or("missing current TCRM")?)?;
+        assert_eq!(
+            current,
+            serde_json::json!({"timestamp": first + 3600, "data": 1450.0})
+        );
+        let history = values
+            .iter()
+            .filter(|(key, _)| key.ends_with(":tcrm_100"))
+            .collect::<Vec<_>>();
+        assert_eq!(history.len(), 2);
+        for timestamp in [first, first + 3600] {
+            let expected = serde_json::json!({"timestamp": timestamp, "data": 1450.0});
+            assert!(history.iter().any(|(_, value)| {
+                serde_json::from_str::<serde_json::Value>(value)
+                    .ok()
+                    .as_ref()
+                    == Some(&expected)
+            }));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bcra_failure_does_not_stop_later_jobs() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let later_calls = Arc::clone(&calls);
+        let mut worker = PriceCacheRefreshWorker::new(vec![
+            NamedJob {
+                name: "bcra",
+                job: Box::new(BcraJob {
+                    transport: OfflineTransport,
+                    cache: MemoryCache::default(),
+                }),
+            },
+            NamedJob {
+                name: "later",
+                job: Box::new(ClosureJob(move |now| {
+                    later_calls.lock().map_err(crate::error_text)?.push(now);
+                    Ok(())
+                })),
+            },
+        ]);
+        assert_eq!(worker.run_once(1), Ok(()));
+        assert_eq!(worker.run_once(2), Ok(()));
+        let error = worker.run_once(3).err().unwrap_or_default();
+        assert!(error.contains("bcra: BCRA refresh:"), "{error}");
+        assert!(error.contains("Connection"), "{error}");
+        assert_eq!(
+            calls.lock().map(|calls| calls.clone()).unwrap_or_default(),
+            [1, 2, 3]
+        );
     }
 
     #[test]
@@ -378,6 +552,12 @@ mod tests {
 
     /// Rejects every provider request, as when the network is down.
     struct OfflineTransport;
+
+    impl BcraTransport for OfflineTransport {
+        fn get(&self, _request: &BcraRequest) -> Result<HttpResponse, TransportFailureKind> {
+            Err(TransportFailureKind::Connection)
+        }
+    }
 
     impl bot_adapters::dollar::DollarTransport for OfflineTransport {
         fn get(
