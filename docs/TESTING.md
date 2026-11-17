@@ -2,6 +2,23 @@
 
 ## Required pull-request gates
 
+Run the Rust gates locally in a container with isolated PostgreSQL and Redis:
+
+```bash
+scripts/check-container.sh
+scripts/check-container.sh test -p bot-adapters dollar
+scripts/check-container.sh coverage
+```
+
+Podman must be available. The first run needs network access to build the test
+image. The container mounts only the worktree. It does not use host credentials,
+service sockets, or user configuration. Build files stay in `target/agent`.
+It uses half the host memory, no swap, and two CPUs by default. Set
+`CARGO_BUILD_JOBS` to change the CPU limit. The script runs the Rust gates below,
+including coverage. It does not build the production image or run fuzz targets.
+
+CI runs these commands directly inside its isolated runner:
+
 ```bash
 cargo fmt --all -- --check
 cargo check --locked --workspace --all-targets --all-features

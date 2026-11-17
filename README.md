@@ -303,16 +303,18 @@ Match `operation_id` across records to follow one conversation turn.
 <details>
 <summary><b>Test it</b></summary>
 
-Run the same checks used by pull requests:
+Run the Rust checks in an isolated Podman container:
 
 ```bash
-cargo fmt --all -- --check
-cargo check --locked --workspace --all-targets --all-features
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-features
+scripts/check-container.sh
 ```
 
-Integration tests use synthetic data. Set `TEST_DATABASE_URL`, `TEST_REDIS_HOST`, and `TEST_REDIS_PORT` to include PostgreSQL and Redis tests.
+The script starts PostgreSQL and Redis inside the container. It runs formatting,
+Clippy, all workspace tests, and the coverage gate. Integration tests use synthetic
+data. The container has no host credentials or service sockets. It uses at most
+half the host memory and two CPUs. Set `CARGO_BUILD_JOBS` to change the CPU limit.
+The first run downloads the pinned Rust image and builds the test tools.
+It requires Podman and network access. It does not run the CI image or fuzz jobs.
 
 Coverage requirements:
 

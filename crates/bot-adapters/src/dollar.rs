@@ -186,14 +186,14 @@ fn civil_date(days_since_epoch: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
-fn hour_key(timestamp: i64) -> String {
+pub(crate) fn hour_key(timestamp: i64) -> String {
     let hours = div_floor(timestamp, 3_600);
     let hour = hours.rem_euclid(24);
     let (year, month, day) = civil_date(div_floor(timestamp, 86_400));
     format!("{year:04}-{month:02}-{day:02}-{hour:02}")
 }
 
-fn cached_value<C: DollarCache>(
+fn cached_value<C: RequestCache>(
     cache: &mut C,
     key: &str,
     diagnostics: &mut Vec<String>,
@@ -299,31 +299,52 @@ fn unwrap_data(value: &Value) -> &Value {
     value.get("data").unwrap_or(value)
 }
 
+pub(crate) fn tcrm_history<C: RequestCache>(
+    cache: &mut C,
+    timestamp: i64,
+    diagnostics: &mut Vec<String>,
+) -> Option<f64> {
+    let key = request_cache_history_key(&hour_key(timestamp), "tcrm_100");
+    let value = cached_value(cache, &key, diagnostics)?;
+    let recorded_at = value.get("timestamp")?.as_i64()?;
+    // Old BCRA keys used local time. Their payload timestamp identifies them.
+    if recorded_at.div_euclid(3_600) != timestamp.div_euclid(3_600) {
+        return None;
+    }
+    number(value.get("data")).filter(|value| *value > 0.0)
+}
+
 fn tcrm<C: DollarCache>(
     cache: &mut C,
     fresh: Option<f64>,
+    daily_history: Option<f64>,
     hours_ago: i64,
     now_unix: i64,
     diagnostics: &mut Vec<String>,
 ) -> Option<DollarRate> {
-    let current = fresh.or_else(|| {
-        cached_value(cache, "tcrm_100", diagnostics)
-            .as_ref()
-            .and_then(|value| number(value.get("data")))
-    })?;
-    let history_key = request_cache_history_key(
-        &hour_key(now_unix.saturating_sub(hours_ago.saturating_mul(3_600))),
-        "tcrm_100",
-    );
-    let historical = cached_value(cache, &history_key, diagnostics)
-        .as_ref()
-        .and_then(|value| number(value.get("data")));
+    let current = fresh
+        .or_else(|| {
+            cached_value(cache, "tcrm_100", diagnostics)
+                .as_ref()
+                .and_then(|value| number(value.get("data")))
+        })
+        .filter(|value| value.is_finite() && *value > 0.0)?;
+    let historical = tcrm_history(
+        cache,
+        now_unix.saturating_sub(hours_ago.saturating_mul(3_600)),
+        diagnostics,
+    )
+    .or(daily_history.filter(|value| hours_ago == 24 && value.is_finite() && *value > 0.0));
+    let change = historical
+        .map(|value| ((current / value) - 1.0) * 100.0)
+        .filter(|value| value.is_finite());
+    if change.is_none() {
+        diagnostics.push(format!("TCRM 100 has no valid {hours_ago}h comparison"));
+    }
     Some(DollarRate {
         name: "TCRM 100",
         price: current,
-        change: historical
-            .filter(|value| *value != 0.0)
-            .map(|value| ((current / value) - 1.0) * 100.0),
+        change,
     })
 }
 
@@ -356,7 +377,7 @@ fn formatted_snapshot<C: DollarCache>(
         Locale::Es => "es",
         Locale::En => "en",
     };
-    let key = format!("market:dolar:formatted:v2:{language}:{hours_ago}");
+    let key = format!("market:dolar:formatted:v3:{language}:{hours_ago}");
     let cached = cached_value(cache, &key, diagnostics)?;
     let timestamp = cached.get("timestamp").and_then(Value::as_i64)?;
     if matches!(
@@ -389,7 +410,7 @@ fn store_formatted<C: DollarCache>(
         Locale::Es => "es",
         Locale::En => "en",
     };
-    let key = format!("market:dolar:formatted:v2:{language}:{hours_ago}");
+    let key = format!("market:dolar:formatted:v3:{language}:{hours_ago}");
     let value = json!({"timestamp": now_unix, "value": text}).to_string();
     if let Err(error) = cache.set(
         &key,
@@ -454,13 +475,7 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
     );
     diagnostics.extend(load.diagnostics);
     let refreshed = load.refreshed;
-    let Some(current) = load.data else {
-        return DollarMarketLoad {
-            text: None,
-            diagnostics,
-        };
-    };
-    if refreshed {
+    if refreshed && let Some(current) = &load.data {
         let hourly_value = json!({"timestamp": now_unix, "data": current}).to_string();
         let current_history_key = request_cache_history_key(&hour_key(now_unix), request_hash());
         if let Err(error) =
@@ -471,10 +486,16 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
             ));
         }
     }
-    let mut rates = parse_rates(&current, history.as_ref().map(unwrap_data), hours_ago);
+    let mut rates = load
+        .data
+        .as_ref()
+        .map(|current| parse_rates(current, history.as_ref().map(unwrap_data), hours_ago))
+        .unwrap_or_default();
+    let has_dollar_quotes = !rates.is_empty();
     if let Some(tcrm) = tcrm(
         cache,
         references.and_then(|value| value.tcrm_100),
+        references.and_then(|value| value.tcrm_100_previous_day),
         hours_ago,
         now_unix,
         &mut diagnostics,
@@ -491,7 +512,9 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
         })
         .or_else(|| currency_bands(cache, now_unix, &mut diagnostics));
     let text = render_dollar_rates(&rates, bands.as_ref(), hours_ago, locale);
-    if let Some(text) = &text {
+    if let Some(text) = &text
+        && has_dollar_quotes
+    {
         store_formatted(cache, hours_ago, now_unix, text, locale, &mut diagnostics);
     }
     DollarMarketLoad { text, diagnostics }
@@ -588,6 +611,7 @@ mod tests {
         };
         let references = crate::bcra::DollarReferencesLoad {
             tcrm_100: Some(1410.0),
+            tcrm_100_previous_day: None,
             itcrm: None,
             diagnostics: Vec::new(),
             bands: Some(bot_core::bcra::BcraBands {
@@ -611,6 +635,63 @@ mod tests {
         assert!(text.contains("Lower band: 950"), "{text}");
         assert!(text.contains("Upper band: 1,550"), "{text}");
         assert!(!load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn fresh_bcra_prices_survive_a_dollar_provider_failure() {
+        let now = 1_725_000_000;
+        for tcrm_100 in [Some(1410.0), None] {
+            let transport = Transport {
+                responses: RefCell::new(VecDeque::new()),
+                calls: RefCell::new(0),
+            };
+            let mut cache = Cache::default();
+            let references = crate::bcra::DollarReferencesLoad {
+                tcrm_100,
+                tcrm_100_previous_day: None,
+                itcrm: None,
+                diagnostics: Vec::new(),
+                bands: Some(bot_core::bcra::BcraBands {
+                    lower: 950.0,
+                    upper: 1550.0,
+                    date: "30/08/24".to_owned(),
+                    lower_change: None,
+                    upper_change: None,
+                }),
+            };
+            let load = super::load_dollar_market_with_references(
+                &transport,
+                &mut cache,
+                24,
+                Locale::Es,
+                now,
+                Some(&references),
+            );
+            let text = load.text.unwrap_or_default();
+            assert!(text.contains("Banda piso: $950"), "{text}");
+            assert!(text.contains("Banda techo: $1,550"), "{text}");
+            assert_eq!(text.contains("TCRM 100: $1,410"), tcrm_100.is_some());
+            assert!(!text.contains("sin datos"));
+            assert!(!cache.values.contains_key("market:dolar:formatted:v3:es:24"));
+            let recovered = Transport {
+                responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                    status_code: 200,
+                    body: body(),
+                })])),
+                calls: RefCell::new(0),
+            };
+            let load = super::load_dollar_market_with_references(
+                &recovered,
+                &mut cache,
+                24,
+                Locale::Es,
+                now + 1,
+                Some(&references),
+            );
+            let text = load.text.unwrap_or_default();
+            assert!(text.contains("Oficial: $1,420"), "{text}");
+            assert_eq!(*recovered.calls.borrow(), 1);
+        }
     }
 
     #[test]
@@ -701,7 +782,7 @@ mod tests {
                 history_key.clone(),
                 serde_json::json!({"timestamp": now - 24 * 3_600, "data": historical}).to_string(),
             );
-            let rate = super::tcrm(&mut cache, Some(1_100.0), 24, now, &mut Vec::new());
+            let rate = super::tcrm(&mut cache, Some(1_100.0), None, 24, now, &mut Vec::new());
             assert_eq!(rate.as_ref().map(|rate| rate.price), Some(1_100.0));
             assert_eq!(
                 rate.and_then(|rate| rate.change)
@@ -709,6 +790,150 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn tcrm_does_not_use_a_snapshot_written_under_the_wrong_timezone() {
+        let now = 1_725_000_000;
+        let key = bot_core::cache_policy::request_cache_history_key(
+            &hour_key(now - 24 * 3_600),
+            "tcrm_100",
+        );
+        let mut cache = Cache::default();
+        cache.values.insert(
+            key,
+            serde_json::json!({
+                "timestamp": now - 21 * 3_600, "data": 1000.0,
+            })
+            .to_string(),
+        );
+        let rate = super::tcrm(&mut cache, Some(1100.0), None, 24, now, &mut Vec::new());
+        assert_eq!(rate.and_then(|rate| rate.change), None);
+    }
+
+    #[test]
+    fn daily_tcrm_fallback_is_only_used_for_24h_and_hourly_history_takes_priority() {
+        let now = 1_725_000_000;
+        for (hours, hourly, daily, expected) in [
+            (24, None, Some(1000.0), Some(10.0)),
+            (6, None, Some(1000.0), None),
+            (48, None, Some(1000.0), None),
+            (24, Some(1100.0), Some(1000.0), Some(0.0)),
+            (24, None, Some(0.0), None),
+            (24, None, Some(-1000.0), None),
+            (24, None, Some(f64::INFINITY), None),
+            (24, None, Some(f64::MIN_POSITIVE), None),
+        ] {
+            let mut cache = Cache::default();
+            if let Some(value) = hourly {
+                let timestamp = now - hours * 3600;
+                cache.values.insert(
+                    bot_core::cache_policy::request_cache_history_key(
+                        &hour_key(timestamp),
+                        "tcrm_100",
+                    ),
+                    serde_json::json!({"timestamp":timestamp,"data":value}).to_string(),
+                );
+            }
+            let mut diagnostics = Vec::new();
+            let rate = super::tcrm(
+                &mut cache,
+                Some(1100.0),
+                daily,
+                hours,
+                now,
+                &mut diagnostics,
+            );
+            assert_eq!(
+                rate.and_then(|rate| rate.change)
+                    .map(|change| (change * 1000.0).round() / 1000.0),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn daily_bcra_history_recovers_the_change_after_an_empty_hourly_cache() {
+        struct OfflineBcra;
+        impl crate::bcra::BcraTransport for OfflineBcra {
+            fn get(
+                &self,
+                _: &crate::bcra::BcraRequest,
+            ) -> Result<crate::bcra::HttpResponse, TransportFailureKind> {
+                Err(TransportFailureKind::Connection)
+            }
+        }
+        let now = 1_725_000_000;
+        let mut cache = Cache::default();
+        cache.values.insert(
+            "request_cache:a0cbcd2d36185480185569e392c8fa794529abcc8114f3550bc5dadefe48b4e5"
+                .to_owned(),
+            serde_json::json!({"timestamp":now,"data":{"results":[{
+                "categoria":"Principales Variables", "idVariable":5,
+                "descripcion":"Tipo de cambio mayorista",
+                "ultFechaInformada":"2024-08-30", "ultValorInformado":1100.0
+            }]}})
+            .to_string(),
+        );
+        cache.values.insert(
+            "latest_itcrm_details".to_owned(),
+            serde_json::json!({"value":100.0,"date":"30/08/24"}).to_string(),
+        );
+        cache.values.insert(
+            "itcrm_daily_history".to_owned(),
+            serde_json::json!({"results":[{"detalle":[
+                {"fecha":"2024-08-29","valor":100.0},
+                {"fecha":"2024-08-30","valor":100.0}
+            ]}]})
+            .to_string(),
+        );
+        let arguments = "{\"api_url\": \"https://api.bcra.gob.ar/estadisticas/v4.0/monetarias/5\", \"headers\": null, \"parameters\": {\"limit\": \"32\"}}";
+        cache.values.insert(
+            crate::request_cache::python_request_cache_key(arguments),
+            serde_json::json!({"timestamp":now,"data":{"results":[{"detalle":[
+                {"fecha":"2024-08-29","valor":1000.0},
+                {"fecha":"2024-08-30","valor":1100.0}
+            ]}]}})
+            .to_string(),
+        );
+        let references = crate::bcra::load_dollar_references(&OfflineBcra, &mut cache, now);
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                status_code: 200,
+                body: body(),
+            })])),
+            calls: RefCell::new(0),
+        };
+        let load = super::load_dollar_market_with_references(
+            &transport,
+            &mut cache,
+            24,
+            Locale::Es,
+            now,
+            Some(&references),
+        );
+        let text = load.text.unwrap_or_default();
+        assert!(
+            text.contains("TCRM 100: $1,100 (+10%)"),
+            "{text}; {:?}",
+            references.diagnostics
+        );
+        cache
+            .values
+            .remove(&crate::request_cache::python_request_cache_key(arguments));
+        cache.values.remove("market:dolar:formatted:v3:es:24");
+        let references = crate::bcra::load_dollar_references(&OfflineBcra, &mut cache, now);
+        let load = super::load_dollar_market_with_references(
+            &transport,
+            &mut cache,
+            24,
+            Locale::Es,
+            now,
+            Some(&references),
+        );
+        let text = load.text.unwrap_or_default();
+        assert!(text.contains("TCRM 100: $1,100\n"), "{text}");
+        assert!(!references.diagnostics.is_empty());
     }
 
     #[test]
@@ -908,7 +1133,7 @@ mod tests {
             cache
                 .writes
                 .iter()
-                .any(|write| write.0 == "market:dolar:formatted:v2:es:24")
+                .any(|write| write.0 == "market:dolar:formatted:v3:es:24")
         );
     }
 
@@ -945,14 +1170,14 @@ mod tests {
                 .as_deref()
                 .is_some_and(|text| text.starts_with("Dólar"))
         );
-        assert!(cache.values.contains_key("market:dolar:formatted:v2:es:6"));
+        assert!(cache.values.contains_key("market:dolar:formatted:v3:es:6"));
         let second = load_dollar_market(&transport, &mut cache, 6, Locale::En, now + 301);
         assert_eq!(*transport.calls.borrow(), 1);
         assert_eq!(
             second.text,
             cache
                 .values
-                .get("market:dolar:formatted:v2:en:6")
+                .get("market:dolar:formatted:v3:en:6")
                 .and_then(|raw| {
                     serde_json::from_str::<serde_json::Value>(raw)
                         .ok()?
@@ -1037,7 +1262,7 @@ mod tests {
         };
         let mut cache = Cache::default();
         cache.values.insert(
-            "market:dolar:formatted:v2:en:6".to_owned(),
+            "market:dolar:formatted:v3:en:6".to_owned(),
             serde_json::json!({"timestamp": now - 100_000, "value": "stale"}).to_string(),
         );
         cache.values.insert(

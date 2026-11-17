@@ -1,0 +1,7 @@
+FROM docker.io/library/rust:1.99.1-slim-trixie
+ARG CHECK_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CHECK_BUILD_JOBS} CARGO_INCREMENTAL=0
+RUN apt-get update && apt-get install -y --no-install-recommends libssl-dev pkg-config ffmpeg redis-server postgresql postgresql-contrib mold && rm -rf /var/lib/apt/lists/*
+RUN cargo install --locked cargo-llvm-cov --version 0.9.1 && rustup component add llvm-tools-preview clippy rustfmt
+ENV CARGO_TARGET_DIR=/app/target/agent/current
+WORKDIR /app
