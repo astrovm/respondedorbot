@@ -393,16 +393,10 @@ mod tests {
     fn bcra_refresh_writes_history_each_cycle_when_dollar_provider_fails()
     -> crate::test_env::TestResult {
         let mut cache = MemoryCache::default();
-        cache.set(
-            "latest_itcrm_details",
-            r#"{"value":100.0,"date":"19/09/25"}"#,
-            1800,
-        )?;
-        cache.set(
-            "itcrm_daily_history",
-            r#"{"results":[{"detalle":[{"fecha":"2025-09-18","valor":100.0}]}]}"#,
-            1800,
-        )?;
+        let details = r#"{"value":100.0,"date":"19/09/25"}"#;
+        let history = r#"{"results":[{"detalle":[{"fecha":"2025-09-18","valor":100.0}]}]}"#;
+        cache.set("latest_itcrm_details", details, 1800)?;
+        cache.set("itcrm_daily_history", history, 1800)?;
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut worker = PriceCacheRefreshWorker::new(vec![
             NamedJob {
@@ -636,6 +630,10 @@ mod tests {
             transport: OfflineTransport,
             cache: unreachable_cache()?,
         };
+        let mut bcra = BcraJob {
+            transport: OfflineTransport,
+            cache: unreachable_cache()?,
+        };
         let mut crypto = CryptoJob {
             transport: OfflineTransport,
             cache: unreachable_cache()?,
@@ -648,6 +646,10 @@ mod tests {
         };
         let failures = [
             (dollar.refresh(1_700_000_000), "dollar refresh: "),
+            (
+                bcra.refresh(1_700_000_000),
+                "BCRA dollar references refresh: ",
+            ),
             (crypto.refresh(1_700_000_000), "CoinMarketCap refresh: "),
             (oil.refresh(1_700_000_000), "Yahoo oil refresh: "),
         ];

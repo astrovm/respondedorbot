@@ -491,6 +491,7 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
         .as_ref()
         .map(|current| parse_rates(current, history.as_ref().map(unwrap_data), hours_ago))
         .unwrap_or_default();
+    let has_dollar_quotes = !rates.is_empty();
     if let Some(tcrm) = tcrm(
         cache,
         references.and_then(|value| value.tcrm_100),
@@ -511,7 +512,9 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
         })
         .or_else(|| currency_bands(cache, now_unix, &mut diagnostics));
     let text = render_dollar_rates(&rates, bands.as_ref(), hours_ago, locale);
-    if let Some(text) = &text {
+    if let Some(text) = &text
+        && has_dollar_quotes
+    {
         store_formatted(cache, hours_ago, now_unix, text, locale, &mut diagnostics);
     }
     DollarMarketLoad { text, diagnostics }
@@ -669,6 +672,25 @@ mod tests {
             assert!(text.contains("Banda techo: $1,550"), "{text}");
             assert_eq!(text.contains("TCRM 100: $1,410"), tcrm_100.is_some());
             assert!(!text.contains("sin datos"));
+            assert!(!cache.values.contains_key("market:dolar:formatted:v3:es:24"));
+            let recovered = Transport {
+                responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                    status_code: 200,
+                    body: body(),
+                })])),
+                calls: RefCell::new(0),
+            };
+            let load = super::load_dollar_market_with_references(
+                &recovered,
+                &mut cache,
+                24,
+                Locale::Es,
+                now + 1,
+                Some(&references),
+            );
+            let text = load.text.unwrap_or_default();
+            assert!(text.contains("Oficial: $1,420"), "{text}");
+            assert_eq!(*recovered.calls.borrow(), 1);
         }
     }
 

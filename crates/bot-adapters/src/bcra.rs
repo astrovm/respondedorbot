@@ -1072,6 +1072,10 @@ mod tests {
                 fail_sets: offline,
                 ..Cache::default()
             };
+            cache.values.insert(
+                "itcrm_daily_history".to_owned(),
+                json!({"results":[]}).to_string(),
+            );
             let load = load_dollar_references(&transport, &mut cache, 1_788_321_600);
             assert_eq!(
                 load.itcrm.as_ref().map(|details| details.value),
