@@ -94,9 +94,6 @@ pub fn render_dollar_rates(
     hours_ago: i64,
     locale: Locale,
 ) -> Option<String> {
-    if rates.is_empty() {
-        return None;
-    }
     let mut rates = rates.to_vec();
     if let Some(bands) = bands {
         rates.extend([
@@ -111,6 +108,9 @@ pub fn render_dollar_rates(
                 change: (hours_ago == 24).then_some(bands.upper_change).flatten(),
             },
         ]);
+    }
+    if rates.is_empty() {
+        return None;
     }
     rates.sort_by(|left, right| left.price.total_cmp(&right.price));
     let no_history = rates.iter().all(|rate| rate.change.is_none());

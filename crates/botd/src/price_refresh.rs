@@ -380,6 +380,10 @@ mod tests {
                     status_code: 200,
                     body: br#"{"results":[{"categoria":"Principales Variables","idVariable":5,"descripcion":"Tipo de cambio mayorista","ultFechaInformada":"2025-09-19","ultValorInformado":1450.0}]}"#.to_vec(),
                 }),
+                BcraRequest::Series { id: 5, limit: 32 } => Ok(HttpResponse {
+                    status_code: 200,
+                    body: br#"{"results":[{"detalle":[{"fecha":"2025-09-18","valor":1400.0}]}]}"#.to_vec(),
+                }),
                 _ => Err(TransportFailureKind::Request),
             }
         }
@@ -392,6 +396,11 @@ mod tests {
         cache.set(
             "latest_itcrm_details",
             r#"{"value":100.0,"date":"19/09/25"}"#,
+            1800,
+        )?;
+        cache.set(
+            "itcrm_daily_history",
+            r#"{"results":[{"detalle":[{"fecha":"2025-09-18","valor":100.0}]}]}"#,
             1800,
         )?;
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -416,8 +425,16 @@ mod tests {
         assert_eq!(worker.run_once(first + 3600), Ok(()));
         assert_eq!(
             calls.lock().map_err(|_| "calls lock")?.as_slice(),
-            [BcraRequest::Variables, BcraRequest::Variables]
+            [
+                BcraRequest::Variables,
+                BcraRequest::Series { id: 5, limit: 32 },
+                BcraRequest::Variables,
+                BcraRequest::Series { id: 5, limit: 32 }
+            ]
         );
+        assert!(cache.set_if_absent("synthetic-lease", "first", 60)?);
+        assert!(!cache.set_if_absent("synthetic-lease", "second", 60)?);
+        assert_eq!(cache.take("synthetic-lease")?, Some("first".to_owned()));
         let values = cache.0.lock().map_err(|_| "cache lock")?;
         let current: serde_json::Value =
             serde_json::from_str(values.get("tcrm_100").ok_or("missing current TCRM")?)?;
@@ -450,7 +467,7 @@ mod tests {
             NamedJob {
                 name: "bcra",
                 job: Box::new(BcraJob {
-                    transport: OfflineTransport,
+                    transport: BcraFake(Arc::new(Mutex::new(Vec::new()))),
                     cache: MemoryCache::default(),
                 }),
             },
@@ -465,8 +482,11 @@ mod tests {
         assert_eq!(worker.run_once(1), Ok(()));
         assert_eq!(worker.run_once(2), Ok(()));
         let error = worker.run_once(3).err().unwrap_or_default();
-        assert!(error.contains("bcra: BCRA refresh:"), "{error}");
-        assert!(error.contains("Connection"), "{error}");
+        assert!(
+            error.contains("bcra: BCRA dollar references refresh:"),
+            "{error}"
+        );
+        assert!(error.contains("Request"), "{error}");
         assert_eq!(
             calls.lock().map(|calls| calls.clone()).unwrap_or_default(),
             [1, 2, 3]

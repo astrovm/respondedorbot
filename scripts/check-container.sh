@@ -15,6 +15,8 @@ if [[ ${1:-} != --inside ]]; then
     fi
     image=localhost/respondedorbot-checks
     nice -n 10 podman build --memory "${memory_mb}m" --memory-swap "${memory_mb}m" \
+        --cpu-period 100000 --cpu-quota "$((${CARGO_BUILD_JOBS:-2} * 100000))" \
+        --build-arg CHECK_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
         -t "$image" -f "$repo/scripts/Containerfile.test" "$repo/scripts"
     exec nice -n 10 podman run --rm \
         --memory "${memory_mb}m" --memory-swap "${memory_mb}m" \
@@ -37,8 +39,12 @@ pg_bin=$(find /usr/lib/postgresql -name initdb -print -quit)
 pg_bin=${pg_bin%/initdb}
 pg_data=$(mktemp -d)
 chown postgres:postgres "$pg_data"
+printf '%s\n' 'synthetic-password' >/tmp/postgres-password
+chown postgres:postgres /tmp/postgres-password
+chmod 600 /tmp/postgres-password
 runuser -u postgres -- "$pg_bin/initdb" -D "$pg_data" \
-    --locale-provider=icu --icu-locale=en-US --auth=trust >/tmp/initdb.log
+    --locale-provider=icu --icu-locale=en-US --auth-local=trust \
+    --auth-host=scram-sha-256 --pwfile=/tmp/postgres-password >/tmp/initdb.log
 runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" \
     -l /tmp/postgres.log -o '-h 127.0.0.1' -w start
 redis-server --bind 127.0.0.1 --save '' --appendonly no --daemonize yes
@@ -49,7 +55,7 @@ cleanup() {
 }
 trap cleanup EXIT
 runuser -u postgres -- "$pg_bin/createdb" respondedorbot_test
-export TEST_DATABASE_URL='postgresql://postgres@127.0.0.1:5432/respondedorbot_test?sslmode=disable'
+export TEST_DATABASE_URL='postgresql://postgres:synthetic-password@127.0.0.1:5432/respondedorbot_test?sslmode=disable'
 export TEST_REDIS_HOST=127.0.0.1 TEST_REDIS_PORT=6379
 
 case "$mode" in

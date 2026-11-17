@@ -335,15 +335,16 @@ fn tcrm<C: DollarCache>(
         diagnostics,
     )
     .or(daily_history.filter(|value| hours_ago == 24 && value.is_finite() && *value > 0.0));
-    if historical.is_none() {
+    let change = historical
+        .map(|value| ((current / value) - 1.0) * 100.0)
+        .filter(|value| value.is_finite());
+    if change.is_none() {
         diagnostics.push(format!("TCRM 100 has no valid {hours_ago}h comparison"));
     }
     Some(DollarRate {
         name: "TCRM 100",
         price: current,
-        change: historical
-            .map(|value| ((current / value) - 1.0) * 100.0)
-            .filter(|value| value.is_finite()),
+        change,
     })
 }
 
@@ -474,13 +475,7 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
     );
     diagnostics.extend(load.diagnostics);
     let refreshed = load.refreshed;
-    let Some(current) = load.data else {
-        return DollarMarketLoad {
-            text: None,
-            diagnostics,
-        };
-    };
-    if refreshed {
+    if refreshed && let Some(current) = &load.data {
         let hourly_value = json!({"timestamp": now_unix, "data": current}).to_string();
         let current_history_key = request_cache_history_key(&hour_key(now_unix), request_hash());
         if let Err(error) =
@@ -491,7 +486,11 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
             ));
         }
     }
-    let mut rates = parse_rates(&current, history.as_ref().map(unwrap_data), hours_ago);
+    let mut rates = load
+        .data
+        .as_ref()
+        .map(|current| parse_rates(current, history.as_ref().map(unwrap_data), hours_ago))
+        .unwrap_or_default();
     if let Some(tcrm) = tcrm(
         cache,
         references.and_then(|value| value.tcrm_100),
@@ -633,6 +632,44 @@ mod tests {
         assert!(text.contains("Lower band: 950"), "{text}");
         assert!(text.contains("Upper band: 1,550"), "{text}");
         assert!(!load.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn fresh_bcra_prices_survive_a_dollar_provider_failure() {
+        let now = 1_725_000_000;
+        for tcrm_100 in [Some(1410.0), None] {
+            let transport = Transport {
+                responses: RefCell::new(VecDeque::new()),
+                calls: RefCell::new(0),
+            };
+            let mut cache = Cache::default();
+            let references = crate::bcra::DollarReferencesLoad {
+                tcrm_100,
+                tcrm_100_previous_day: None,
+                itcrm: None,
+                diagnostics: Vec::new(),
+                bands: Some(bot_core::bcra::BcraBands {
+                    lower: 950.0,
+                    upper: 1550.0,
+                    date: "30/08/24".to_owned(),
+                    lower_change: None,
+                    upper_change: None,
+                }),
+            };
+            let load = super::load_dollar_market_with_references(
+                &transport,
+                &mut cache,
+                24,
+                Locale::Es,
+                now,
+                Some(&references),
+            );
+            let text = load.text.unwrap_or_default();
+            assert!(text.contains("Banda piso: $950"), "{text}");
+            assert!(text.contains("Banda techo: $1,550"), "{text}");
+            assert_eq!(text.contains("TCRM 100: $1,410"), tcrm_100.is_some());
+            assert!(!text.contains("sin datos"));
+        }
     }
 
     #[test]
@@ -859,6 +896,22 @@ mod tests {
             "{text}; {:?}",
             references.diagnostics
         );
+        cache
+            .values
+            .remove(&crate::request_cache::python_request_cache_key(arguments));
+        cache.values.remove("market:dolar:formatted:v3:es:24");
+        let references = crate::bcra::load_dollar_references(&OfflineBcra, &mut cache, now);
+        let load = super::load_dollar_market_with_references(
+            &transport,
+            &mut cache,
+            24,
+            Locale::Es,
+            now,
+            Some(&references),
+        );
+        let text = load.text.unwrap_or_default();
+        assert!(text.contains("TCRM 100: $1,100\n"), "{text}");
+        assert!(!references.diagnostics.is_empty());
     }
 
     #[test]

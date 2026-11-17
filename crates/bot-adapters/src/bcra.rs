@@ -532,13 +532,14 @@ pub fn load_dollar_references<T: BcraTransport, C: RequestCache>(
     let items = list.as_ref().map(items).unwrap_or_default();
     let variables = latest(&items);
     let bands = bands(transport, cache, &items, now, &mut diagnostics);
-    let itcrm = itcrm(transport, cache, &mut diagnostics);
+    let mut indices = None;
+    let itcrm = itcrm(transport, cache, now, &mut indices, &mut diagnostics);
     persist_market(cache, &variables, itcrm.as_ref(), now, &mut diagnostics);
     let tcrm_100 = calculate_tcrm(&variables, itcrm.as_ref());
     let tcrm_100_previous_day = if tcrm_100.is_some()
         && tcrm_history(cache, now.saturating_sub(86_400), &mut diagnostics).is_none()
     {
-        tcrm_daily_baseline(transport, cache, &items, now, &mut diagnostics)
+        tcrm_daily_baseline(transport, cache, &items, indices, now, &mut diagnostics)
     } else {
         None
     };
@@ -627,20 +628,30 @@ fn parse_workbook(bytes: &[u8]) -> Result<BTreeMap<i64, f64>, String> {
 fn itcrm<T: BcraTransport, C: RequestCache>(
     transport: &T,
     cache: &mut C,
+    now: i64,
+    history: &mut Option<BTreeMap<i64, f64>>,
     d: &mut Vec<String>,
 ) -> Option<ItcrmDetails> {
-    if let Some(v) = read(cache, "latest_itcrm_details", d) {
+    if let Some(v) = read(cache, "latest_itcrm_details", d)
+        && let Some(value) = number(v.get("value")).filter(|value| *value > 0.0)
+        && let Some(date) = v.get("date").and_then(Value::as_str)
+        && parse_date(date).is_some_and(|date| date <= ba_day(now))
+    {
         return Some(ItcrmDetails {
-            value: number(v.get("value"))?,
-            date: v.get("date")?.as_str()?.to_owned(),
+            value,
+            date: date.to_owned(),
         });
     }
     let values = itcrm_series(transport, cache, d)?;
-    let (day, value) = values.last_key_value()?;
-    let result = ItcrmDetails {
-        value: *value,
-        date: display(*day),
-    };
+    let result = values
+        .range(..=ba_day(now))
+        .next_back()
+        .map(|(day, value)| ItcrmDetails {
+            value: *value,
+            date: display(*day),
+        });
+    *history = Some(values);
+    let result = result?;
     if let Err(error) = cache.set(
         "latest_itcrm_details",
         &json!({"value":result.value,"date":result.date}).to_string(),
@@ -704,6 +715,7 @@ fn tcrm_daily_baseline<T: BcraTransport, C: RequestCache>(
     transport: &T,
     cache: &mut C,
     variables: &[&Map<String, Value>],
+    indices: Option<BTreeMap<i64, f64>>,
     now: i64,
     d: &mut Vec<String>,
 ) -> Option<f64> {
@@ -724,7 +736,7 @@ fn tcrm_daily_baseline<T: BcraTransport, C: RequestCache>(
         now,
         d,
     )?);
-    let indices = itcrm_series(transport, cache, d)?;
+    let indices = indices.or_else(|| itcrm_series(transport, cache, d))?;
     // Daily observations carry forward across weekends and holidays.
     let day = ba_day(now.saturating_sub(86_400));
     let (_, wholesale) = wholesale.range(..=day).next_back()?;
@@ -832,7 +844,7 @@ pub fn load_bcra<T: BcraTransport, C: RequestCache>(
     let vars = list.as_ref().map(items).unwrap_or_default();
     let bands = bands(transport, cache, &vars, now, &mut diagnostics);
     let country_risk = risk(transport, cache, now, &mut diagnostics);
-    let itcrm = itcrm(transport, cache, &mut diagnostics);
+    let itcrm = itcrm(transport, cache, now, &mut None, &mut diagnostics);
     persist_market(cache, &variables, itcrm.as_ref(), now, &mut diagnostics);
     let snapshot = BcraSnapshot {
         variables,
@@ -998,7 +1010,14 @@ mod tests {
             };
             let mut diagnostics = Vec::new();
             assert_eq!(
-                tcrm_daily_baseline(&transport, &mut cache, &variables, now, &mut diagnostics),
+                tcrm_daily_baseline(
+                    &transport,
+                    &mut cache,
+                    &variables,
+                    None,
+                    now,
+                    &mut diagnostics
+                ),
                 expected
             );
             assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -1012,16 +1031,17 @@ mod tests {
             index in 1.0_f64..1000.0,
             factor in 0.1_f64..10.0,
         ) {
-            let value = tcrm_value(wholesale, index).ok_or_else(|| proptest::test_runner::TestCaseError::fail("valid TCRM rejected"))?;
-            let scaled = tcrm_value(wholesale * factor, index * factor).ok_or_else(|| proptest::test_runner::TestCaseError::fail("scaled TCRM rejected"))?;
-            proptest::prop_assert!((value - scaled).abs() <= value * 1e-12);
+            proptest::prop_assert!(tcrm_value(wholesale, index)
+                .zip(tcrm_value(wholesale * factor, index * factor))
+                .is_some_and(|(value, scaled)| (value - scaled).abs() <= value * 1e-12));
         }
     }
 
+    const ITCRM_WORKBOOK: &str = "UEsDBBQAAAAIAPuUIl1bma6u5QAAAAsCAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbK2RvVLDMBCEX0WjNhOdk4KCsZ0i0AYKXuCQz7HG+hudEszbIzuBggnQUN1Iu3vfalTvJmfFmRKb4Bu5UZXctfXLeyQWRfHcyCHneA/AeiCHrEIkX5Q+JIe5HNMRIuoRjwTbqroDHXwmn9d53iHb+oF6PNksHqdyfaEksizF/mKcWY3EGK3RmIsOZ999o6yvBFWSi4cHE3lVDBJuEmblZ8A191SenUxH4hlTPqArLpgsvIU0voYwqt+X3GgZ+t5o6oI+uRJRHBNhxwNRdlYtUzk0fvU3fzEzLGPzz0W+9n/2gOW72w9QSwMEFAAAAAgA+5QiXUuDozqWAAAABQEAAAsAAABfcmVscy8ucmVsc43PPQ7CMAwF4KtEPkDdMjCgpl1YuiIuEFL3R23iyAlQbk9GihgY/fz0Wa7bza3qQRJn9hqqooS2qS+0mpSDOM0hqtzwUcOUUjghRjuRM7HgQD5vBhZnUh5lxGDsYkbCQ1keUT4N2Juq6zVI11egrq9A/9g8DLOlM9u7I59+nPhqZNnISEnDtuKTZbkxL0VGAZsadw82b1BLAwQUAAAACAD7lCJdLWvSpKMAAAD4AAAADwAAAHhsL3dvcmtib29rLnhtbI2PORKDMAxFr+LRATCkSMEYUyQNRZpMLuCACB7wMpKzHD8eCH0qLX/0vr5qP24RLyS2wTdQFSW0Wr0DzfcQZpFFzw1MKcVaSu4ndIaLENFnZQzkTMojPSRHQjPwhJjcIg9leZTOWA8boaZ/GGEcbY/n0D8d+rRBCBeT8ms82cig1erAvyq8cdhAdztdLyDWVTfkECCotrmhbqhAaiX3K7kH019QSwMEFAAAAAgA+5QiXW026XSaAAAABgEAABoAAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc43POw7CMAwG4KtEPkDdMjCgpl1YWBEXiFK3qdo8FJvX7YkYEJUYmCz/tj7Lbf/wq7pR5jkGDU1VQ9+1Z1qNlIDdnFiVjcAanEg6ILJ15A1XMVEokzFmb6S0ecJk7GImwl1d7zF/G7A11WnQkE9DA+ryTPSPHcdxtnSM9uopyI8TeI95YUckBTV5ItHwiRjfpamKCti1uPmwewFQSwMEFAAAAAgA+5QiXZR5P5S8AAAAYgEAABgAAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWyFkEEKwjAQRa9SstZMEq2ipBHFG3iCUKMNNklJhurxTUVKBcXdzP88HjNy93Bt0ZuYbPAV4ZSRnZL3EG+pMQaL3PpUkQax2wKkujFOJxo643NzCdFpzGu8Quqi0ecX5FoQjK3AaeuJkq/sqFErGcO9iNmS03oY9pwUWBHrW+vNCWPObVISlWBiNWebOeMSUEkYUqjf1OEXxalYLGflJwJZOprFaBb/zOKbeeB7xUXJ6Dp7+qkCJofC+EH1BFBLAQIUAxQAAAAIAPuUIl1bma6u5QAAAAsCAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAgA+5QiXUuDozqWAAAABQEAAAsAAAAAAAAAAAAAAIABFgEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAgA+5QiXS1r0qSjAAAA+AAAAA8AAAAAAAAAAAAAAIAB1QEAAHhsL3dvcmtib29rLnhtbFBLAQIUAxQAAAAIAPuUIl1tNul0mgAAAAYBAAAaAAAAAAAAAAAAAACAAaUCAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc1BLAQIUAxQAAAAIAPuUIl2UeT+UvAAAAGIBAAAYAAAAAAAAAAAAAACAAXcDAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWxQSwUGAAAAAAUABQBFAQAAaQQAAAAA";
+
     #[test]
     fn parses_the_official_workbook_shape_and_exposes_latest_itcrm() -> TestResult {
-        const WORKBOOK: &str = "UEsDBBQAAAAIAPuUIl1bma6u5QAAAAsCAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbK2RvVLDMBCEX0WjNhOdk4KCsZ0i0AYKXuCQz7HG+hudEszbIzuBggnQUN1Iu3vfalTvJmfFmRKb4Bu5UZXctfXLeyQWRfHcyCHneA/AeiCHrEIkX5Q+JIe5HNMRIuoRjwTbqroDHXwmn9d53iHb+oF6PNksHqdyfaEksizF/mKcWY3EGK3RmIsOZ999o6yvBFWSi4cHE3lVDBJuEmblZ8A191SenUxH4hlTPqArLpgsvIU0voYwqt+X3GgZ+t5o6oI+uRJRHBNhxwNRdlYtUzk0fvU3fzEzLGPzz0W+9n/2gOW72w9QSwMEFAAAAAgA+5QiXUuDozqWAAAABQEAAAsAAABfcmVscy8ucmVsc43PPQ7CMAwF4KtEPkDdMjCgpl1YuiIuEFL3R23iyAlQbk9GihgY/fz0Wa7bza3qQRJn9hqqooS2qS+0mpSDOM0hqtzwUcOUUjghRjuRM7HgQD5vBhZnUh5lxGDsYkbCQ1keUT4N2Juq6zVI11egrq9A/9g8DLOlM9u7I59+nPhqZNnISEnDtuKTZbkxL0VGAZsadw82b1BLAwQUAAAACAD7lCJdLWvSpKMAAAD4AAAADwAAAHhsL3dvcmtib29rLnhtbI2PORKDMAxFr+LRATCkSMEYUyQNRZpMLuCACB7wMpKzHD8eCH0qLX/0vr5qP24RLyS2wTdQFSW0Wr0DzfcQZpFFzw1MKcVaSu4ndIaLENFnZQzkTMojPSRHQjPwhJjcIg9leZTOWA8boaZ/GGEcbY/n0D8d+rRBCBeT8ms82cig1erAvyq8cdhAdztdLyDWVTfkECCotrmhbqhAaiX3K7kH019QSwMEFAAAAAgA+5QiXW026XSaAAAABgEAABoAAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc43POw7CMAwG4KtEPkDdMjCgpl1YWBEXiFK3qdo8FJvX7YkYEJUYmCz/tj7Lbf/wq7pR5jkGDU1VQ9+1Z1qNlIDdnFiVjcAanEg6ILJ15A1XMVEokzFmb6S0ecJk7GImwl1d7zF/G7A11WnQkE9DA+ryTPSPHcdxtnSM9uopyI8TeI95YUckBTV5ItHwiRjfpamKCti1uPmwewFQSwMEFAAAAAgA+5QiXZR5P5S8AAAAYgEAABgAAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWyFkEEKwjAQRa9SstZMEq2ipBHFG3iCUKMNNklJhurxTUVKBcXdzP88HjNy93Bt0ZuYbPAV4ZSRnZL3EG+pMQaL3PpUkQax2wKkujFOJxo643NzCdFpzGu8Quqi0ecX5FoQjK3AaeuJkq/sqFErGcO9iNmS03oY9pwUWBHrW+vNCWPObVISlWBiNWebOeMSUEkYUqjf1OEXxalYLGflJwJZOprFaBb/zOKbeeB7xUXJ6Dp7+qkCJofC+EH1BFBLAQIUAxQAAAAIAPuUIl1bma6u5QAAAAsCAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAgA+5QiXUuDozqWAAAABQEAAAsAAAAAAAAAAAAAAIABFgEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAgA+5QiXS1r0qSjAAAA+AAAAA8AAAAAAAAAAAAAAIAB1QEAAHhsL3dvcmtib29rLnhtbFBLAQIUAxQAAAAIAPuUIl1tNul0mgAAAAYBAAAaAAAAAAAAAAAAAACAAaUCAAB4bC9fcmVscy93b3JrYm9vay54bWwucmVsc1BLAQIUAxQAAAAIAPuUIl2UeT+UvAAAAGIBAAAYAAAAAAAAAAAAAACAAXcDAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWxQSwUGAAAAAAUABQBFAQAAaQQAAAAA";
-        let bytes = base64::engine::general_purpose::STANDARD.decode(WORKBOOK)?;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(ITCRM_WORKBOOK)?;
         let values = parse_workbook(&bytes)?;
         assert_eq!(values.len(), 2);
         assert_eq!(
@@ -1044,6 +1064,7 @@ mod tests {
                         status_code: 200,
                         body: bytes.clone(),
                     }),
+                    response(json!({"results":[]})),
                 ])),
             };
             let mut cache = Cache {
@@ -1095,7 +1116,16 @@ mod tests {
                 responses: RefCell::new(VecDeque::from([provider_result])),
             };
             let mut diagnostics = Vec::new();
-            assert!(itcrm(&transport, &mut Cache::default(), &mut diagnostics).is_none());
+            assert!(
+                itcrm(
+                    &transport,
+                    &mut Cache::default(),
+                    1_788_321_600,
+                    &mut None,
+                    &mut diagnostics
+                )
+                .is_none()
+            );
             assert_eq!(diagnostics.len(), 1);
         }
 
@@ -1109,13 +1139,96 @@ mod tests {
         );
         let mut diagnostics = Vec::new();
         assert_eq!(
-            itcrm(&transport, &mut cache, &mut diagnostics),
+            itcrm(
+                &transport,
+                &mut cache,
+                1_788_321_600,
+                &mut None,
+                &mut diagnostics
+            ),
             Some(ItcrmDetails {
                 value: 1250.75,
                 date: "02/09/26".to_owned(),
             })
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn current_itcrm_excludes_future_and_malformed_cached_details() {
+        let now = days(2024, 9, 1) * 86_400 + 15 * 3600;
+        for latest in [
+            None,
+            Some(json!({"date":"2024-09-02","value":250.0})),
+            Some(json!({"value":125.0})),
+        ] {
+            let mut cache = Cache::default();
+            cache.values.insert(python_request_cache_key(&arguments(&BcraRequest::Variables).unwrap_or_default()),
+                json!({"timestamp":now,"data":{"results":[{
+                    "categoria":"Principales Variables", "idVariable":5,
+                    "descripcion":"Tipo de cambio mayorista", "ultFechaInformada":"2024-08-30", "ultValorInformado":1000.0
+                }]}}).to_string());
+            if let Some(latest) = latest {
+                cache
+                    .values
+                    .insert("latest_itcrm_details".to_owned(), latest.to_string());
+            }
+            cache.values.insert(
+                "itcrm_daily_history".to_owned(),
+                json!({"results":[{"detalle":[
+                    {"fecha":"2024-08-30","valor":125.0}, {"fecha":"2024-09-02","valor":250.0}
+                ]}]})
+                .to_string(),
+            );
+            cache.values.insert(python_request_cache_key(&arguments(&BcraRequest::Series { id: 5, limit: 32 }).unwrap_or_default()),
+                json!({"timestamp":now,"data":{"results":[{"detalle":[{"fecha":"2024-08-30","valor":1000.0}]}]}}).to_string());
+            let transport = Transport {
+                responses: RefCell::new(VecDeque::new()),
+            };
+            let load = load_dollar_references(&transport, &mut cache, now);
+            assert_eq!(load.tcrm_100, Some(800.0));
+            assert_eq!(load.tcrm_100_previous_day, Some(800.0));
+            assert!(load.diagnostics.is_empty(), "{:?}", load.diagnostics);
+        }
+    }
+
+    #[test]
+    fn uncached_itcrm_response_supplies_daily_history_without_a_second_fetch() -> TestResult {
+        let now = days(2026, 9, 2) * 86_400 + 15 * 3600;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(ITCRM_WORKBOOK)?;
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([
+                response(
+                    json!({"results":[{"categoria":"Principales Variables","idVariable":5,
+                "descripcion":"Tipo de cambio mayorista","ultFechaInformada":"2026-09-02","ultValorInformado":1450.0}]}),
+                ),
+                Ok(HttpResponse {
+                    status_code: 200,
+                    body: bytes,
+                }),
+                response(json!({"results":[{"detalle":[{"fecha":"2026-09-01","valor":1400.0}]}]})),
+                Ok(HttpResponse {
+                    status_code: 403,
+                    body: Vec::new(),
+                }),
+            ])),
+        };
+        let mut cache = Cache {
+            fail_gets: true,
+            fail_sets: true,
+            ..Cache::default()
+        };
+        let load = load_dollar_references(&transport, &mut cache, now);
+        assert_eq!(load.tcrm_100, Some(1450.0 * 100.0 / 1250.75));
+        assert_eq!(load.tcrm_100_previous_day, Some(1400.0 * 100.0 / 1234.5));
+        assert_eq!(transport.responses.borrow().len(), 1);
+        assert!(
+            !load
+                .diagnostics
+                .iter()
+                .any(|entry| entry.contains("ITCRM HTTP"))
+        );
+        Ok(())
     }
 
     #[test]
@@ -1447,7 +1560,16 @@ mod tests {
             };
             let mut cache = Cache::default();
             let mut diagnostics = Vec::new();
-            assert_eq!(itcrm(&transport, &mut cache, &mut diagnostics), None);
+            assert_eq!(
+                itcrm(
+                    &transport,
+                    &mut cache,
+                    1_788_321_600,
+                    &mut None,
+                    &mut diagnostics
+                ),
+                None
+            );
             assert_eq!(diagnostics.len(), 1);
             assert!(!cache.values.contains_key("latest_itcrm_details"));
         }
