@@ -168,6 +168,10 @@ pub struct SignalState {
     pub address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_refresh_at: Option<i64>,
+    /// The market selection this chart was picked from and how many other
+    /// matches it has, so a refresh keeps the button that switches to them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternatives: Option<(String, usize)>,
 }
 
 impl SignalState {
@@ -1764,6 +1768,7 @@ mod tests {
             tag: "ETH".to_owned(),
             address: EVM.to_ascii_uppercase(),
             last_refresh_at: Some(100),
+            alternatives: None,
         };
         assert_eq!(state.token().chain_id, "ethereum");
         assert_eq!(signal_state_key("abc123"), "token_signal:abc123");

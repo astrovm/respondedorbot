@@ -11,13 +11,6 @@ const JOBS_KEY: &str = "memory:compaction:jobs";
 const DEAD_JOBS_KEY: &str = "memory:compaction:dead_jobs";
 const LOCK_PREFIX: &str = "memory:compaction:lock:";
 
-const RELEASE_LOCK_SCRIPT: &str = r#"
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-    return redis.call('DEL', KEYS[1])
-end
-return 0
-"#;
-
 const QUARANTINE_SCRIPT: &str = r#"
 redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
 redis.call('HDEL', KEYS[2], ARGV[3])
@@ -133,7 +126,7 @@ impl RedisCompactionQueue {
     ) -> Result<bool, RedisCompactionQueueError> {
         let mut connection = self.client.get_connection()?;
         let deleted: usize = redis::cmd("EVAL")
-            .arg(RELEASE_LOCK_SCRIPT)
+            .arg(crate::redis_connection::DELETE_IF_EQUAL_SCRIPT)
             .arg(1)
             .arg(format!("{LOCK_PREFIX}{chat_id}"))
             .arg(token)

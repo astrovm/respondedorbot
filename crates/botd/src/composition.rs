@@ -937,6 +937,10 @@ where
             .map_err(error_text)
     }
 
+    fn release(&mut self, key: &str, value: &str) -> Result<bool, String> {
+        self.cache.release(key, value).map_err(error_text)
+    }
+
     fn clear_selection(&mut self, key: &str) -> Result<(), String> {
         self.cache
             .set(key, &Value::Null.to_string(), 1)
@@ -1953,6 +1957,7 @@ fn telegram_action_chat_id(action: &TelegramAction) -> Option<i64> {
         | TelegramAction::SendTyping { chat_id }
         | TelegramAction::EditMessage { chat_id, .. }
         | TelegramAction::EditMessageNoPreview { chat_id, .. }
+        | TelegramAction::EditMessageReplyMarkup { chat_id, .. }
         | TelegramAction::DeleteMessage { chat_id, .. } => Some(chat_id.0),
         TelegramAction::SetCommands { .. }
         | TelegramAction::AnswerCallback { .. }
@@ -6932,6 +6937,7 @@ mod tests {
             tag: address.tag,
             address: address.address,
             last_refresh_at: None,
+            alternatives: None,
         };
         assert_eq!(
             TokenSignalSource::load_state(&mut adapter, "missing"),
@@ -7062,6 +7068,14 @@ mod tests {
                 reply_markup: None,
             }),
             Some(43)
+        );
+        assert_eq!(
+            super::telegram_action_chat_id(&TelegramAction::EditMessageReplyMarkup {
+                chat_id: ChatId(44),
+                message_id: MessageId(6),
+                reply_markup: None,
+            }),
+            Some(44)
         );
         assert_eq!(
             super::telegram_action_chat_id(&TelegramAction::AnswerCallback {
@@ -8389,6 +8403,7 @@ mod tests {
         assert_eq!(source.load_selection("market-key"), Ok(None));
         assert_eq!(source.take_selection("market-key"), Ok(None));
         assert_eq!(source.claim("market-key", "1", 60), Ok(true));
+        assert_eq!(source.release("market-key", "1"), Ok(false));
         assert_eq!(source.clear_selection("market-key"), Ok(()));
 
         struct FailingCache;
@@ -8440,6 +8455,7 @@ mod tests {
         assert!(failing_source.load_selection("market-key").is_err());
         assert!(failing_source.take_selection("market-key").is_err());
         assert!(failing_source.claim("market-key", "1", 60).is_err());
+        assert!(failing_source.release("market-key", "1").is_err());
         assert!(failing_source.clear_selection("market-key").is_err());
         assert!(source.render_chart(&chart, 1_700_000_000, -3).is_err());
         // The resolver intentionally leaves unknown identities without a

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::telegram_commands::TelegramCommand;
 use crate::telegram_input::{ChatId, MessageId};
@@ -17,23 +17,23 @@ pub enum ParseMode {
     MarkdownV2,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InlineKeyboardButton {
     pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback_data: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_text: Option<CopyTextButton>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyTextButton {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InlineKeyboardMarkup {
     pub inline_keyboard: Vec<Vec<InlineKeyboardButton>>,
 }
@@ -140,6 +140,13 @@ pub enum TelegramAction {
         chat_id: ChatId,
         message_id: MessageId,
         text: String,
+        reply_markup: Option<InlineKeyboardMarkup>,
+    },
+    /// Replaces only the buttons of a text or photo message; `None` removes
+    /// them.
+    EditMessageReplyMarkup {
+        chat_id: ChatId,
+        message_id: MessageId,
         reply_markup: Option<InlineKeyboardMarkup>,
     },
     DeleteMessage {

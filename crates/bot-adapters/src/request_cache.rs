@@ -29,6 +29,17 @@ pub trait RequestCache {
     /// serialized: exactly one of them wins. Used for single-flight guards
     /// such as one in-flight invoice per user and pack.
     fn claim(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<bool, Self::Error>;
+
+    /// Removes a claimed key only while it still holds `value`, so a claim
+    /// that expired and was taken by someone else is left alone. This
+    /// default reads and then takes, which is only safe for a store used by
+    /// one thread; shared stores override it with one atomic step.
+    fn release(&mut self, key: &str, value: &str) -> Result<bool, Self::Error> {
+        if self.get(key)?.as_deref() == Some(value) {
+            return Ok(self.take(key)?.is_some());
+        }
+        Ok(false)
+    }
 }
 
 impl RequestCache for RedisJsonCache {
@@ -49,6 +60,10 @@ impl RequestCache for RedisJsonCache {
 
     fn claim(&mut self, key: &str, value: &str, ttl_seconds: i64) -> Result<bool, Self::Error> {
         RedisJsonCache::set_if_absent(self, key, value, ttl_seconds)
+    }
+
+    fn release(&mut self, key: &str, value: &str) -> Result<bool, Self::Error> {
+        RedisJsonCache::delete_if_equal(self, key, value)
     }
 }
 
@@ -269,6 +284,28 @@ mod tests {
             Err("synthetic claim failure")
         );
         assert_eq!(cache.claim("request_cache:key", "1", 60), Ok(true));
+    }
+
+    #[test]
+    fn the_default_release_removes_only_a_matching_value() {
+        let mut cache = Cache {
+            gets: VecDeque::from([
+                Ok(Some("mine".to_owned())),
+                Ok(Some("theirs".to_owned())),
+                Ok(None),
+                Err("synthetic read failure"),
+                Ok(Some("mine".to_owned())),
+            ]),
+            takes: VecDeque::from([Ok(Some("mine".to_owned())), Err("synthetic take failure")]),
+            ..Cache::default()
+        };
+        assert_eq!(cache.release("lock", "mine"), Ok(true));
+        assert_eq!(cache.release("lock", "mine"), Ok(false));
+        assert_eq!(cache.release("lock", "mine"), Ok(false));
+        assert_eq!(cache.release("lock", "mine"), Err("synthetic read failure"));
+        assert_eq!(cache.release("lock", "mine"), Err("synthetic take failure"));
+        // Only the matching values reached a take.
+        assert!(cache.takes.is_empty());
     }
 
     fn response(status_code: u16, body: &str) -> Result<JsonHttpResponse, String> {

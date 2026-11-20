@@ -757,16 +757,28 @@ fn assets<C: CryptoMarketProvider, S: UnifiedStockProvider>(
     {
         let mut ranked_assets = selection.rows.iter().collect::<Vec<_>>();
         ranked_assets.sort_by(|left, right| compare_market_assets(left, right, target_parameter));
-        let mut candidates = ranked_assets
-            .into_iter()
-            .map(|asset| market_candidate(asset, target_symbol, target_parameter, timeframe))
-            .collect::<Vec<_>>();
         stock_quotes.sort_by(|left, right| compare_stock_quotes(raw_query, left, right));
-        let stock_candidates = stock_quotes
-            .iter()
-            .map(|quote| market_stock_candidate(quote, timeframe))
+        let mut ranked = ranked_assets
+            .into_iter()
+            .map(|asset| {
+                (
+                    crypto_likelihood(raw_query, asset, target_parameter),
+                    market_candidate(asset, target_symbol, target_parameter, timeframe),
+                )
+            })
+            .chain(stock_quotes.iter().map(|quote| {
+                (
+                    stock_likelihood(raw_query, quote),
+                    market_stock_candidate(quote, timeframe),
+                )
+            }))
             .collect::<Vec<_>>();
-        candidates.extend(stock_candidates);
+        // A stable sort keeps each kind's own order within a tier.
+        ranked.sort_by_key(|(likelihood, _)| *likelihood);
+        let mut candidates = ranked
+            .into_iter()
+            .map(|(_, candidate)| candidate)
+            .collect::<Vec<_>>();
         candidates.truncate(10);
         *selection_result = Some(MarketSelection {
             query: raw_query.to_owned(),
@@ -1542,6 +1554,71 @@ fn compare_market_assets(
             .cmp(&right.name.to_ascii_lowercase())
     })
     .then_with(|| left.id.cmp(&right.id))
+}
+
+/// How a query names an asset: by its exact ticker, by its name, or only
+/// loosely (a ticker or name that starts with the query).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum QueryMatch {
+    Ticker,
+    Name,
+    Loose,
+}
+
+/// The sort key that puts the asset a mixed query most likely means first.
+/// A ticker or name match on a well-known asset wins: a coin worth at least
+/// $1B, or a stock on its home listing (not OTC, not a foreign copy like
+/// `TTWO.MX`). So `/p ANT` shows Anthropic before a small coin with the same
+/// ticker, and `/p apple` shows AAPL before a token named APPLE. A coin wins
+/// a tie with a stock.
+type Likelihood = (bool, bool, QueryMatch, bool);
+
+const WELL_KNOWN_COIN_MARKET_CAP: f64 = 1e9;
+
+fn likelihood(query_match: QueryMatch, well_known: bool, is_stock: bool) -> Likelihood {
+    (
+        query_match == QueryMatch::Loose,
+        !well_known,
+        query_match,
+        is_stock,
+    )
+}
+
+fn crypto_likelihood(query: &str, asset: &CryptoAsset, quote_parameter: &str) -> Likelihood {
+    let query = normalized(query);
+    // A coin can match only one word of a longer query, as SKY does for
+    // `sky harbour`.
+    let query_match = if normalized(&asset.symbol) == query {
+        QueryMatch::Ticker
+    } else if normalized(&asset.name) == query || normalized(&asset.slug) == query {
+        QueryMatch::Name
+    } else {
+        QueryMatch::Loose
+    };
+    let well_known = asset
+        .quotes
+        .get(quote_parameter)
+        .and_then(|quote| quote.market_cap)
+        .is_some_and(|market_cap| market_cap >= WELL_KNOWN_COIN_MARKET_CAP);
+    likelihood(query_match, well_known, false)
+}
+
+fn stock_likelihood(query: &str, quote: &StockQuote) -> Likelihood {
+    let ticker = normalized(query);
+    let symbol = normalized(&quote.symbol);
+    let (base, foreign) = symbol
+        .split_once('.')
+        .map_or((symbol.as_str(), false), |(base, _)| (base, true));
+    let query_match = if base == ticker {
+        QueryMatch::Ticker
+    } else if company_matches(query, quote) {
+        QueryMatch::Name
+    } else {
+        QueryMatch::Loose
+    };
+    let exchange = quote.exchange.to_ascii_lowercase();
+    let over_the_counter = exchange.contains("otc") || exchange == "pnk";
+    likelihood(query_match, !foreign && !over_the_counter, true)
 }
 
 fn compare_market_metric(left: Option<f64>, right: Option<f64>) -> Ordering {
@@ -2659,6 +2736,117 @@ mod tests {
             &mut stocks(vec![("META".to_owned(), Some(stock("META")))]),
         );
         assert!(exact_collision.selection.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_lookups_put_the_most_likely_asset_first() -> Result<(), String> {
+        let ids = |query: &str, coins: Vec<CryptoAsset>, quotes: Vec<StockQuote>| {
+            let rows = quotes
+                .into_iter()
+                .map(|quote| (query.to_uppercase(), Some(quote)))
+                .collect();
+            execute_market_price_command(
+                query,
+                MarketPriceCommand::Unified,
+                Locale::En,
+                &mut Scripted::ok(vec![coins], Vec::new()),
+                &mut stocks(rows),
+            )
+            .selection
+            .map(|selection| {
+                selection
+                    .candidates
+                    .into_iter()
+                    .map(|candidate| candidate.id)
+                    .collect::<Vec<_>>()
+            })
+            .ok_or_else(|| format!("{query} should offer a choice"))
+        };
+        let with_market_cap = |mut asset: CryptoAsset, market_cap: f64| {
+            if let Some(quote) = asset.quotes.get_mut("USD") {
+                quote.market_cap = Some(market_cap);
+            }
+            asset
+        };
+        // A small coin loses to the home listing of a stock with the same
+        // ticker, but beats its OTC and foreign listings and loose matches.
+        assert_eq!(
+            ids(
+                "ant",
+                vec![with_market_cap(coin("ANT", 1.0), 5e6)],
+                vec![
+                    listed_stock("ANTH", "Anthera", "OTC Markets", "USD"),
+                    listed_stock("ANT.MX", "Anthropic, PBC", "Mexico", "MXN"),
+                    listed_stock("ANTX", "Antex", "NASDAQ", "USD"),
+                    listed_stock("ANT", "Anthropic, PBC", "NASDAQ", "USD"),
+                ],
+            )?,
+            [
+                "stock:ANT",
+                "ANT",
+                "stock:ANT.MX",
+                "stock:ANTX",
+                "stock:ANTH"
+            ]
+        );
+        // A well-known coin wins a tie with a stock.
+        assert_eq!(
+            ids(
+                "ondo",
+                vec![with_market_cap(coin("ONDO", 1.5), 4e9)],
+                vec![listed_stock("ONDO", "Ondo Holdings", "NASDAQ", "USD")],
+            )?,
+            ["ONDO", "stock:ONDO"]
+        );
+        // A company name beats a small token's exact ticker.
+        assert_eq!(
+            ids(
+                "apple",
+                vec![coin("APPLE", 0.01)],
+                vec![
+                    listed_stock("AAPL.MX", "Apple Inc.", "Mexico", "MXN"),
+                    listed_stock("AAPL", "Apple Inc.", "NASDAQ", "USD"),
+                ],
+            )?,
+            ["stock:AAPL", "APPLE", "stock:AAPL.MX"]
+        );
+        // A coin named by its full name is a name match too.
+        let mut zephyr = with_market_cap(coin("ZEPH", 2.0), 2e9);
+        zephyr.name = "Zephyr".to_owned();
+        assert_eq!(
+            ids(
+                "zephyr",
+                vec![zephyr],
+                vec![listed_stock("ZPHR", "Zephyr Mining", "NASDAQ", "USD")],
+            )?,
+            ["ZEPH", "stock:ZPHR"]
+        );
+        // A slug is a name too.
+        let mut by_slug = coin("ZPR", 2.0);
+        by_slug.name = "Zephyr Protocol".to_owned();
+        by_slug.slug = "zephyr".to_owned();
+        assert_eq!(
+            ids(
+                "zephyr",
+                vec![by_slug],
+                vec![listed_stock("ZPHR", "Zephyr Mining", "NASDAQ", "USD")],
+            )?,
+            ["ZPR", "stock:ZPHR"]
+        );
+        // A coin that matches one word of a company name comes after the
+        // company.
+        assert_eq!(
+            ids(
+                "sky harbour",
+                vec![with_market_cap(coin("SKY", 0.1), 2e9)],
+                vec![
+                    listed_stock("SKYH", "Sky Harbour Inc.", "NYSE", "USD"),
+                    listed_stock("SKYH.MX", "Sky Harbour Inc.", "Mexico", "MXN"),
+                ],
+            )?,
+            ["stock:SKYH", "stock:SKYH.MX", "SKY"]
+        );
         Ok(())
     }
 
