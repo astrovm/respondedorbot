@@ -4,13 +4,16 @@ use std::thread;
 use std::time::Duration;
 
 use bot_core::cache_policy::{CacheDecision, evaluate_cache, request_cache_history_key};
-use bot_core::dollar::{CurrencyBands, DollarRate, HOURLY_HISTORY_HOURS, render_dollar_rates};
+use bot_core::dollar::{CurrencyBands, DollarRate, render_dollar_rates};
 use bot_core::locale::Locale;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
-use crate::dollar_history::{baseline_day, daily_history_for_reply, daily_source};
+use crate::dollar_history::{
+    baseline_day, daily_history_for_reply, daily_source, own_closes_for_reply, own_source,
+    record_own_closes,
+};
 use crate::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 use crate::request_cache::{
     JsonHttpResponse, RequestCache, load_cached_json, python_request_cache_key,
@@ -158,6 +161,14 @@ pub fn refresh_dollar_snapshot<T: DollarTransport, C: DollarCache>(
         || transport.before_retry(),
     );
     let mut diagnostics = load.diagnostics;
+    if let Some(current) = &load.data {
+        // Every run overwrites today's close, so the day keeps its last one.
+        let closes = parse_rates(current, None, 24)
+            .into_iter()
+            .filter_map(|rate| Some((own_source(rate.name)?, rate.price)))
+            .collect::<Vec<_>>();
+        record_own_closes(cache, &closes, now_unix, &mut diagnostics);
+    }
     if let (true, Some(current)) = (load.refreshed, load.data) {
         let hourly_value = json!({"timestamp": now_unix, "data": current}).to_string();
         let current_history_key = request_cache_history_key(&hour_key(now_unix), request_hash());
@@ -357,8 +368,7 @@ fn tcrm<C: DollarCache>(
         diagnostics,
     )
     .or(daily_history.filter(|value| hours_ago == 24 && value.is_finite() && *value > 0.0))
-    .or(long_baseline
-        .filter(|value| hours_ago > HOURLY_HISTORY_HOURS && value.is_finite() && *value > 0.0));
+    .or(long_baseline.filter(|value| hours_ago > 24 && value.is_finite() && *value > 0.0));
     let change = historical
         .map(|value| ((current / value) - 1.0) * 100.0)
         .filter(|value| value.is_finite());
@@ -388,6 +398,27 @@ fn currency_bands<C: DollarCache>(
         lower_change: number(data.get("lower_change_pct")),
         upper_change: number(data.get("upper_change_pct")),
     })
+}
+
+/// The bands with their change over the period shown. BCRA moves them once
+/// a day, so 24h keeps the day change, longer periods compare with the
+/// limits on the period's first day, and shorter ones show no change.
+fn period_bands(
+    bands: CurrencyBands,
+    hours_ago: i64,
+    baselines: Option<&crate::bcra::DollarBaselines>,
+) -> CurrencyBands {
+    if hours_ago == 24 {
+        return bands;
+    }
+    let past = |pick: fn(&crate::bcra::DollarBaselines) -> Option<f64>| {
+        baselines.and_then(pick).filter(|_| hours_ago > 24)
+    };
+    CurrencyBands {
+        lower_change: change(bands.lower, None, past(|value| value.lower_band), hours_ago),
+        upper_change: change(bands.upper, None, past(|value| value.upper_band), hours_ago),
+        ..bands
+    }
 }
 
 fn formatted_snapshot<C: DollarCache>(
@@ -474,7 +505,8 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
 }
 
 /// Fills the changes the hourly snapshots cannot give, for periods longer
-/// than a day: ArgentinaDatos closes first, then BCRA's wholesale rate.
+/// than a day: ArgentinaDatos closes first, then the bot's own closes for
+/// Bitcoin and USDC, then BCRA's wholesale rate.
 fn fill_daily_changes<T: DollarTransport, C: DollarCache>(
     transport: &T,
     cache: &mut C,
@@ -486,6 +518,7 @@ fn fill_daily_changes<T: DollarTransport, C: DollarCache>(
 ) {
     // Read only when a row needs it, and at most once.
     let mut history = None;
+    let mut own = None;
     let day = baseline_day(now_unix, hours_ago);
     for rate in rates.iter_mut().filter(|rate| rate.change.is_none()) {
         let baseline = daily_source(rate.name)
@@ -496,6 +529,13 @@ fn fill_daily_changes<T: DollarTransport, C: DollarCache>(
                     })
                     .as_ref()?
                     .close(source, day)
+            })
+            .or_else(|| {
+                own_source(rate.name).and_then(|source| {
+                    own.get_or_insert_with(|| own_closes_for_reply(cache, diagnostics))
+                        .as_ref()?
+                        .close(source, day)
+                })
             })
             .or_else(|| {
                 (rate.name == "Mayorista")
@@ -596,7 +636,8 @@ pub fn load_dollar_market_with_history<T: DollarTransport, C: DollarCache>(
             lower_change: bands.lower_change,
             upper_change: bands.upper_change,
         })
-        .or_else(|| currency_bands(cache, now_unix, &mut diagnostics));
+        .or_else(|| currency_bands(cache, now_unix, &mut diagnostics))
+        .map(|bands| period_bands(bands, hours_ago, baselines));
     let text = render_dollar_rates(&rates, bands.as_ref(), hours_ago, locale);
     if let Some(text) = &text
         && has_dollar_quotes
@@ -1073,6 +1114,18 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].starts_with("could not write dollar history key"));
         assert!(diagnostics[0].ends_with("synthetic history write failure"));
+        // Each refresh saves today's Bitcoin and USDC closes for long periods.
+        let closes = crate::dollar_history::own_closes_for_reply(&mut cache, &mut Vec::new())
+            .unwrap_or_default();
+        let today = crate::bcra::ba_day(1_725_000_000);
+        assert_eq!(
+            (
+                closes.close("ccb", today),
+                closes.close("usdc", today),
+                closes.close("usdt", today)
+            ),
+            (Some(1470.0), Some(1480.0), None)
+        );
     }
 
     #[test]
@@ -1270,12 +1323,26 @@ mod tests {
         let baselines = crate::bcra::DollarBaselines {
             wholesale: Some(1000.0),
             tcrm_100: Some(1000.0),
+            lower_band: Some(1000.0),
+            upper_band: Some(1500.0),
             diagnostics: Vec::new(),
         };
         let mut cache = Cache::default();
         cache.values.insert(
             "tcrm_100".to_owned(),
             r#"{"timestamp":1725000000,"data":1410}"#.to_owned(),
+        );
+        cache.values.insert(
+            "bcra_currency_band_limits".to_owned(),
+            r#"{"data":{"date_iso":"2024-08-30","lower":950,"upper":1550,"lower_change_pct":0.1,"upper_change_pct":0.2}}"#
+                .to_owned(),
+        );
+        // The refresh job saved a Bitcoin close a week ago, but no USDC one.
+        crate::dollar_history::record_own_closes(
+            &mut cache,
+            &[("ccb", 1400.0)],
+            1_725_000_000 - 7 * 86_400,
+            &mut Vec::new(),
         );
         let load = super::load_dollar_market_with_history(
             &quotes(),
@@ -1294,6 +1361,9 @@ mod tests {
             "MEP: $1,450 (+11.54%)",
             "Mayorista: $1,400 (+40%)",
             "TCRM 100: $1,410 (+41%)",
+            "Bitcoin: $1,470 (+5%)",
+            "Banda piso: $950 (-5%)",
+            "Banda techo: $1,550 (+3.33%)",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text}");
         }
@@ -1429,7 +1499,8 @@ mod tests {
         let diagnostics = refresh_dollar_snapshot(&transport, &mut cache, 1_725_000_001);
         assert!(diagnostics.is_empty());
         assert_eq!(*transport.calls.borrow(), 0);
-        // Only the daily history warm-up writes, and only while it is stale.
+        // Only today's own closes (on each run) and the daily history
+        // warm-up (only while it is stale) are written.
         let written = |cache: &Cache| {
             cache
                 .writes
@@ -1437,10 +1508,11 @@ mod tests {
                 .map(|write| write.0.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(written(&cache), ["dollar_daily_history:v1"]);
+        let own = "dollar_own_daily_closes:v1";
+        assert_eq!(written(&cache), [own, "dollar_daily_history:v1"]);
         let diagnostics = refresh_dollar_snapshot(&transport, &mut cache, 1_725_000_002);
         assert!(diagnostics.is_empty());
-        assert_eq!(written(&cache), ["dollar_daily_history:v1"]);
+        assert_eq!(written(&cache), [own, "dollar_daily_history:v1", own]);
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub struct DollarRate {
     pub change: Option<f64>,
 }
 
+/// The BCRA band limits, with their changes over the period shown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CurrencyBands {
     pub lower: f64,
@@ -124,12 +125,12 @@ pub fn render_dollar_rates(
             DollarRate {
                 name: "Banda piso",
                 price: bands.lower,
-                change: (hours_ago == 24).then_some(bands.lower_change).flatten(),
+                change: bands.lower_change,
             },
             DollarRate {
                 name: "Banda techo",
                 price: bands.upper,
-                change: (hours_ago == 24).then_some(bands.upper_change).flatten(),
+                change: bands.upper_change,
             },
         ]);
     }
@@ -337,22 +338,30 @@ mod tests {
     }
 
     #[test]
-    fn non_daily_bands_omit_daily_changes_and_report_missing_history() {
+    fn bands_show_the_period_change_they_carry_and_missing_history_is_reported() {
         let rates = [DollarRate {
             name: "Oficial",
             price: 1000.0,
             change: None,
         }];
-        let bands = CurrencyBands {
+        let mut bands = CurrencyBands {
             lower: 900.0,
             upper: 1100.0,
-            lower_change: Some(1.0),
-            upper_change: Some(2.0),
+            lower_change: None,
+            upper_change: None,
         };
         assert_eq!(
             render_dollar_rates(&rates, Some(&bands), 6, Locale::En).as_deref(),
             Some(
                 "Dollar in pesos, 6h change\n\nLower band: 900\nOfficial: 1,000\nUpper band: 1,100\n\nNo 6h history yet. Try again later"
+            )
+        );
+        bands.lower_change = Some(-4.5);
+        bands.upper_change = Some(1.25);
+        assert_eq!(
+            render_dollar_rates(&rates, Some(&bands), 720, Locale::Es).as_deref(),
+            Some(
+                "Dólar en pesos, variación 30d\n\nBanda piso: $900 (-4.5%)\nOficial: $1,000\nBanda techo: $1,100 (+1.25%)"
             )
         );
         assert_eq!(render_dollar_rates(&[], None, 24, Locale::Es), None);

@@ -1033,9 +1033,10 @@ impl<T: DollarTransport, B: BcraTransport, C: DollarCache> DollarMarketSource
         now_unix: i64,
     ) -> DollarMarketLoad {
         let references = load_dollar_references(&self.bcra_transport, &mut self.cache, now_unix);
-        // Past the hourly snapshots, BCRA gives the wholesale rate and the
-        // TCRM 100 of the period's first day.
-        let baselines = (hours_ago > bot_core::dollar::HOURLY_HISTORY_HOURS).then(|| {
+        // Past a day, BCRA gives the wholesale rate, the TCRM 100 and the
+        // band limits of the period's first day. The hourly snapshots still
+        // come first for the rates they cover.
+        let baselines = (hours_ago > 24).then(|| {
             load_dollar_baselines(
                 &self.bcra_transport,
                 &mut self.cache,
