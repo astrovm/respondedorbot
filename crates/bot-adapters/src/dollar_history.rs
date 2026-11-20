@@ -271,8 +271,9 @@ pub fn own_closes_for_reply<C: RequestCache>(
 }
 
 /// Saves `prices` (own source name and price) as the closes of the day
-/// they were priced on (`priced_at`); `now_unix` is when this run happens. The price refresh job calls this on each run, so
-/// the last run of a day leaves the day's close. Nothing is written when
+/// they were priced on (`priced_at`); `now_unix` is when this run
+/// happens. The price refresh job calls this on each run, so the last
+/// run of a day leaves the day's close. Nothing is written when
 /// the saved closes cannot be read, so they are never wiped. A saved value
 /// that does not parse is copied to its own key and the closes start
 /// again, so one bad value cannot stop them for good.
