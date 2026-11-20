@@ -37,6 +37,9 @@ const MAX_GAP_DAYS: i64 = 7;
 const OWN_CLOSES_KEY: &str = "dollar_own_daily_closes:v1";
 /// Each refresh renews it, so the closes only expire after a long outage.
 const OWN_CLOSES_TTL_SECONDS: i64 = 10 * 365 * 86_400;
+/// Where a saved closes value that does not parse is set aside, for a
+/// person to look at, before the closes start again.
+const OWN_CLOSES_INVALID_KEY: &str = "dollar_own_daily_closes:v1:invalid";
 
 /// The ArgentinaDatos `casa` for each `/dolar` row it has a history for.
 /// The crypto history is the USDT quote, so it only stands for USDT.
@@ -222,27 +225,32 @@ pub fn daily_history_for_reply<T: DollarTransport, C: RequestCache>(
         .ok()
 }
 
-/// The bot's own daily closes. A read failure or a value that does not
-/// parse is a diagnostic and an error, so nothing overwrites the closes.
+/// What the own closes key holds.
+enum OwnCloses {
+    Missing,
+    Saved(DailyHistory),
+    /// A value that does not parse, as it was read.
+    Invalid(String),
+}
+
+/// The bot's own daily closes. A read failure is a diagnostic and an
+/// error, so nothing overwrites the closes.
 fn read_own_closes<C: RequestCache>(
     cache: &mut C,
     diagnostics: &mut Vec<String>,
-) -> Result<Option<DailyHistory>, ()> {
+) -> Result<OwnCloses, ()> {
     let raw = cache.get(OWN_CLOSES_KEY).map_err(|error| {
         diagnostics.push(format!(
             "could not read dollar cache key {OWN_CLOSES_KEY}: {error}"
         ));
     })?;
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    match DailyHistory::from_cache(&raw) {
-        Some((_, history)) => Ok(Some(history)),
-        None => {
-            diagnostics.push(format!("invalid dollar cache key {OWN_CLOSES_KEY}"));
-            Err(())
-        }
-    }
+    Ok(match raw {
+        None => OwnCloses::Missing,
+        Some(raw) => match DailyHistory::from_cache(&raw) {
+            Some((_, history)) => OwnCloses::Saved(history),
+            None => OwnCloses::Invalid(raw),
+        },
+    })
 }
 
 /// The bot's own daily closes, for a `/dolar` reply.
@@ -250,13 +258,22 @@ pub fn own_closes_for_reply<C: RequestCache>(
     cache: &mut C,
     diagnostics: &mut Vec<String>,
 ) -> Option<DailyHistory> {
-    read_own_closes(cache, diagnostics).ok().flatten()
+    match read_own_closes(cache, diagnostics) {
+        Ok(OwnCloses::Saved(history)) => Some(history),
+        Ok(OwnCloses::Invalid(_)) => {
+            diagnostics.push(format!("invalid dollar cache key {OWN_CLOSES_KEY}"));
+            None
+        }
+        Ok(OwnCloses::Missing) | Err(()) => None,
+    }
 }
 
 /// Saves `prices` (own source name and price) as the closes of the day
 /// they were priced on. The price refresh job calls this on each run, so
 /// the last run of a day leaves the day's close. Nothing is written when
-/// the saved closes cannot be read or parsed, so they are never wiped.
+/// the saved closes cannot be read, so they are never wiped. A saved value
+/// that does not parse is copied to its own key and the closes start
+/// again, so one bad value cannot stop them for good.
 pub fn record_own_closes<C: RequestCache>(
     cache: &mut C,
     prices: &[(&str, f64)],
@@ -266,10 +283,23 @@ pub fn record_own_closes<C: RequestCache>(
     if prices.is_empty() {
         return;
     }
-    let Ok(saved) = read_own_closes(cache, diagnostics) else {
-        return;
+    let mut history = match read_own_closes(cache, diagnostics) {
+        Err(()) => return,
+        Ok(OwnCloses::Missing) => DailyHistory::default(),
+        Ok(OwnCloses::Saved(history)) => history,
+        Ok(OwnCloses::Invalid(raw)) => {
+            if let Err(error) = cache.set(OWN_CLOSES_INVALID_KEY, &raw, OWN_CLOSES_TTL_SECONDS) {
+                diagnostics.push(format!(
+                    "could not write dollar cache key {OWN_CLOSES_INVALID_KEY}: {error}"
+                ));
+                return;
+            }
+            diagnostics.push(format!(
+                "invalid dollar cache key {OWN_CLOSES_KEY}, moved to {OWN_CLOSES_INVALID_KEY}"
+            ));
+            DailyHistory::default()
+        }
     };
-    let mut history = saved.unwrap_or_default();
     let day = ba_day(priced_at);
     for (source, price) in prices {
         history
@@ -317,7 +347,7 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
 
     use super::{
-        ATTEMPT_KEY, CACHE_KEY, DailyHistory, OWN_CLOSES_KEY, baseline_day,
+        ATTEMPT_KEY, CACHE_KEY, DailyHistory, OWN_CLOSES_INVALID_KEY, OWN_CLOSES_KEY, baseline_day,
         daily_history_for_reply, daily_source, own_closes_for_reply, own_source, record_own_closes,
         refresh_daily_history,
     };
@@ -500,22 +530,46 @@ mod tests {
             ]
         );
         cache.fail_reads = false;
-        // A copy that does not parse is kept as it is for someone to look at.
+        // A copy that does not parse gives a reply no closes. A refresh
+        // sets it aside for someone to look at, then starts again. When it
+        // cannot be set aside, it stays as it is.
         let broken = r#"{"timestamp":1,"data":{"ccb":[[19000,1400.0]],"usdc":{}}}"#;
         cache
             .values
             .insert(OWN_CLOSES_KEY.to_owned(), broken.to_owned());
         let mut diagnostics = Vec::new();
-        record_own_closes(&mut cache, &[("ccb", 1.0)], now, &mut diagnostics);
         assert_eq!(own_closes_for_reply(&mut cache, &mut diagnostics), None);
+        cache.fail_writes = true;
+        record_own_closes(&mut cache, &[("ccb", 1.0)], now, &mut diagnostics);
         assert_eq!(
             cache.values.get(OWN_CLOSES_KEY).map(String::as_str),
             Some(broken)
         );
+        cache.fail_writes = false;
+        record_own_closes(&mut cache, &[("ccb", 1.0)], now, &mut diagnostics);
+        assert_eq!(
+            cache.values.get(OWN_CLOSES_INVALID_KEY).map(String::as_str),
+            Some(broken)
+        );
+        let closes = own_closes_for_reply(&mut cache, &mut diagnostics).unwrap_or_default();
+        assert_eq!(closes.close("ccb", today), Some(1.0));
+        assert_eq!(closes.close("ccb", today - 1), None);
         assert_eq!(
             diagnostics,
-            vec![format!("invalid dollar cache key {OWN_CLOSES_KEY}"); 2]
+            [
+                format!("invalid dollar cache key {OWN_CLOSES_KEY}"),
+                format!(
+                    "could not write dollar cache key {OWN_CLOSES_INVALID_KEY}: synthetic write failure"
+                ),
+                format!(
+                    "invalid dollar cache key {OWN_CLOSES_KEY}, moved to {OWN_CLOSES_INVALID_KEY}"
+                ),
+            ]
         );
+        // The next refresh finds good closes and says nothing.
+        let mut diagnostics = Vec::new();
+        record_own_closes(&mut cache, &[("ccb", 2.0)], now, &mut diagnostics);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
         cache.values.remove(OWN_CLOSES_KEY);
         cache.fail_writes = true;
         let mut diagnostics = Vec::new();
