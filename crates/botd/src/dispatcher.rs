@@ -2263,12 +2263,21 @@ where
         }
         // Only this vote's own lock is removed. One that expired and was
         // taken by another vote stays.
-        if let Some(source) = self.market_price_source.as_mut()
-            && let Err(error) = source.release(&lock, &token)
-        {
+        let released = self
+            .market_price_source
+            .as_mut()
+            .map(|source| source.release(&lock, &token));
+        match released {
             // The lock expires on its own.
-            self.state_diagnostics
-                .push(format!("market choices unlock failed key={key}: {error}"));
+            Some(Err(error)) => self
+                .state_diagnostics
+                .push(format!("market choices unlock failed key={key}: {error}")),
+            // The update outlived the lock, so another vote may have
+            // written at the same time.
+            Some(Ok(false)) => self
+                .state_diagnostics
+                .push(format!("market choices lock expired key={key}")),
+            Some(Ok(true)) | None => {}
         }
     }
 
@@ -12838,6 +12847,9 @@ mod tests {
         fail_load: Option<String>,
         fail_clear: Option<String>,
         fail_claim: bool,
+        /// Another vote takes the lock while this vote writes, as when this
+        /// vote's lock expired during a slow write.
+        steal_lock: bool,
         render_success: bool,
         render_caption: Option<String>,
     }
@@ -12886,9 +12898,14 @@ mod tests {
             if self.fail_save_at == Some(*calls) {
                 return Err(format!("synthetic save failure {}", *calls));
             }
-            self.stored
-                .borrow_mut()
-                .insert(key.to_owned(), value.to_owned());
+            let mut stored = self.stored.borrow_mut();
+            if self.steal_lock && key.starts_with("market_choices:") {
+                stored.insert(
+                    key.replacen("market_choices:", "market_choices_lock:", 1),
+                    "other".to_owned(),
+                );
+            }
+            stored.insert(key.to_owned(), value.to_owned());
             Ok(())
         }
 
@@ -13068,6 +13085,7 @@ mod tests {
             fail_load: None,
             fail_clear: None,
             fail_claim: false,
+            steal_lock: false,
             render_success: false,
             render_caption: None,
         }
@@ -13161,6 +13179,7 @@ mod tests {
                 fail_load: None,
                 fail_clear: None,
                 fail_claim: false,
+                steal_lock: false,
                 render_success: false,
                 render_caption: None,
             }));
@@ -13203,6 +13222,7 @@ mod tests {
             fail_load: None,
             fail_clear: Some("synthetic clear after rejection".to_owned()),
             fail_claim: false,
+            steal_lock: false,
             render_success: false,
             render_caption: None,
         }));
@@ -13245,6 +13265,7 @@ mod tests {
             fail_load: None,
             fail_clear: Some("synthetic clear after unconfirmed".to_owned()),
             fail_claim: false,
+            steal_lock: false,
             render_success: false,
             render_caption: None,
         }));
@@ -13282,6 +13303,7 @@ mod tests {
                 fail_load: None,
                 fail_clear: Some("synthetic clear after update".to_owned()),
                 fail_claim: false,
+                steal_lock: false,
                 render_success: false,
                 render_caption: None,
             }));
@@ -13590,6 +13612,29 @@ mod tests {
                 .get("market_choices:any:libra")
                 .map(String::as_str),
             Some(r#"{"votes":[[88,"1001"]]}"#)
+        );
+
+        // A vote whose lock expired and was taken by another vote leaves
+        // that vote's lock alone, and says the lock expired.
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut source = libra_pair_source(&stored, market_candidate_quote(), None);
+        source.steal_lock = true;
+        let mut slow = dispatcher().with_market_price_source(Box::new(source));
+        assert_eq!(
+            slow.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            stored
+                .borrow()
+                .get("market_choices_lock:any:libra")
+                .map(String::as_str),
+            Some("other")
+        );
+        assert!(
+            slow.state_diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.contains("market choices lock expired"))
         );
         Ok(())
     }
@@ -13923,6 +13968,7 @@ mod tests {
                 fail_load,
                 fail_clear,
                 fail_claim: false,
+                steal_lock: false,
                 render_success: false,
                 render_caption: None,
             };
@@ -14228,6 +14274,7 @@ mod tests {
                     fail_load: None,
                     fail_clear: None,
                     fail_claim: false,
+                    steal_lock: false,
                     render_success: true,
                     render_caption,
                 }));
@@ -14293,6 +14340,7 @@ mod tests {
                 fail_load: None,
                 fail_clear: None,
                 fail_claim: false,
+                steal_lock: false,
                 render_success: true,
                 render_caption: None,
             }));
@@ -14337,6 +14385,7 @@ mod tests {
             fail_load: None,
             fail_clear: None,
             fail_claim: false,
+            steal_lock: false,
             render_success: true,
             render_caption: None,
         }));
@@ -14377,6 +14426,7 @@ mod tests {
                     fail_load: None,
                     fail_clear: None,
                     fail_claim: false,
+                    steal_lock: false,
                     render_success: false,
                     render_caption: None,
                 }))
@@ -14469,6 +14519,7 @@ mod tests {
             fail_load: None,
             fail_clear: Some("synthetic callback clear failure".to_owned()),
             fail_claim: false,
+            steal_lock: false,
             render_success: false,
             render_caption: None,
         }))
@@ -14548,6 +14599,7 @@ mod tests {
                 fail_load: None,
                 fail_clear: None,
                 fail_claim: false,
+                steal_lock: false,
                 render_success: false,
                 render_caption: None,
             }));
@@ -14694,6 +14746,10 @@ mod tests {
         );
         assert_eq!(
             source.claim("key", "1", 60),
+            Err("market selection storage unavailable".to_owned())
+        );
+        assert_eq!(
+            source.release("key", "1"),
             Err("market selection storage unavailable".to_owned())
         );
         assert_eq!(source.clear_selection("key"), Ok(()));
@@ -16687,6 +16743,7 @@ mod tests {
                 fail_load: None,
                 fail_clear: None,
                 fail_claim: false,
+                steal_lock: false,
                 render_success: false,
                 render_caption: None,
             }));
@@ -16963,6 +17020,7 @@ mod tests {
             fail_load: None,
             fail_clear: None,
             fail_claim: false,
+            steal_lock: false,
             render_success: false,
             render_caption: None,
         }))
@@ -17181,6 +17239,7 @@ mod tests {
             fail_load: None,
             fail_clear: None,
             fail_claim: false,
+            steal_lock: false,
             render_success: false,
             render_caption: None,
         }))
@@ -23094,6 +23153,7 @@ mod tests {
             fail_load: None,
             fail_clear: None,
             fail_claim: false,
+            steal_lock: false,
             render_success: false,
             render_caption: None,
         })

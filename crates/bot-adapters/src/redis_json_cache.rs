@@ -18,9 +18,6 @@ pub struct RedisJsonCache {
     client: RedisPool,
 }
 
-const DELETE_IF_EQUAL: &str =
-    "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0";
-
 impl RedisJsonCache {
     pub fn new(endpoint: &RedisEndpoint) -> Result<Self, RedisJsonCacheError> {
         Ok(Self {
@@ -69,7 +66,7 @@ impl RedisJsonCache {
     pub fn delete_if_equal(&self, key: &str, value: &str) -> Result<bool, RedisJsonCacheError> {
         let mut connection = self.client.get_connection()?;
         let deleted: i64 = redis::cmd("EVAL")
-            .arg(DELETE_IF_EQUAL)
+            .arg(crate::redis_connection::DELETE_IF_EQUAL_SCRIPT)
             .arg(1)
             .arg(key)
             .arg(value)
@@ -243,11 +240,23 @@ mod tests {
                     b"$-1\r\n".as_slice(),
                 ),
                 (
-                    vec!["EVAL", super::DELETE_IF_EQUAL, "1", "refresh:lock", "1"],
+                    vec![
+                        "EVAL",
+                        crate::redis_connection::DELETE_IF_EQUAL_SCRIPT,
+                        "1",
+                        "refresh:lock",
+                        "1",
+                    ],
                     b":1\r\n".as_slice(),
                 ),
                 (
-                    vec!["EVAL", super::DELETE_IF_EQUAL, "1", "refresh:lock", "1"],
+                    vec![
+                        "EVAL",
+                        crate::redis_connection::DELETE_IF_EQUAL_SCRIPT,
+                        "1",
+                        "refresh:lock",
+                        "1",
+                    ],
                     b":0\r\n".as_slice(),
                 ),
             ];
@@ -268,7 +277,13 @@ mod tests {
         assert!(cache.set_if_absent("refresh:lock", "1", 10)?);
         assert!(!cache.set_if_absent("refresh:lock", "1", 10)?);
         assert!(cache.delete_if_equal("refresh:lock", "1")?);
-        assert!(!cache.delete_if_equal("refresh:lock", "1")?);
+        // Through the cache trait too, as the vote lock uses it.
+        let mut cache = cache;
+        assert!(!crate::request_cache::RequestCache::release(
+            &mut cache,
+            "refresh:lock",
+            "1"
+        )?);
         server
             .join()
             .ok()

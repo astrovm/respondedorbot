@@ -8403,6 +8403,7 @@ mod tests {
         assert_eq!(source.load_selection("market-key"), Ok(None));
         assert_eq!(source.take_selection("market-key"), Ok(None));
         assert_eq!(source.claim("market-key", "1", 60), Ok(true));
+        assert_eq!(source.release("market-key", "1"), Ok(false));
         assert_eq!(source.clear_selection("market-key"), Ok(()));
 
         struct FailingCache;
@@ -8454,6 +8455,7 @@ mod tests {
         assert!(failing_source.load_selection("market-key").is_err());
         assert!(failing_source.take_selection("market-key").is_err());
         assert!(failing_source.claim("market-key", "1", 60).is_err());
+        assert!(failing_source.release("market-key", "1").is_err());
         assert!(failing_source.clear_selection("market-key").is_err());
         assert!(source.render_chart(&chart, 1_700_000_000, -3).is_err());
         // The resolver intentionally leaves unknown identities without a

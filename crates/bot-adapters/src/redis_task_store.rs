@@ -2,7 +2,9 @@
 
 use thiserror::Error;
 
-use crate::redis_connection::{RedisEndpoint, RedisPool, pool};
+use crate::redis_connection::{
+    DELETE_IF_EQUAL_SCRIPT as RELEASE_LEASE_SCRIPT, RedisEndpoint, RedisPool, pool,
+};
 use crate::task_record::{
     TaskRecordDocument, TaskRecordError, decode_task_record, encode_task_record,
 };
@@ -12,7 +14,6 @@ pub const TASK_SCHEDULER_OWNER_KEY: &str = "task:scheduler:owner";
 const TASK_EXECUTION_PREFIX: &str = "task:execution:";
 
 const RENEW_LEASE_SCRIPT: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) else return 0 end";
-const RELEASE_LEASE_SCRIPT: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end";
 const UPSERT_TASK_SCRIPT: &str = "redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2]); redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4]); redis.call('EXPIRE', KEYS[2], ARGV[1]); redis.call('SETEX', KEYS[3], ARGV[1], '1'); redis.call('ZADD', KEYS[4], ARGV[3], ARGV[4]); return 1";
 const COMPLETE_TASK_SCRIPT: &str = "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end; if redis.call('EXISTS', KEYS[2]) == 0 then redis.call('DEL', KEYS[1], KEYS[5]); return 0 end; if ARGV[2] == '' then redis.call('DEL', KEYS[2]); redis.call('ZREM', KEYS[3], ARGV[3]); redis.call('ZREM', KEYS[4], ARGV[3]); else redis.call('SETEX', KEYS[2], ARGV[4], ARGV[2]); redis.call('ZADD', KEYS[3], ARGV[5], ARGV[3]); redis.call('EXPIRE', KEYS[3], ARGV[4]); redis.call('ZADD', KEYS[4], ARGV[5], ARGV[3]); end; redis.call('DEL', KEYS[1], KEYS[5]); return 1";
 const CANCEL_TASK_SCRIPT: &str = "local removed = redis.call('DEL', KEYS[1]); redis.call('ZREM', KEYS[2], ARGV[1]); redis.call('ZREM', KEYS[3], ARGV[1]); return removed";

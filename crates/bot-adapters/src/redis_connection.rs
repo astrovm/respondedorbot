@@ -9,6 +9,10 @@ use redis::{Commands, ConnectionLike, IntoConnectionInfo, RedisConnectionInfo};
 
 use crate::idle_pool::{IdleList, MAX_IDLE_AGE};
 
+/// Deletes `KEYS[1]` only while it still holds `ARGV[1]`, so a lock or
+/// lease holder never deletes one that expired and was taken by another.
+pub(crate) const DELETE_IF_EQUAL_SCRIPT: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end";
+
 const MAX_IDLE_CONNECTIONS: usize = 16;
 /// Bound how long a worker can hang on an unreachable or stalled Redis
 /// instead of waiting for the operating system's TCP timeout.
