@@ -647,6 +647,9 @@ const MARKET_SELECTION_TTL_SECONDS: i64 = 0;
 const MARKET_CHOICES_LOCK_TTL_SECONDS: i64 = 5;
 const MARKET_CHOICES_LOCK_ATTEMPTS: usize = 5;
 const MARKET_CHOICES_LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
+/// A vote releases its lock only this long after taking it, safely inside
+/// the lock's expiry.
+const MARKET_CHOICES_LOCK_HOLD: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// How long a chart keeps the button that switches to another match.
 const MARKET_CHART_SELECTION_TTL_SECONDS: i64 = 7 * 86_400;
@@ -2232,10 +2235,10 @@ where
             return;
         };
         // Two votes on one query at once must not overwrite each other.
-        let lock = format!("{key}:lock");
-        if !self.lock_market_choices(&lock) {
+        let lock = key.replacen("market_choices:", "market_choices_lock:", 1);
+        let Some(locked_at) = self.lock_market_choices(&lock) else {
             return;
-        }
+        };
         if let Some(mut choices) = self.market_choices(key) {
             choices.record(user_id, candidate_id, switched);
             let encoded = serde_json::to_string(&choices).unwrap_or_default();
@@ -2250,7 +2253,10 @@ where
                     .push(format!("market choices write failed key={key}: {error}"));
             }
         }
-        if let Some(source) = self.market_price_source.as_mut()
+        // A lock held past its expiry may be another vote's by now, so it
+        // is left to expire instead of being released.
+        if locked_at.elapsed() < MARKET_CHOICES_LOCK_HOLD
+            && let Some(source) = self.market_price_source.as_mut()
             && let Err(error) = source.take_selection(&lock)
         {
             // The lock expires on its own.
@@ -2259,26 +2265,36 @@ where
         }
     }
 
-    /// Waits briefly for another vote on the same query to finish.
-    fn lock_market_choices(&mut self, lock: &str) -> bool {
-        for _ in 0..MARKET_CHOICES_LOCK_ATTEMPTS {
+    /// Waits briefly for another vote on the same query to finish. Returns
+    /// when the lock was taken, at the latest.
+    fn lock_market_choices(&mut self, lock: &str) -> Option<std::time::Instant> {
+        for attempt in 0..MARKET_CHOICES_LOCK_ATTEMPTS {
+            if attempt > 0 {
+                // Unit tests exercise the retries without sleeping through them.
+                std::thread::sleep(if cfg!(test) {
+                    std::time::Duration::ZERO
+                } else {
+                    MARKET_CHOICES_LOCK_RETRY
+                });
+            }
+            let claimed_at = std::time::Instant::now();
             let claimed = self.market_price_source.as_mut().map_or(
                 Err("market price source disappeared".to_owned()),
                 |source| source.claim(lock, "1", MARKET_CHOICES_LOCK_TTL_SECONDS),
             );
             match claimed {
-                Ok(true) => return true,
-                Ok(false) => std::thread::sleep(MARKET_CHOICES_LOCK_RETRY),
+                Ok(true) => return Some(claimed_at),
+                Ok(false) => {}
                 Err(error) => {
                     self.state_diagnostics
                         .push(format!("market choices lock failed {lock}: {error}"));
-                    return false;
+                    return None;
                 }
             }
         }
         self.state_diagnostics
             .push(format!("market choices busy {lock}"));
-        false
+        None
     }
 
     fn persist_market_selection(
@@ -12861,7 +12877,7 @@ mod tests {
         fn take_selection(&mut self, key: &str) -> Result<Option<String>, String> {
             // A failing `fail_load` read already stops the callback before
             // the take. Releasing a vote lock fails like a clear.
-            if key.ends_with(":lock")
+            if key.starts_with("market_choices_lock:")
                 && let Some(error) = &self.fail_clear
             {
                 return Err(error.clone());
@@ -13506,7 +13522,7 @@ mod tests {
 
         // A vote waits for another one on the same query, then gives up.
         let stored = Rc::new(RefCell::new(HashMap::from([(
-            "market_choices:any:libra:lock".to_owned(),
+            "market_choices_lock:any:libra".to_owned(),
             "1".to_owned(),
         )])));
         let mut busy = dispatcher().with_market_price_source(Box::new(libra_pair_source(
@@ -13653,6 +13669,34 @@ mod tests {
         // The old quote loses the list; it had no buttons of its own.
         assert_eq!(
             last_markup_edit(&dispatcher),
+            Some(bot_core::telegram_actions::InlineKeyboardMarkup::default())
+        );
+
+        // An old list loses its buttons too.
+        let stored = Rc::new(RefCell::new(HashMap::new()));
+        let mut picker = self::dispatcher().with_market_price_source(Box::new(libra_pair_source(
+            &stored,
+            market_candidate_quote(),
+            None,
+        )));
+        picker.actions = failing_actions(
+            ActionKind::DeleteMessage,
+            usize::MAX,
+            "message can't be deleted",
+            false,
+        );
+        let id = seed_market_menu(&stored, market_selection_fixture(None));
+        assert_eq!(
+            picker.dispatch(callback_update_for_message(
+                &format!("mkt:select:{id}:0"),
+                "private",
+                Some("en"),
+                700
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(
+            last_markup_edit(&picker),
             Some(bot_core::telegram_actions::InlineKeyboardMarkup::default())
         );
         Ok(())
@@ -15293,7 +15337,14 @@ mod tests {
             }));
             stored.borrow_mut().insert(selection_key, bound);
 
-            // Switching away deletes the card and its refresh state.
+            // A card Telegram cannot delete keeps its own buttons and its
+            // refresh state.
+            dispatcher.actions.1.failure = Some(ExecuteFailure {
+                kind: ActionKind::DeleteMessage,
+                remaining: 1,
+                error: "message can't be deleted",
+                record: false,
+            });
             assert_eq!(
                 dispatcher.dispatch(callback_update_for_message(
                     &format!("mkt:select:{id}:0"),
@@ -15303,8 +15354,21 @@ mod tests {
                 )),
                 Ok(DispatchOutcome::Handled)
             );
-            assert!(token_state.borrow().is_none());
-
+            assert!(dispatcher.actions.0.iter().any(|action| matches!(
+                action,
+                TelegramAction::EditMessageReplyMarkup {
+                    message_id: MessageId(701),
+                    reply_markup: Some(markup),
+                    ..
+                } if markup.inline_keyboard[0][0]
+                    .callback_data
+                    .as_deref()
+                    .is_some_and(|data| data.starts_with("sig:ref:"))
+                    && markup.inline_keyboard.iter().flatten().all(|button| {
+                        !button.callback_data.as_deref().is_some_and(|data| data.starts_with("mkt:"))
+                    })
+            )));
+            assert!(token_state.borrow().is_some());
             let delete_callback = signal_callback.replacen("sig:ref:", "sig:del:", 1);
             assert_eq!(
                 dispatcher.dispatch(callback_update_for_message(
@@ -15323,6 +15387,29 @@ mod tests {
                 }
             )));
             assert!(token_state.borrow().is_none());
+            // The quote (702) switches back to a card (703); switching away
+            // from that card deletes it and its refresh state.
+            for (candidate, message_id) in [(1, 702), (0, 703)] {
+                assert_eq!(
+                    dispatcher.dispatch(callback_update_for_message(
+                        &format!("mkt:select:{id}:{candidate}"),
+                        "private",
+                        Some("en"),
+                        message_id,
+                    )),
+                    Ok(DispatchOutcome::Handled)
+                );
+                assert_eq!(token_state.borrow().is_some(), message_id == 702);
+            }
+            assert!(dispatcher.actions.0.iter().any(|action| matches!(
+                action,
+                TelegramAction::DeleteMessage {
+                    message_id: MessageId(703),
+                    ..
+                }
+            )));
+            assert!(token_state.borrow().is_none());
+
             assert!(!dispatcher.actions.0.iter().any(|action| matches!(
             action,
             TelegramAction::SendMessage(message)
@@ -15331,6 +15418,7 @@ mod tests {
             assert_eq!(
                 selected.borrow().as_slice(),
                 [
+                    format!("1001:{}", requested.unwrap_or_default()),
                     format!("1001:{}", requested.unwrap_or_default()),
                     format!("1001:{}", requested.unwrap_or_default())
                 ]
