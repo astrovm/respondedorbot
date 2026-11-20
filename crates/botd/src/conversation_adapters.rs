@@ -609,6 +609,18 @@ impl PostgresConversationBilling {
     }
 }
 
+/// A refused reservation of a message that an earlier attempt settled. It
+/// ends silently, so its balances are never shown.
+const fn already_settled(user_balance: i64, chat_balance: i64) -> ReserveDecision {
+    ReserveDecision {
+        authorized: false,
+        user_balance,
+        chat_balance,
+        source: None,
+        denial: Some(ReserveDenial::AlreadySettled),
+    }
+}
+
 /// The member's hourly counter in the chat the message came from.
 fn reservation_cap_key(request: &ReserveRequest, chat_id: i64) -> String {
     let origin_chat_id = request
@@ -646,6 +658,16 @@ impl PostgresConversationBilling {
         let group_first_chat = request
             .chat_id
             .filter(|_| cached_source.is_none() && request.group_pays_first);
+        // Choosing the group as payer counts the message toward the member's
+        // hourly limit, so a retry of a settled message stops before that.
+        if group_first_chat.is_some()
+            && self
+                .repository
+                .ai_operation_settled(request.user_id, &request.operation_id)
+                .map_err(error_text)?
+        {
+            return Ok((already_settled(0, 0), Some("operation_settled".to_owned())));
+        }
         let requested_source = match group_first_chat {
             Some(chat_id) => Some(self.group_first_source(&request, chat_id)?),
             None => cached_source,
@@ -672,13 +694,7 @@ impl PostgresConversationBilling {
         // not a shortfall, and no payer fallback may touch it.
         if crate::native_ai::already_settled(result.reason.as_deref()) {
             return Ok((
-                ReserveDecision {
-                    authorized: false,
-                    user_balance: result.user_balance,
-                    chat_balance: result.chat_balance,
-                    source: None,
-                    denial: Some(ReserveDenial::AlreadySettled),
-                },
+                already_settled(result.user_balance, result.chat_balance),
                 result.reason,
             ));
         }

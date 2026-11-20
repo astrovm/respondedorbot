@@ -998,6 +998,15 @@ impl BillingRepository {
         })
     }
 
+    /// Whether an AI message operation already has its settlement.
+    pub fn ai_operation_settled(
+        &self,
+        user_id: i64,
+        operation_id: &str,
+    ) -> Result<bool, BillingError> {
+        self.compaction_reservation_settled(user_id, operation_id, "")
+    }
+
     pub fn compaction_reservation_settled(
         &self,
         user_id: i64,
@@ -4546,6 +4555,8 @@ mod tests {
              WHERE metadata->>'operation_id' = 'user-op' AND event_type <> 'ai_reserve'";
         assert_eq!(client.query_one(adjustments, &[])?.get::<_, i64>(0), 1);
         assert!(repository.compaction_reservation_settled(10, "user-op", "")?);
+        assert!(repository.ai_operation_settled(10, "user-op")?);
+        assert!(!repository.ai_operation_settled(10, "missing-op")?);
         assert!(!repository.compaction_reservation_settled(10, "", "missing-tag")?);
 
         // Replaying a non-reservation charge reports the recorded payer and
