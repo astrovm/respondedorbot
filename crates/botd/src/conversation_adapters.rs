@@ -39,6 +39,12 @@ const COMPACTION_THRESHOLD: usize = 40;
 // The configured history size is a small constant, far inside the Redis range.
 const CHAT_HISTORY_LIMIT: i64 = CHAT_HISTORY_MAX_MESSAGES as i64;
 const COMPACTION_KEEP: usize = 25;
+/// A failed update is retried within seconds; an hour is plenty.
+const UNDELIVERED_REPLY_TTL_SECONDS: i64 = 3_600;
+
+fn undelivered_reply_key(operation_id: &str) -> String {
+    format!("ai_undelivered_reply:{operation_id}")
+}
 
 pub struct RedisConversationState {
     state: RedisMessageState,
@@ -252,6 +258,28 @@ impl ConversationState for RedisConversationState {
         // A marker without its summary is stale and must not trim history.
         let marker = marker.filter(|value| summary.is_some() && !value.is_empty());
         Ok(decode_summary_memory(entries, summary, marker))
+    }
+
+    fn save_undelivered_reply(&mut self, operation_id: &str, reply: &str) -> Result<(), String> {
+        self.state
+            .set_value(
+                &undelivered_reply_key(operation_id),
+                reply,
+                UNDELIVERED_REPLY_TTL_SECONDS,
+            )
+            .map_err(error_text)
+    }
+
+    fn load_undelivered_reply(&mut self, operation_id: &str) -> Result<Option<String>, String> {
+        self.state
+            .get_value(&undelivered_reply_key(operation_id))
+            .map_err(error_text)
+    }
+
+    fn clear_undelivered_reply(&mut self, operation_id: &str) -> Result<(), String> {
+        self.state
+            .delete_value(&undelivered_reply_key(operation_id))
+            .map_err(error_text)
     }
 
     fn record_outgoing(
@@ -581,6 +609,18 @@ impl PostgresConversationBilling {
     }
 }
 
+/// A refused reservation of a message that an earlier attempt settled. It
+/// ends silently, so its balances are never shown.
+const fn already_settled(user_balance: i64, chat_balance: i64) -> ReserveDecision {
+    ReserveDecision {
+        authorized: false,
+        user_balance,
+        chat_balance,
+        source: None,
+        denial: Some(ReserveDenial::AlreadySettled),
+    }
+}
+
 /// The member's hourly counter in the chat the message came from.
 fn reservation_cap_key(request: &ReserveRequest, chat_id: i64) -> String {
     let origin_chat_id = request
@@ -618,11 +658,49 @@ impl PostgresConversationBilling {
         let group_first_chat = request
             .chat_id
             .filter(|_| cached_source.is_none() && request.group_pays_first);
+        // Choosing the group as payer counts the message toward the member's
+        // hourly limit, so a retry of a settled message stops before that.
+        if group_first_chat.is_some()
+            && self
+                .repository
+                .ai_operation_settled(request.user_id, &request.operation_id)
+                .map_err(error_text)?
+        {
+            self.release_operation_state(&request.operation_id);
+            return Ok((already_settled(0, 0), Some("operation_settled".to_owned())));
+        }
         let requested_source = match group_first_chat {
             Some(chat_id) => Some(self.group_first_source(&request, chat_id)?),
             None => cached_source,
         };
         let mut result = self.charge_reservation(&request, amount, requested_source)?;
+        // A retry of a message that the hourly cap denied shows that denial
+        // again: the first attempt failed to send it.
+        if result.reason.as_deref() == Some("reservation_capped") {
+            self.release_operation_state(&request.operation_id);
+            return Ok((
+                ReserveDecision {
+                    authorized: false,
+                    user_balance: result.user_balance,
+                    chat_balance: result.chat_balance,
+                    source: None,
+                    denial: Some(ReserveDenial::CreditlessHourlyCap {
+                        limit: request.creditless_user_hourly_limit,
+                    }),
+                },
+                result.reason,
+            ));
+        }
+        // A retried update reserves again under the same operation. Billing
+        // refuses it once the first attempt settled or refunded it; that is
+        // not a shortfall, and no payer fallback may touch it.
+        if crate::native_ai::already_settled(result.reason.as_deref()) {
+            self.release_operation_state(&request.operation_id);
+            return Ok((
+                already_settled(result.user_balance, result.chat_balance),
+                result.reason,
+            ));
+        }
         if group_first_chat.is_some() && !result.ok {
             if requested_source == Some("user") {
                 // The member used up what the group pays for this hour and
@@ -906,9 +984,7 @@ impl TaskCreditStore for PostgresConversationBilling {
             reason,
             user_balance: decision.user_balance,
             chat_balance: decision.chat_balance,
-            hourly_limit: decision
-                .denial
-                .map(|ReserveDenial::CreditlessHourlyCap { limit }| limit),
+            hourly_limit: decision.denial.and_then(ReserveDenial::hourly_limit),
         })
     }
 
@@ -1071,6 +1147,16 @@ mod tests {
     };
     use crate::reconciliation::ActiveOperationRegistry;
 
+    /// A refused replay keeps nothing for an operation that already ended.
+    fn holds_no_operation_state(billing: &PostgresConversationBilling, operation_id: &str) -> bool {
+        !billing.payer_by_operation.contains_key(operation_id)
+            && !billing.held_by_operation.contains_key(operation_id)
+            && !billing.onboarding_checked_operations.contains(operation_id)
+            && !billing.cap_checked_operations.contains(operation_id)
+            && !billing.cap_key_by_operation.contains_key(operation_id)
+            && !billing.active_marked_operations.contains(operation_id)
+    }
+
     #[test]
     fn charge_metadata_keeps_the_pricing_details_and_nothing_else() {
         let pricing = json!({
@@ -1180,6 +1266,14 @@ mod tests {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let chat_id = -i64::try_from(nonce % 1_000_000_000)?;
         let mut state = RedisConversationState::new(&endpoint)?;
+        let operation = format!("ai:{chat_id}:2:88");
+        state.save_undelivered_reply(&operation, "saved reply")?;
+        assert_eq!(
+            state.load_undelivered_reply(&operation)?,
+            Some("saved reply".to_owned())
+        );
+        state.clear_undelivered_reply(&operation)?;
+        assert_eq!(state.load_undelivered_reply(&operation)?, None);
         let spanish = conversation_input(chat_id, 2, Locale::Es);
         state.record_incoming(&spanish)?;
         let notes = ["task_set {} → created".to_owned()];
@@ -1560,6 +1654,22 @@ mod tests {
         billing.release_operation(&paid_operation);
         assert!(!active.is_active(&paid_operation));
         assert!(!billing.payer_by_operation.contains_key(&paid_operation));
+
+        // A retried update reserves the settled operation again: billing
+        // refuses it as already settled, not as a shortfall.
+        billing.settle(SettlementRequest {
+            user_id,
+            chat_id: None,
+            operation_id: paid_operation.clone(),
+            actual_credit_units: 150,
+            delivered: true,
+            reason: "synthetic".to_owned(),
+            billing_segments: Vec::new(),
+        })?;
+        let replay = billing.reserve(user_reserve(user_id, &paid_operation, "first", 100))?;
+        assert!(!replay.authorized);
+        assert_eq!(replay.denial, Some(ReserveDenial::AlreadySettled));
+        assert!(holds_no_operation_state(&billing, &paid_operation));
         Ok(())
     }
 
@@ -1657,6 +1767,9 @@ mod tests {
             state.load_summary_memory("-100", 20).err(),
             state.record_incoming(&input).err(),
             state.record_outgoing(&input, Some(3), "reply", &[]).err(),
+            state.save_undelivered_reply("ai:-100:2:88", "reply").err(),
+            state.load_undelivered_reply("ai:-100:2:88").err(),
+            state.clear_undelivered_reply("ai:-100:2:88").err(),
         ];
         for failure in failures {
             assert!(
@@ -1820,6 +1933,16 @@ mod tests {
         );
         assert_eq!(denied.chat_balance, 500);
         assert!(!billing.payer_by_operation.contains_key(&blocked));
+        // A retry, after the denial failed to send, is denied the same way
+        // and charges nothing.
+        let retried = billing.reserve(request(&blocked, "first", 400, 0))?;
+        assert!(!retried.authorized);
+        assert_eq!(
+            retried.denial,
+            Some(ReserveDenial::CreditlessHourlyCap { limit: 0 })
+        );
+        assert_eq!(retried.chat_balance, 500);
+        assert!(holds_no_operation_state(&billing, &blocked));
 
         // A cap that cannot be reached fails the reservation.
         let mut unreachable_cap = PostgresConversationBilling::new(&database_url)
@@ -1971,6 +2094,20 @@ mod tests {
             before_settlement + 50
         );
         assert_eq!(repository.get_balance("chat", chat_id)?, 840);
+
+        // A retried update reserves the settled message again. Under or at
+        // the hourly limit, it is refused as already settled, and no payer
+        // fallback refunds the hourly count or charges anyone.
+        let settled_user = repository.get_balance("user", mover)?;
+        for limit in [5, 0] {
+            let replay = billing.reserve(request(mover, &moved_op, 800, limit))?;
+            assert!(!replay.authorized);
+            assert_eq!(replay.denial, Some(ReserveDenial::AlreadySettled));
+            assert!(holds_no_operation_state(&billing, &moved_op));
+            assert_eq!(used(mover)?, Some(0));
+            assert_eq!(repository.get_balance("user", mover)?, settled_user);
+            assert_eq!(repository.get_balance("chat", chat_id)?, 840);
+        }
 
         // When the member can't cover it either, the group keeps its hold.
         let stuck_op = format!("synthetic-stuck:{nonce}");
