@@ -7066,6 +7066,14 @@ mod tests {
             Some(43)
         );
         assert_eq!(
+            super::telegram_action_chat_id(&TelegramAction::EditMessageReplyMarkup {
+                chat_id: ChatId(44),
+                message_id: MessageId(6),
+                reply_markup: None,
+            }),
+            Some(44)
+        );
+        assert_eq!(
             super::telegram_action_chat_id(&TelegramAction::AnswerCallback {
                 callback_id: "synthetic-callback".to_owned(),
                 text: None,

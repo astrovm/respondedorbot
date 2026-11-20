@@ -12858,7 +12858,7 @@ mod tests {
                 } => Some(reply_markup.clone().unwrap_or_default()),
                 _ => None,
             })
-            .last()
+            .next_back()
     }
 
     /// Two assets named LIBRA, in a store that fails its `fail_save_at`th
