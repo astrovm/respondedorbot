@@ -22,6 +22,14 @@ const BOT_USERNAME: &str = "synthetic_e2e_bot";
 const AI_REPLY: &str = "Respuesta sintética del modelo";
 /// A message with this text makes the fake model call `calculate` first.
 const TOOL_PROMPT: &str = "e2e tool check";
+const TRACE_PROMPT: &str = "e2e trace check";
+const TRACE_REPLY: &str = "Encuesta con comillas lista";
+/// A tool call with quoted text, to check how the status line shows it.
+const TRACE_ARGUMENTS: &str = r#"{"options":["sí","no"],"question":"\"Quoted\" poll"}"#;
+const TRACE_LINE: &str = r#"🔧 create_poll(options=["sí", "no"], question='"Quoted" poll')"#;
+/// The status line waits up to a second behind the previous edit. A tool
+/// that answers sooner replaces it with "Pensando." before it is sent.
+const SLOW_POLL: Duration = Duration::from_millis(2_500);
 const TOOL_REPLY_PREFIX: &str = "La herramienta devolvió ";
 /// A message with this text makes the fake model call `create_poll` first.
 const POLL_PROMPT: &str = "e2e poll check";
@@ -238,6 +246,9 @@ fn telegram_response(method: &str, body: &Value, state: &FakeState) -> String {
             json!(updates)
         }
         method if method.starts_with("send") || method.starts_with("edit") => {
+            if method == "sendPoll" {
+                thread::sleep(SLOW_POLL);
+            }
             let message_id = state.next_message_id.fetch_add(1, Ordering::SeqCst);
             json!({
                 "message_id": message_id,
@@ -277,6 +288,10 @@ fn openrouter_completion(body: &Value) -> (&'static str, String) {
             json!({"question": "¿Pizza o empanadas?", "options": ["Pizza", "Empanadas"]});
         let call = json!({"name": "create_poll", "arguments": arguments.to_string()});
         return tool_round(turn, &usage, &call, |_| POLL_REPLY.to_owned());
+    }
+    if asks(TRACE_PROMPT) {
+        let call = json!({"name": "create_poll", "arguments": TRACE_ARGUMENTS});
+        return tool_round(turn, &usage, &call, |_| TRACE_REPLY.to_owned());
     }
     if body["stream"] == true {
         let chunk = json!({"id": "synthetic-generation", "model": "synthetic/model",
@@ -719,6 +734,22 @@ fn exercise_main_flows(
             .iter()
             .all(|text| !text.contains("seco de créditos") && !text.contains("secos de créditos"))
     );
+
+    // The status line shows a tool's text as written, without JSON escapes.
+    server.queue_update(private_message(
+        first_update + 7,
+        user_id,
+        &format!("/ask {TRACE_PROMPT}"),
+    ));
+    server.wait_for("a reply after a tool call with quoted text", |state| {
+        state
+            .sent_texts(user_id)
+            .iter()
+            .any(|text| text == TRACE_REPLY)
+    })?;
+    let texts = server.state.sent_texts(user_id);
+    assert!(texts.iter().any(|text| text == TRACE_LINE), "{texts:?}");
+    assert!(texts.iter().all(|text| !text.contains("\\\"")), "{texts:?}");
 
     server.state.stopping.store(true, Ordering::SeqCst);
     stop_bot(bot)
