@@ -222,23 +222,27 @@ pub fn daily_history_for_reply<T: DollarTransport, C: RequestCache>(
         .ok()
 }
 
-/// The bot's own daily closes. A read failure is a diagnostic.
+/// The bot's own daily closes. A read failure or a value that does not
+/// parse is a diagnostic and an error, so nothing overwrites the closes.
 fn read_own_closes<C: RequestCache>(
     cache: &mut C,
     diagnostics: &mut Vec<String>,
 ) -> Result<Option<DailyHistory>, ()> {
-    cache
-        .get(OWN_CLOSES_KEY)
-        .map(|raw| {
-            raw.as_deref()
-                .and_then(DailyHistory::from_cache)
-                .map(|(_, history)| history)
-        })
-        .map_err(|error| {
-            diagnostics.push(format!(
-                "could not read dollar cache key {OWN_CLOSES_KEY}: {error}"
-            ));
-        })
+    let raw = cache.get(OWN_CLOSES_KEY).map_err(|error| {
+        diagnostics.push(format!(
+            "could not read dollar cache key {OWN_CLOSES_KEY}: {error}"
+        ));
+    })?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match DailyHistory::from_cache(&raw) {
+        Some((_, history)) => Ok(Some(history)),
+        None => {
+            diagnostics.push(format!("invalid dollar cache key {OWN_CLOSES_KEY}"));
+            Err(())
+        }
+    }
 }
 
 /// The bot's own daily closes, for a `/dolar` reply.
@@ -249,14 +253,14 @@ pub fn own_closes_for_reply<C: RequestCache>(
     read_own_closes(cache, diagnostics).ok().flatten()
 }
 
-/// Saves `prices` (own source name and price) as today's closes. The price
-/// refresh job calls this on each run, so the last run of a day leaves the
-/// day's close. Nothing is written when the saved closes cannot be read, so
-/// a read failure cannot wipe them.
+/// Saves `prices` (own source name and price) as the closes of the day
+/// they were priced on. The price refresh job calls this on each run, so
+/// the last run of a day leaves the day's close. Nothing is written when
+/// the saved closes cannot be read or parsed, so they are never wiped.
 pub fn record_own_closes<C: RequestCache>(
     cache: &mut C,
     prices: &[(&str, f64)],
-    now_unix: i64,
+    priced_at: i64,
     diagnostics: &mut Vec<String>,
 ) {
     if prices.is_empty() {
@@ -266,7 +270,7 @@ pub fn record_own_closes<C: RequestCache>(
         return;
     };
     let mut history = saved.unwrap_or_default();
-    let day = ba_day(now_unix);
+    let day = ba_day(priced_at);
     for (source, price) in prices {
         history
             .series
@@ -276,7 +280,7 @@ pub fn record_own_closes<C: RequestCache>(
     }
     if let Err(error) = cache.set(
         OWN_CLOSES_KEY,
-        &history.to_cache(now_unix),
+        &history.to_cache(priced_at),
         OWN_CLOSES_TTL_SECONDS,
     ) {
         diagnostics.push(format!(
@@ -496,6 +500,23 @@ mod tests {
             ]
         );
         cache.fail_reads = false;
+        // A copy that does not parse is kept as it is for someone to look at.
+        let broken = r#"{"timestamp":1,"data":{"ccb":[[19000,1400.0]],"usdc":{}}}"#;
+        cache
+            .values
+            .insert(OWN_CLOSES_KEY.to_owned(), broken.to_owned());
+        let mut diagnostics = Vec::new();
+        record_own_closes(&mut cache, &[("ccb", 1.0)], now, &mut diagnostics);
+        assert_eq!(own_closes_for_reply(&mut cache, &mut diagnostics), None);
+        assert_eq!(
+            cache.values.get(OWN_CLOSES_KEY).map(String::as_str),
+            Some(broken)
+        );
+        assert_eq!(
+            diagnostics,
+            vec![format!("invalid dollar cache key {OWN_CLOSES_KEY}"); 2]
+        );
+        cache.values.remove(OWN_CLOSES_KEY);
         cache.fail_writes = true;
         let mut diagnostics = Vec::new();
         record_own_closes(&mut cache, &[("ccb", 1.0)], now, &mut diagnostics);

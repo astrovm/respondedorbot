@@ -11,6 +11,14 @@ pub const DOLLAR_TIMEFRAMES: [&str; 8] = ["1h", "6h", "24h", "48h", "7d", "30d",
 /// compare against daily closes.
 pub const HOURLY_HISTORY_HOURS: i64 = 48;
 
+/// Periods longer than a day also compare with daily values: ArgentinaDatos
+/// and the bot's own closes, and BCRA's wholesale rate, TCRM 100 and bands.
+/// The hourly snapshots still come first for the rows they cover.
+#[must_use]
+pub fn uses_daily_baselines(hours_ago: i64) -> bool {
+    hours_ago > 24
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DollarCommandPlan {
     Load { hours_ago: i64 },
@@ -197,6 +205,7 @@ mod tests {
     use super::{
         CurrencyBands, DOLLAR_TIMEFRAMES, DollarCommandPlan, DollarRate, classify_dollar_command,
         invalid_timeframe_message, period_label, plan_dollar_command, render_dollar_rates,
+        uses_daily_baselines,
     };
     use crate::locale::Locale;
 
@@ -335,6 +344,13 @@ mod tests {
                 "Dólar en pesos, variación 24h\n\nBanda piso: $950.12 (+0.25%)\nMayorista: $1,400 (+7.69%)\nTCRM 100: $1,410 (-0.5%)\nBlue: $1,415 (0%)\nOficial: $1,420 (+2%)\nBanda techo: $1,460.34 (-0.1%)"
             )
         );
+    }
+
+    #[test]
+    fn only_periods_past_a_day_use_daily_baselines() {
+        for (hours, expected) in [(1, false), (24, false), (25, true), (48, true), (720, true)] {
+            assert_eq!(uses_daily_baselines(hours), expected, "{hours}h");
+        }
     }
 
     #[test]

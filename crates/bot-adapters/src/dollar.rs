@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use bot_core::cache_policy::{CacheDecision, evaluate_cache, request_cache_history_key};
-use bot_core::dollar::{CurrencyBands, DollarRate, render_dollar_rates};
+use bot_core::dollar::{CurrencyBands, DollarRate, render_dollar_rates, uses_daily_baselines};
 use bot_core::locale::Locale;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
@@ -167,7 +167,10 @@ pub fn refresh_dollar_snapshot<T: DollarTransport, C: DollarCache>(
             .into_iter()
             .filter_map(|rate| Some((own_source(rate.name)?, rate.price)))
             .collect::<Vec<_>>();
-        record_own_closes(cache, &closes, now_unix, &mut diagnostics);
+        // A cached copy is dated by when CriptoYa sent it, so a price from
+        // before midnight never becomes the next day's close.
+        let priced_at = load.fetched_at.unwrap_or(now_unix);
+        record_own_closes(cache, &closes, priced_at, &mut diagnostics);
     }
     if let (true, Some(current)) = (load.refreshed, load.data) {
         let hourly_value = json!({"timestamp": now_unix, "data": current}).to_string();
@@ -368,7 +371,8 @@ fn tcrm<C: DollarCache>(
         diagnostics,
     )
     .or(daily_history.filter(|value| hours_ago == 24 && value.is_finite() && *value > 0.0))
-    .or(long_baseline.filter(|value| hours_ago > 24 && value.is_finite() && *value > 0.0));
+    .or(long_baseline
+        .filter(|value| uses_daily_baselines(hours_ago) && value.is_finite() && *value > 0.0));
     let change = historical
         .map(|value| ((current / value) - 1.0) * 100.0)
         .filter(|value| value.is_finite());
@@ -412,7 +416,9 @@ fn period_bands(
         return bands;
     }
     let past = |pick: fn(&crate::bcra::DollarBaselines) -> Option<f64>| {
-        baselines.and_then(pick).filter(|_| hours_ago > 24)
+        baselines
+            .and_then(pick)
+            .filter(|_| uses_daily_baselines(hours_ago))
     };
     CurrencyBands {
         lower_change: change(bands.lower, None, past(|value| value.lower_band), hours_ago),
@@ -605,7 +611,7 @@ pub fn load_dollar_market_with_history<T: DollarTransport, C: DollarCache>(
         .as_ref()
         .map(|current| parse_rates(current, history.as_ref().map(unwrap_data), hours_ago))
         .unwrap_or_default();
-    if hours_ago > 24 {
+    if uses_daily_baselines(hours_ago) {
         fill_daily_changes(
             transport,
             cache,
@@ -1388,6 +1394,37 @@ mod tests {
             "{text}"
         );
 
+        // 48h without hourly snapshots uses the same daily baselines.
+        let mut cache = Cache::default();
+        cache.values.insert(
+            "tcrm_100".to_owned(),
+            r#"{"timestamp":1725000000,"data":1410}"#.to_owned(),
+        );
+        cache.values.insert(
+            "bcra_currency_band_limits".to_owned(),
+            r#"{"data":{"date_iso":"2024-08-30","lower":950,"upper":1550,"lower_change_pct":0.1,"upper_change_pct":0.2}}"#
+                .to_owned(),
+        );
+        let load = super::load_dollar_market_with_history(
+            &quotes(),
+            &mut cache,
+            48,
+            Locale::Es,
+            1_725_000_000,
+            None,
+            Some(&baselines),
+        );
+        let text = load.text.unwrap_or_default();
+        for expected in [
+            "Dólar en pesos, variación 48h",
+            "Mayorista: $1,400 (+40%)",
+            "TCRM 100: $1,410 (+41%)",
+            "Banda piso: $950 (-5%)",
+            "Banda techo: $1,550 (+3.33%)",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+
         // A century back nothing has a baseline, and the reply says so.
         let load = load_dollar_market(&quotes(), &mut cache, 876_000, Locale::Es, 1_725_000_000);
         let text = load.text.unwrap_or_default();
@@ -1513,6 +1550,24 @@ mod tests {
         let diagnostics = refresh_dollar_snapshot(&transport, &mut cache, 1_725_000_002);
         assert!(diagnostics.is_empty());
         assert_eq!(written(&cache), [own, "dollar_daily_history:v1", own]);
+
+        // Quotes cached at 23:58 in Buenos Aires and read at 00:01 stay
+        // the earlier day's close.
+        let fetched = 1_724_986_680;
+        let mut cache = Cache::default();
+        cache.values.insert(
+            request_key(),
+            format!(r#"{{"timestamp":{fetched},"data":{}}}"#, body()),
+        );
+        refresh_dollar_snapshot(&transport, &mut cache, fetched + 180);
+        assert_eq!(*transport.calls.borrow(), 0);
+        let saved = cache.values.get(own).cloned().unwrap_or_default();
+        let day = crate::bcra::ba_day(fetched);
+        assert_eq!(day + 1, crate::bcra::ba_day(fetched + 180));
+        assert!(
+            saved.contains(&format!("\"ccb\":[[{day},1470.0]]")),
+            "{saved}"
+        );
     }
 
     #[test]

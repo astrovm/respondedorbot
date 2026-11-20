@@ -1036,7 +1036,7 @@ impl<T: DollarTransport, B: BcraTransport, C: DollarCache> DollarMarketSource
         // Past a day, BCRA gives the wholesale rate, the TCRM 100 and the
         // band limits of the period's first day. The hourly snapshots still
         // come first for the rates they cover.
-        let baselines = (hours_ago > 24).then(|| {
+        let baselines = bot_core::dollar::uses_daily_baselines(hours_ago).then(|| {
             load_dollar_baselines(
                 &self.bcra_transport,
                 &mut self.cache,
