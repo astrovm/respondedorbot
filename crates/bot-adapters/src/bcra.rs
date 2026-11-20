@@ -28,12 +28,12 @@ const ITCRM_CACHE_TTL_SECONDS: i64 = 1_800;
 const ITCRM_FULL_HISTORY_KEY: &str = "itcrm_full_history:v1";
 const ITCRM_FULL_HISTORY_FRESH_SECONDS: i64 = 86_400;
 const ITCRM_FULL_HISTORY_TTL_SECONDS: i64 = 7 * 86_400;
-/// Past days do not change, so a looked-up wholesale rate keeps for a day.
+/// Past days do not change, so a looked-up past value keeps for a day.
 const BASELINE_TTL_SECONDS: i64 = 86_400;
-/// BCRA publishes the ITCRM about a month late, and wholesale skips
+/// BCRA publishes the ITCRM about a month late, and daily series skip
 /// weekends and holidays. Older values stand in up to these gaps.
 const ITCRM_MAX_GAP_DAYS: i64 = 45;
-const WHOLESALE_LOOKBACK_DAYS: i64 = 10;
+const BASELINE_LOOKBACK_DAYS: i64 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BcraRequest {
@@ -471,6 +471,27 @@ pub(crate) fn current_band_date(value: &Value, now: i64) -> bool {
         .is_some_and(|day| day <= ba_day(now))
 }
 
+/// The BCRA series ids of the lower and upper band limits.
+fn band_ids(vars: &[&Map<String, Value>]) -> (Option<i64>, Option<i64>) {
+    let mut ids = (None, None);
+    for v in vars {
+        let desc = norm(
+            v.get("descripcion")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        let id = v.get("idVariable").and_then(Value::as_i64);
+        if desc.contains("bandas cambiarias") {
+            if desc.contains("inferior") {
+                ids.0 = id;
+            } else if desc.contains("superior") {
+                ids.1 = id;
+            }
+        }
+    }
+    ids
+}
+
 fn bands<T: BcraTransport, C: RequestCache>(
     transport: &T,
     cache: &mut C,
@@ -489,22 +510,7 @@ fn bands<T: BcraTransport, C: RequestCache>(
             upper_change: number(v.get("upper_change_pct")),
         });
     }
-    let mut ids = (None, None);
-    for v in vars {
-        let desc = norm(
-            v.get("descripcion")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        );
-        let id = v.get("idVariable").and_then(Value::as_i64);
-        if desc.contains("bandas cambiarias") {
-            if desc.contains("inferior") {
-                ids.0 = id;
-            } else if desc.contains("superior") {
-                ids.1 = id;
-            }
-        }
-    }
+    let ids = band_ids(vars);
     let lower = series(&request_json(
         transport,
         cache,
@@ -835,14 +841,38 @@ fn wholesale_id(variables: &[&Map<String, Value>]) -> Option<i64> {
         .as_i64()
 }
 
-/// Official BCRA values on a past day, for `/dolar` periods longer than the
-/// hourly snapshots: the wholesale rate (Com. A 3500, since 2002) and the
-/// TCRM 100 built from it and the ITCRM of that day.
+/// Official BCRA values on a past day, for `/dolar` periods longer than a
+/// day: the wholesale rate (Com. A 3500, since 2002), the TCRM 100 built
+/// from it and the ITCRM of that day, and the band limits (since April 2025).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DollarBaselines {
     pub wholesale: Option<f64>,
     pub tcrm_100: Option<f64>,
+    pub lower_band: Option<f64>,
+    pub upper_band: Option<f64>,
     pub diagnostics: Vec<String>,
+}
+
+/// The last value of series `id` on `day`, or up to 10 days before it.
+fn value_on<T: BcraTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    id: i64,
+    day: i64,
+    now: i64,
+    d: &mut Vec<String>,
+) -> Option<f64> {
+    let request = BcraRequest::Latest {
+        id,
+        from: iso(day - BASELINE_LOOKBACK_DAYS),
+        to: iso(day),
+    };
+    let value = request_json_for(transport, cache, &request, BASELINE_TTL_SECONDS, now, d)?;
+    series(&value)
+        .into_iter()
+        .next_back()
+        .map(|(_, value)| value)
+        .filter(|value| *value > 0.0)
 }
 
 #[must_use]
@@ -854,28 +884,16 @@ pub fn load_dollar_baselines<T: BcraTransport, C: RequestCache>(
 ) -> DollarBaselines {
     let mut d = Vec::new();
     let day = ba_day(target_unix);
-    let wholesale = request_json(transport, cache, &BcraRequest::Variables, now, &mut d)
-        .as_ref()
-        .map(items)
-        .and_then(|variables| wholesale_id(&variables))
-        .and_then(|id| {
-            let request = BcraRequest::Latest {
-                id,
-                from: iso(day - WHOLESALE_LOOKBACK_DAYS),
-                to: iso(day),
-            };
-            request_json_for(
-                transport,
-                cache,
-                &request,
-                BASELINE_TTL_SECONDS,
-                now,
-                &mut d,
-            )
-        })
-        .and_then(|value| series(&value).into_iter().next_back())
-        .map(|(_, value)| value)
-        .filter(|value| *value > 0.0);
+    let list = request_json(transport, cache, &BcraRequest::Variables, now, &mut d);
+    let variables = list.as_ref().map(items).unwrap_or_default();
+    let mut value = |id: Option<i64>, d: &mut Vec<String>| {
+        id.and_then(|id| value_on(transport, cache, id, day, now, d))
+    };
+    let wholesale = value(wholesale_id(&variables), &mut d);
+    let (lower_id, upper_id) = band_ids(&variables);
+    let lower_band = value(lower_id, &mut d);
+    // Both limits started together, so no floor means no ceiling either.
+    let upper_band = lower_band.and_then(|_| value(upper_id, &mut d));
     let tcrm_100 = wholesale.and_then(|wholesale| {
         let indices = full_itcrm_series(transport, cache, now, &mut d)?;
         let (index_day, index) = indices.range(..=day).next_back()?;
@@ -886,6 +904,8 @@ pub fn load_dollar_baselines<T: BcraTransport, C: RequestCache>(
     DollarBaselines {
         wholesale,
         tcrm_100,
+        lower_band,
+        upper_band,
         diagnostics: d,
     }
 }
@@ -1196,6 +1216,77 @@ mod tests {
         assert_eq!(baselines.wholesale, None);
         assert_eq!(baselines.tcrm_100, None);
         // The ITCRM workbook is not downloaded when there is no rate to use.
+        assert_eq!(transport.requests.borrow().len(), 2);
+    }
+
+    #[test]
+    fn long_dollar_baselines_read_both_band_limits_of_that_day() {
+        struct Recorded {
+            requests: RefCell<Vec<BcraRequest>>,
+            responses: RefCell<VecDeque<Result<HttpResponse, TransportFailureKind>>>,
+        }
+        impl BcraTransport for Recorded {
+            fn get(&self, request: &BcraRequest) -> Result<HttpResponse, TransportFailureKind> {
+                self.requests.borrow_mut().push(request.clone());
+                self.responses
+                    .borrow_mut()
+                    .pop_front()
+                    .unwrap_or(Err(TransportFailureKind::Request))
+            }
+        }
+        let variables = json!({"results":[
+            {"idVariable":1187,"descripcion":"Régimen de bandas cambiarias. Límite inferior","categoria":"Principales Variables"},
+            {"idVariable":1188,"descripcion":"Régimen de bandas cambiarias. Límite superior","categoria":"Principales Variables"}
+        ]});
+        // Real BCRA answers for 2026-10-11 to 2026-10-21.
+        let limit = |id: i64, value: f64| {
+            response(
+                json!({"status":200,"metadata":{"resultset":{"count":7,"offset":0,"limit":1}},
+                "results":[{"idVariable":id,"detalle":[{"fecha":"2026-10-21","valor":value}]}]}),
+            )
+        };
+        // 2026-10-21 15:00 UTC, 30 days before 2026-11-20.
+        let target = 1_792_594_800;
+        let now = target + 30 * 86_400;
+        let transport = Recorded {
+            requests: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::from([
+                response(variables.clone()),
+                limit(1187, 715.92),
+                limit(1188, 1941.44),
+            ])),
+        };
+        let baselines = load_dollar_baselines(&transport, &mut Cache::default(), target, now);
+        assert_eq!(
+            (baselines.lower_band, baselines.upper_band),
+            (Some(715.92), Some(1941.44))
+        );
+        assert_eq!(
+            transport.requests.borrow()[1..],
+            [
+                BcraRequest::Latest {
+                    id: 1187,
+                    from: "2026-10-11".to_owned(),
+                    to: "2026-10-21".to_owned(),
+                },
+                BcraRequest::Latest {
+                    id: 1188,
+                    from: "2026-10-11".to_owned(),
+                    to: "2026-10-21".to_owned(),
+                },
+            ]
+        );
+
+        // Before April 2025 there were no bands, so the ceiling is not asked.
+        let transport = Recorded {
+            requests: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::from([
+                response(variables),
+                response(json!({"status":200,"results":[{"idVariable":1187,"detalle":[]}]})),
+            ])),
+        };
+        let baselines = load_dollar_baselines(&transport, &mut Cache::default(), 0, now);
+        assert_eq!((baselines.lower_band, baselines.upper_band), (None, None));
         assert_eq!(transport.requests.borrow().len(), 2);
     }
 

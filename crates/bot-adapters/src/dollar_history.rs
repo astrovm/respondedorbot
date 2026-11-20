@@ -1,6 +1,10 @@
 //! Daily dollar closes from ArgentinaDatos, for `/dolar` periods longer than
 //! the bot's own hourly snapshots. Blue, official and wholesale go back to
 //! 2011, CCL to 2013, MEP to 2018, card to 2019 and crypto to 2023.
+//!
+//! ArgentinaDatos has no history for the Bitcoin and USDC rows, and no other
+//! source has CriptoYa's numbers, so the bot saves its own daily closes of
+//! them from November 2026 on.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -29,6 +33,15 @@ const ATTEMPT_SECONDS: i64 = 600;
 /// but not for a week, so a series that ended (like `solidario`) or has not
 /// started yet gives no baseline.
 const MAX_GAP_DAYS: i64 = 7;
+/// The bot's own daily closes, in the same shape as the ArgentinaDatos copy.
+const OWN_CLOSES_KEY: &str = "dollar_own_daily_closes:v1";
+/// Each refresh renews it, so the closes only expire after a long outage.
+const OWN_CLOSES_TTL_SECONDS: i64 = 10 * 365 * 86_400;
+/// Where a saved closes value that does not parse is set aside, for a
+/// person to look at, before the closes start again. The key ends with the
+/// time of the run that set it aside, so a later bad value cannot replace
+/// it.
+const OWN_CLOSES_INVALID_PREFIX: &str = "dollar_own_daily_closes:v1:invalid";
 
 /// The ArgentinaDatos `casa` for each `/dolar` row it has a history for.
 /// The crypto history is the USDT quote, so it only stands for USDT.
@@ -42,6 +55,17 @@ pub fn daily_source(rate_name: &str) -> Option<&'static str> {
         "CCL" => Some("contadoconliqui"),
         "Blue" => Some("blue"),
         "USDT" => Some("cripto"),
+        _ => None,
+    }
+}
+
+/// The name each `/dolar` row without an ArgentinaDatos history is saved
+/// under in the bot's own daily closes.
+#[must_use]
+pub fn own_source(rate_name: &str) -> Option<&'static str> {
+    match rate_name {
+        "Bitcoin" => Some("ccb"),
+        "USDC" => Some("usdc"),
         _ => None,
     }
 }
@@ -203,6 +227,103 @@ pub fn daily_history_for_reply<T: DollarTransport, C: RequestCache>(
         .ok()
 }
 
+/// What the own closes key holds.
+enum OwnCloses {
+    Missing,
+    Saved(DailyHistory),
+    /// A value that does not parse, as it was read.
+    Invalid(String),
+}
+
+/// The bot's own daily closes. A read failure is a diagnostic and an
+/// error, so nothing overwrites the closes.
+fn read_own_closes<C: RequestCache>(
+    cache: &mut C,
+    diagnostics: &mut Vec<String>,
+) -> Result<OwnCloses, ()> {
+    let raw = cache.get(OWN_CLOSES_KEY).map_err(|error| {
+        diagnostics.push(format!(
+            "could not read dollar cache key {OWN_CLOSES_KEY}: {error}"
+        ));
+    })?;
+    Ok(match raw {
+        None => OwnCloses::Missing,
+        Some(raw) => match DailyHistory::from_cache(&raw) {
+            Some((_, history)) => OwnCloses::Saved(history),
+            None => OwnCloses::Invalid(raw),
+        },
+    })
+}
+
+/// The bot's own daily closes, for a `/dolar` reply.
+pub fn own_closes_for_reply<C: RequestCache>(
+    cache: &mut C,
+    diagnostics: &mut Vec<String>,
+) -> Option<DailyHistory> {
+    match read_own_closes(cache, diagnostics) {
+        Ok(OwnCloses::Saved(history)) => Some(history),
+        Ok(OwnCloses::Invalid(_)) => {
+            diagnostics.push(format!("invalid dollar cache key {OWN_CLOSES_KEY}"));
+            None
+        }
+        Ok(OwnCloses::Missing) | Err(()) => None,
+    }
+}
+
+/// Saves `prices` (own source name and price) as the closes of the day
+/// they were priced on (`priced_at`); `now_unix` is when this run
+/// happens. The price refresh job calls this on each run, so the last
+/// run of a day leaves the day's close. Nothing is written when
+/// the saved closes cannot be read, so they are never wiped. A saved value
+/// that does not parse is copied to its own key and the closes start
+/// again, so one bad value cannot stop them for good.
+pub fn record_own_closes<C: RequestCache>(
+    cache: &mut C,
+    prices: &[(&str, f64)],
+    priced_at: i64,
+    now_unix: i64,
+    diagnostics: &mut Vec<String>,
+) {
+    if prices.is_empty() {
+        return;
+    }
+    let mut history = match read_own_closes(cache, diagnostics) {
+        Err(()) => return,
+        Ok(OwnCloses::Missing) => DailyHistory::default(),
+        Ok(OwnCloses::Saved(history)) => history,
+        Ok(OwnCloses::Invalid(raw)) => {
+            // Named by this run's time, not the price time: while CriptoYa is
+            // down, every run reuses one cached price time.
+            let aside = format!("{OWN_CLOSES_INVALID_PREFIX}:{now_unix}");
+            if let Err(error) = cache.set(&aside, &raw, OWN_CLOSES_TTL_SECONDS) {
+                diagnostics.push(format!("could not write dollar cache key {aside}: {error}"));
+                return;
+            }
+            diagnostics.push(format!(
+                "invalid dollar cache key {OWN_CLOSES_KEY}, moved to {aside}"
+            ));
+            DailyHistory::default()
+        }
+    };
+    let day = ba_day(priced_at);
+    for (source, price) in prices {
+        history
+            .series
+            .entry((*source).to_owned())
+            .or_default()
+            .insert(day, *price);
+    }
+    if let Err(error) = cache.set(
+        OWN_CLOSES_KEY,
+        &history.to_cache(priced_at),
+        OWN_CLOSES_TTL_SECONDS,
+    ) {
+        diagnostics.push(format!(
+            "could not write dollar cache key {OWN_CLOSES_KEY}: {error}"
+        ));
+    }
+}
+
 /// Keeps the cached daily history fresh, for the price refresh job. A
 /// failed download only becomes a diagnostic (and so an admin report) when
 /// there is no copy or the copy is days old; until then it is logged.
@@ -231,8 +352,9 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
 
     use super::{
-        ATTEMPT_KEY, CACHE_KEY, DailyHistory, baseline_day, daily_history_for_reply, daily_source,
-        refresh_daily_history,
+        ATTEMPT_KEY, CACHE_KEY, DailyHistory, OWN_CLOSES_INVALID_PREFIX, OWN_CLOSES_KEY,
+        baseline_day, daily_history_for_reply, daily_source, own_closes_for_reply, own_source,
+        record_own_closes, refresh_daily_history,
     };
     use crate::bcra::parse_date;
     use crate::dollar::{DollarTransport, HttpResponse, TransportFailureKind};
@@ -356,6 +478,131 @@ mod tests {
         for name in ["USDC", "Bitcoin", "TCRM 100", "Banda piso"] {
             assert_eq!(daily_source(name), None, "{name}");
         }
+        // The bot saves its own closes only for the rows without a source.
+        assert_eq!(own_source("Bitcoin"), Some("ccb"));
+        assert_eq!(own_source("USDC"), Some("usdc"));
+        for name in ["USDT", "Blue", "TCRM 100"] {
+            assert_eq!(own_source(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn own_closes_keep_each_days_last_price_and_survive_cache_failures() {
+        // 2024-08-30 06:40 UTC is 03:40 in Buenos Aires.
+        let now = 1_725_000_000;
+        let today = day("2024-08-30");
+        let mut cache = Cache::default();
+        let mut diagnostics = Vec::new();
+        assert_eq!(own_closes_for_reply(&mut cache, &mut diagnostics), None);
+        record_own_closes(
+            &mut cache,
+            &[("ccb", 1400.0)],
+            now - 86_400,
+            now - 86_400,
+            &mut diagnostics,
+        );
+        record_own_closes(
+            &mut cache,
+            &[("ccb", 1450.0), ("usdc", 1460.0)],
+            now,
+            now,
+            &mut diagnostics,
+        );
+        record_own_closes(
+            &mut cache,
+            &[("ccb", 1470.0)],
+            now + 3_600,
+            now + 3_600,
+            &mut diagnostics,
+        );
+        let closes = own_closes_for_reply(&mut cache, &mut diagnostics).unwrap_or_default();
+        assert_eq!(closes.close("ccb", today - 1), Some(1400.0));
+        assert_eq!(closes.close("ccb", today), Some(1470.0));
+        assert_eq!(closes.close("usdc", today), Some(1460.0));
+        assert_eq!(closes.close("usdc", today - 1), None);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        // No prices touch nothing, and an unreadable copy is not replaced.
+        let saved = cache.values.get(OWN_CLOSES_KEY).cloned();
+        cache.fail_reads = true;
+        record_own_closes(&mut cache, &[], now, now, &mut diagnostics);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        record_own_closes(&mut cache, &[("ccb", 1.0)], now, now, &mut diagnostics);
+        assert_eq!(cache.values.get(OWN_CLOSES_KEY), saved.as_ref());
+        assert_eq!(own_closes_for_reply(&mut cache, &mut diagnostics), None);
+        assert_eq!(
+            diagnostics,
+            vec![
+                format!("could not read dollar cache key {OWN_CLOSES_KEY}: synthetic read failure");
+                2
+            ]
+        );
+        cache.fail_reads = false;
+        // A copy that does not parse gives a reply no closes. A refresh
+        // sets it aside for someone to look at, then starts again. When it
+        // cannot be set aside, it stays as it is.
+        let broken = r#"{"timestamp":1,"data":{"ccb":[[19000,1400.0]],"usdc":{}}}"#;
+        cache
+            .values
+            .insert(OWN_CLOSES_KEY.to_owned(), broken.to_owned());
+        let aside = format!("{OWN_CLOSES_INVALID_PREFIX}:{now}");
+        let mut diagnostics = Vec::new();
+        assert_eq!(own_closes_for_reply(&mut cache, &mut diagnostics), None);
+        cache.fail_writes = true;
+        record_own_closes(&mut cache, &[("ccb", 1.0)], now, now, &mut diagnostics);
+        assert_eq!(
+            cache.values.get(OWN_CLOSES_KEY).map(String::as_str),
+            Some(broken)
+        );
+        cache.fail_writes = false;
+        record_own_closes(&mut cache, &[("ccb", 1.0)], now, now, &mut diagnostics);
+        assert_eq!(cache.values.get(&aside).map(String::as_str), Some(broken));
+        let closes = own_closes_for_reply(&mut cache, &mut diagnostics).unwrap_or_default();
+        assert_eq!(closes.close("ccb", today), Some(1.0));
+        assert_eq!(closes.close("ccb", today - 1), None);
+        assert_eq!(
+            diagnostics,
+            [
+                format!("invalid dollar cache key {OWN_CLOSES_KEY}"),
+                format!("could not write dollar cache key {aside}: synthetic write failure"),
+                format!("invalid dollar cache key {OWN_CLOSES_KEY}, moved to {aside}"),
+            ]
+        );
+        // The next refresh finds good closes and says nothing.
+        let mut diagnostics = Vec::new();
+        record_own_closes(&mut cache, &[("ccb", 2.0)], now, now, &mut diagnostics);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        // A later bad value is set aside next to the first one, also while
+        // CriptoYa is down and every run reuses one cached price time.
+        cache
+            .values
+            .insert(OWN_CLOSES_KEY.to_owned(), "later".to_owned());
+        record_own_closes(
+            &mut cache,
+            &[("ccb", 2.0)],
+            now,
+            now + 1_800,
+            &mut diagnostics,
+        );
+        let later = format!("{OWN_CLOSES_INVALID_PREFIX}:{}", now + 1_800);
+        assert_eq!(cache.values.get(&later).map(String::as_str), Some("later"));
+        assert_eq!(cache.values.get(&aside).map(String::as_str), Some(broken));
+        assert_eq!(
+            diagnostics,
+            [format!(
+                "invalid dollar cache key {OWN_CLOSES_KEY}, moved to {later}"
+            )]
+        );
+        cache.values.remove(OWN_CLOSES_KEY);
+        cache.fail_writes = true;
+        let mut diagnostics = Vec::new();
+        record_own_closes(&mut cache, &[("ccb", 1.0)], now, now, &mut diagnostics);
+        assert_eq!(
+            diagnostics,
+            [format!(
+                "could not write dollar cache key {OWN_CLOSES_KEY}: synthetic write failure"
+            )]
+        );
     }
 
     #[test]
