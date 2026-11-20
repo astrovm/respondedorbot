@@ -268,19 +268,24 @@ fn priced_bars(
         .collect()
 }
 
-/// Whether the chart starts on the listing's first day. Yahoo's first bar
-/// can come minutes after `firstTradeDate`.
+/// Whether the chart starts on the listing's first day, by the exchange's
+/// calendar. Yahoo's first bar can come minutes after `firstTradeDate`. A
+/// 24-hour distance is not enough: on a listing's third day, a two-day
+/// chart starts at the second day's pre-market, hours after the listing.
 fn chart_starts_at_listing(result: &serde_json::Map<String, Value>) -> bool {
-    let first_trade = result
-        .get("meta")
-        .and_then(|meta| integer(meta.get("firstTradeDate")));
+    let meta = result.get("meta");
+    let first_trade = meta.and_then(|meta| integer(meta.get("firstTradeDate")));
+    let offset = meta
+        .and_then(|meta| integer(meta.get("gmtoffset")))
+        .unwrap_or(0);
+    let day = |time: i64| (time + offset).div_euclid(86_400);
     let first_bar = result
         .get("timestamp")
         .and_then(Value::as_array)
         .and_then(|timestamps| integer(timestamps.first()));
     first_trade
         .zip(first_bar)
-        .is_some_and(|(first_trade, first_bar)| first_bar.abs_diff(first_trade) <= 86_400)
+        .is_some_and(|(first_trade, first_bar)| day(first_bar) == day(first_trade))
 }
 
 /// Yahoo's `chartPreviousClose` is the close before the whole requested range,
@@ -1534,6 +1539,7 @@ mod tests {
                     "regularMarketPrice": 87.16,
                     "regularMarketTime": latest,
                     "firstTradeDate": first_trade_date,
+                    "gmtoffset": OFFSET,
                 },
                 // Empty bars stay in Yahoo's arrays as nulls.
                 "timestamp": [listed, listed + 900, first_trade, latest - 900],
@@ -1554,28 +1560,33 @@ mod tests {
             yahoo_24h_change(&chart(json!([0, null, 282_684_770, 120_000]), listed - 300)),
             change
         );
-        // Up to a whole day apart still counts as the listing's first day.
-        assert_eq!(
-            yahoo_24h_change(&chart(json!([0, null, 282_684_770, 120_000]), listed - DAY)),
-            change
-        );
-        // A chart that starts days after the listing is not a young
-        // listing: its zero-volume bars are trades like any other.
-        assert_eq!(
-            yahoo_24h_change(&chart(
-                json!([0, null, 282_684_770, 120_000]),
-                listed - DAY - 1
-            )),
-            day(87.16, (87.16 / 83.0 - 1.0) * 100.0, listed)
-        );
-        // A listing time after the first bar is not a young listing either.
-        assert_eq!(
-            yahoo_24h_change(&chart(
-                json!([0, null, 282_684_770, 120_000]),
-                listed + DAY + 1
-            )),
-            day(87.16, (87.16 / 83.0 - 1.0) * 100.0, listed)
-        );
+        // The listing's first day runs from midnight to midnight at the
+        // exchange, not in UTC.
+        let local_midnight = listed - (listed + OFFSET).rem_euclid(DAY);
+        let next_midnight = local_midnight + DAY;
+        for first_trade_date in [local_midnight, next_midnight - 1] {
+            assert_eq!(
+                yahoo_24h_change(&chart(
+                    json!([0, null, 282_684_770, 120_000]),
+                    first_trade_date
+                )),
+                change,
+                "{first_trade_date}"
+            );
+        }
+        // A chart that starts on a later day is not a young listing: on a
+        // listing's third day the chart starts at the second day's
+        // pre-market, whose zero-volume bars are trades like any other.
+        for first_trade_date in [local_midnight - 1, next_midnight] {
+            assert_eq!(
+                yahoo_24h_change(&chart(
+                    json!([0, null, 282_684_770, 120_000]),
+                    first_trade_date
+                )),
+                day(87.16, (87.16 / 83.0 - 1.0) * 100.0, listed),
+                "{first_trade_date}"
+            );
+        }
         // Without volume data every priced bar counts, the offer price too.
         assert_eq!(
             yahoo_24h_change(&chart(json!([null, null, null, null]), listed)),
