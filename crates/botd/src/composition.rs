@@ -98,8 +98,8 @@ use bot_core::market_prices::{
     execute_stock_candidate,
 };
 use bot_core::stocks::{
-    StockQuery, StockQuote, StockSearchCandidate, listed_on_exchange, plan_stock_query,
-    rank_stock_quotes, split_exchange_qualifier, yahoo_candidate_name_matches_query,
+    StockQuery, StockQuote, StockSearchCandidate, exchange_qualifier_readings, listed_on_exchange,
+    plan_stock_query, rank_stock_quotes, yahoo_candidate_name_matches_query,
 };
 use bot_core::telegram_actions::TelegramAction;
 use bot_core::telegram_commands::command_publication_actions;
@@ -1355,6 +1355,48 @@ where
         candidates
     }
 
+    /// Yahoo's search knows `TTWO`, not `TTWO:NASDAQ` or `NASDAQ:TTWO`, so
+    /// an exchange-qualified query searches its ticker and keeps the
+    /// listings on that exchange. Returns the searched text and candidates.
+    fn discover_candidates<'q>(
+        &mut self,
+        query: &'q str,
+        now_unix: i64,
+        diagnostics: &mut Vec<String>,
+    ) -> (&'q str, Vec<StockSearchCandidate>) {
+        let readings = exchange_qualifier_readings(query);
+        let mut first = None;
+        for &(ticker, exchange) in &readings {
+            let candidates = Self::candidates_for_query(
+                self.resolve_candidates(ticker, now_unix, diagnostics),
+                ticker,
+            );
+            let on_exchange = candidates
+                .iter()
+                .filter(|candidate| listed_on_exchange(exchange, &candidate.exchange))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !on_exchange.is_empty() {
+                return (ticker, on_exchange);
+            }
+            first.get_or_insert((ticker, candidates));
+        }
+        match first {
+            // A known exchange code makes the ticker certain, so its other
+            // listings still help. Two unknown sides could name another
+            // company (`ETR:SAP` searched as `ETR`), so they find nothing.
+            Some((ticker, candidates)) if readings.len() == 1 => (ticker, candidates),
+            Some((ticker, _)) => (ticker, Vec::new()),
+            None => (
+                query,
+                Self::candidates_for_query(
+                    self.resolve_candidates(query, now_unix, diagnostics),
+                    query,
+                ),
+            ),
+        }
+    }
+
     fn resolve_missing(
         &mut self,
         quotes: Vec<(String, Option<StockQuote>)>,
@@ -1372,19 +1414,7 @@ where
                 resolved.push((query, quote));
                 continue;
             }
-            // Yahoo's search knows `TTWO`, not `TTWO:NASDAQ` or `NASDAQ:TTWO`.
-            let (search, exchange) = split_exchange_qualifier(&query)
-                .map_or((query.as_str(), None), |(ticker, exchange)| {
-                    (ticker, Some(exchange))
-                });
-            let candidates = Self::candidates_for_query(
-                self.resolve_candidates(search, now_unix, diagnostics),
-                search,
-            );
-            let candidates = match exchange {
-                Some(exchange) => prefer_exchange_listings(candidates, exchange),
-                None => candidates,
-            };
+            let (search, candidates) = self.discover_candidates(&query, now_unix, diagnostics);
             let candidate_quotes = candidates
                 .iter()
                 .filter_map(|candidate| {
@@ -1408,24 +1438,6 @@ where
             resolved.extend(merged.into_iter().map(|quote| (query.clone(), Some(quote))));
         }
         resolved
-    }
-}
-
-/// Keeps the listings on the exchange the user named. When none of them
-/// is there, all listings stay, so a wrong exchange still finds the ticker.
-fn prefer_exchange_listings(
-    candidates: Vec<StockSearchCandidate>,
-    exchange: &str,
-) -> Vec<StockSearchCandidate> {
-    let on_exchange = candidates
-        .iter()
-        .filter(|candidate| listed_on_exchange(exchange, &candidate.exchange))
-        .cloned()
-        .collect::<Vec<_>>();
-    if on_exchange.is_empty() {
-        candidates
-    } else {
-        on_exchange
     }
 }
 
@@ -8157,6 +8169,11 @@ mod tests {
         };
         let load = source.load(6, Locale::En, 1_700_000_000);
         assert!(load.text.is_none());
+        // Without CriptoYa rates there is nothing to compare, so the daily
+        // history is not read; the stub fails it like every other request.
+        assert!(
+            bot_adapters::dollar::DollarTransport::get_daily_history(&source.transport).is_err()
+        );
         assert!(
             load.diagnostics
                 .iter()
@@ -9136,7 +9153,28 @@ mod tests {
             assert_eq!(charted(&nasdaq.yahoo_transport)[1..], ["TTWO"], "{query}");
         }
 
-        // An exchange that has no listing still finds every listing.
+        // Two unknown sides: both readings are searched, and only a listing
+        // on the named exchange counts, so `XYZ:TTWO` finds no other company.
+        let mut unknown = source(Vec::new());
+        unknown
+            .yahoo_transport
+            .search_responses
+            .borrow_mut()
+            .push(search());
+        let load = unknown.load_with_timeframe("XYZ:TTWO", Some("7d"), 1_800_000_000);
+        assert_eq!(quote_symbols(&load), [("XYZ:TTWO".to_owned(), None)]);
+        assert_eq!(
+            unknown
+                .yahoo_transport
+                .searches
+                .borrow()
+                .iter()
+                .map(|request| request.query.as_str())
+                .collect::<Vec<_>>(),
+            ["XYZ", "TTWO"]
+        );
+
+        // A known exchange with no listing still finds every listing.
         let mut elsewhere = source(vec![
             Err(YahooFailure::Request),
             chart("TTWO", "NasdaqGS"),

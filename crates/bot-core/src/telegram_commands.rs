@@ -359,11 +359,11 @@ mod tests {
         for (locale, expected_hash) in [
             (
                 Locale::Es,
-                "f8a967d606a2cee730019d136cdd65c2a2901d1af370b0c632c7e86f72df7508",
+                "a55988406c8dd4e588995ec217be028f66371e6a42d0d1fcb6edad087dc2fb2a",
             ),
             (
                 Locale::En,
-                "95879fe87904db115fb4e0f3a8c55453105f37805e794f0c48d4b93123bb331b",
+                "9c8a52daafcbbbe965b2cdc018823fafc5171f876b4610dfdeeea611e6285e05",
             ),
         ] {
             let commands = telegram_commands(locale);

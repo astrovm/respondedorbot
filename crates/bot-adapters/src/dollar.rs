@@ -10,7 +10,7 @@ use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
-use crate::dollar_history::{baseline_day, daily_source, load_daily_history};
+use crate::dollar_history::{baseline_day, daily_history_for_reply, daily_source};
 use crate::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 use crate::request_cache::{
     JsonHttpResponse, RequestCache, load_cached_json, python_request_cache_key,
@@ -169,9 +169,8 @@ pub fn refresh_dollar_snapshot<T: DollarTransport, C: DollarCache>(
             ));
         }
     }
-    // Keeps long `/dolar` periods from waiting on ArgentinaDatos. It only
-    // downloads when the cached copy is a few hours old.
-    crate::dollar_history::load_daily_history(transport, cache, now_unix, &mut diagnostics);
+    // Long `/dolar` periods read this copy and never wait on ArgentinaDatos.
+    crate::dollar_history::refresh_daily_history(transport, cache, now_unix, &mut diagnostics);
     diagnostics
 }
 
@@ -485,18 +484,19 @@ fn fill_daily_changes<T: DollarTransport, C: DollarCache>(
     baselines: Option<&crate::bcra::DollarBaselines>,
     diagnostics: &mut Vec<String>,
 ) {
-    let needs_history = rates
-        .iter()
-        .any(|rate| rate.change.is_none() && daily_source(rate.name).is_some());
-    let history = if needs_history {
-        load_daily_history(transport, cache, now_unix, diagnostics)
-    } else {
-        None
-    };
+    // Read only when a row needs it, and at most once.
+    let mut history = None;
     let day = baseline_day(now_unix, hours_ago);
     for rate in rates.iter_mut().filter(|rate| rate.change.is_none()) {
         let baseline = daily_source(rate.name)
-            .and_then(|source| history.as_ref()?.close(source, day))
+            .and_then(|source| {
+                history
+                    .get_or_insert_with(|| {
+                        daily_history_for_reply(transport, cache, now_unix, diagnostics)
+                    })
+                    .as_ref()?
+                    .close(source, day)
+            })
             .or_else(|| {
                 (rate.name == "Mayorista")
                     .then(|| baselines.and_then(|baselines| baselines.wholesale))

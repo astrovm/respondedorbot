@@ -17,6 +17,13 @@ const CACHE_KEY: &str = "dollar_daily_history:v1";
 const FRESH_SECONDS: i64 = 6 * 3_600;
 /// A stale copy still answers when ArgentinaDatos is down.
 const CACHE_TTL_SECONDS: i64 = 30 * 86_400;
+/// The refresh job reports a failed download only once the copy is this
+/// old. Before that the copy still answers and the next cycle tries again.
+const REPORT_AFTER_SECONDS: i64 = 2 * 86_400;
+/// After a failed download without any copy, replies skip ArgentinaDatos
+/// this long, so an outage does not make each `/dolar` wait for a timeout.
+const FAILED_KEY: &str = "dollar_daily_history:failed";
+const FAILURE_BACKOFF_SECONDS: i64 = 600;
 /// A close stands in for the next days (weekends, holidays, a lagging feed),
 /// but not for a week, so a series that ended (like `solidario`) or has not
 /// started yet gives no baseline.
@@ -119,15 +126,12 @@ pub fn baseline_day(now_unix: i64, hours_ago: i64) -> i64 {
     ba_day(now_unix.saturating_sub(hours_ago.saturating_mul(3_600)))
 }
 
-/// The daily history from the cache, refreshed from ArgentinaDatos once it
-/// is a few hours old. A failed refresh falls back to the stale copy.
-pub fn load_daily_history<T: DollarTransport, C: RequestCache>(
-    transport: &T,
+/// The cached copy of the daily history and when it was downloaded.
+fn cached_history<C: RequestCache>(
     cache: &mut C,
-    now_unix: i64,
     diagnostics: &mut Vec<String>,
-) -> Option<DailyHistory> {
-    let cached = match cache.get(CACHE_KEY) {
+) -> Option<(i64, DailyHistory)> {
+    match cache.get(CACHE_KEY) {
         Ok(raw) => raw.as_deref().and_then(DailyHistory::from_cache),
         Err(error) => {
             diagnostics.push(format!(
@@ -135,13 +139,18 @@ pub fn load_daily_history<T: DollarTransport, C: RequestCache>(
             ));
             None
         }
-    };
-    if let Some((timestamp, history)) = &cached
-        && (0..FRESH_SECONDS).contains(&now_unix.saturating_sub(*timestamp))
-    {
-        return Some(history.clone());
     }
-    let fetched = transport
+}
+
+/// Downloads the history and caches it. A failed cache write is only a
+/// diagnostic; a failed download is the error.
+fn download_history<T: DollarTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    now_unix: i64,
+    diagnostics: &mut Vec<String>,
+) -> Result<DailyHistory, String> {
+    let history = transport
         .get_daily_history()
         .map_err(|error| format!("ArgentinaDatos dollar history transport {error:?}"))
         .and_then(|response| {
@@ -153,20 +162,64 @@ pub fn load_daily_history<T: DollarTransport, C: RequestCache>(
             } else {
                 DailyHistory::parse_provider(&response.body)
             }
-        });
-    match fetched {
-        Ok(history) => {
-            if let Err(error) = cache.set(CACHE_KEY, &history.to_cache(now_unix), CACHE_TTL_SECONDS)
-            {
-                diagnostics.push(format!(
-                    "could not write dollar cache key {CACHE_KEY}: {error}"
-                ));
-            }
-            Some(history)
-        }
+        })?;
+    if let Err(error) = cache.set(CACHE_KEY, &history.to_cache(now_unix), CACHE_TTL_SECONDS) {
+        diagnostics.push(format!(
+            "could not write dollar cache key {CACHE_KEY}: {error}"
+        ));
+    }
+    Ok(history)
+}
+
+/// The daily history for a `/dolar` reply. Any cached copy answers, even a
+/// stale one, because the refresh job keeps it fresh and a reply should not
+/// wait for a 3 MB download. Without a copy it downloads one, but not again
+/// for a few minutes after a failure.
+pub fn daily_history_for_reply<T: DollarTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    now_unix: i64,
+    diagnostics: &mut Vec<String>,
+) -> Option<DailyHistory> {
+    if let Some((_, history)) = cached_history(cache, diagnostics) {
+        return Some(history);
+    }
+    if matches!(cache.get(FAILED_KEY), Ok(Some(_))) {
+        diagnostics.push("ArgentinaDatos dollar history failed recently".to_owned());
+        return None;
+    }
+    match download_history(transport, cache, now_unix, diagnostics) {
+        Ok(history) => Some(history),
         Err(error) => {
             diagnostics.push(error);
-            cached.map(|(_, history)| history)
+            if let Err(error) = cache.set(FAILED_KEY, "1", FAILURE_BACKOFF_SECONDS) {
+                diagnostics.push(format!(
+                    "could not write dollar cache key {FAILED_KEY}: {error}"
+                ));
+            }
+            None
+        }
+    }
+}
+
+/// Keeps the cached daily history fresh, for the price refresh job. A
+/// failed download only becomes a diagnostic (and so an admin report) when
+/// there is no copy or the copy is days old; until then it is logged.
+pub fn refresh_daily_history<T: DollarTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    now_unix: i64,
+    diagnostics: &mut Vec<String>,
+) {
+    let age =
+        cached_history(cache, diagnostics).map(|(timestamp, _)| now_unix.saturating_sub(timestamp));
+    if age.is_some_and(|age| (0..FRESH_SECONDS).contains(&age)) {
+        return;
+    }
+    if let Err(error) = download_history(transport, cache, now_unix, diagnostics) {
+        match age.filter(|age| *age < REPORT_AFTER_SECONDS) {
+            Some(age) => eprintln!("{error}; the cached copy is {}h old", age / 3_600),
+            None => diagnostics.push(error),
         }
     }
 }
@@ -176,7 +229,10 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::{HashMap, VecDeque};
 
-    use super::{CACHE_KEY, DailyHistory, baseline_day, daily_source, load_daily_history};
+    use super::{
+        CACHE_KEY, DailyHistory, FAILED_KEY, baseline_day, daily_history_for_reply, daily_source,
+        refresh_daily_history,
+    };
     use crate::bcra::parse_date;
     use crate::dollar::{DollarTransport, HttpResponse, TransportFailureKind};
     use crate::request_cache::RequestCache;
@@ -185,6 +241,7 @@ mod tests {
     struct Cache {
         values: HashMap<String, String>,
         fail_reads: bool,
+        fail_writes: bool,
     }
 
     impl RequestCache for Cache {
@@ -196,6 +253,9 @@ mod tests {
             Ok(self.values.get(key).cloned())
         }
         fn set(&mut self, key: &str, value: &str, _: i64) -> Result<(), String> {
+            if self.fail_writes {
+                return Err("synthetic write failure".to_owned());
+            }
             self.values.insert(key.to_owned(), value.to_owned());
             Ok(())
         }
@@ -255,6 +315,18 @@ mod tests {
     }
 
     #[test]
+    fn test_fakes_take_claim_and_refuse_live_rates() {
+        let mut cache = Cache::default();
+        assert_eq!(cache.claim("k", "v", 60), Ok(true));
+        assert_eq!(cache.claim("k", "v", 60), Ok(false));
+        assert_eq!(cache.take("k"), Ok(Some("v".to_owned())));
+        assert_eq!(
+            History::with(Vec::new()).get(),
+            Err(TransportFailureKind::Request)
+        );
+    }
+
+    #[test]
     fn closes_carry_forward_for_a_week_and_skip_empty_prices() -> Result<(), String> {
         let history = DailyHistory::parse_provider(BODY)?;
         assert_eq!(history.close("blue", day("2011-01-03")), Some(4.0));
@@ -290,9 +362,17 @@ mod tests {
         assert_eq!(baseline_day(now, 24 * 365), day("2025-11-19"));
     }
 
+    fn stored(cache: &Cache) -> Option<(i64, DailyHistory)> {
+        cache
+            .values
+            .get(CACHE_KEY)
+            .and_then(|raw| DailyHistory::from_cache(raw))
+    }
+
     #[test]
-    fn the_cache_is_reused_while_fresh_and_a_stale_copy_survives_failures() {
+    fn the_refresh_job_downloads_stale_copies_and_reports_only_old_ones() -> Result<(), String> {
         let now = 1_795_132_800;
+        let expected = DailyHistory::parse_provider(BODY)?;
         let transport = History::with(vec![
             ok(BODY),
             Err(TransportFailureKind::Timeout),
@@ -300,54 +380,110 @@ mod tests {
                 status_code: 503,
                 body: String::new(),
             }),
+            ok(BODY),
         ]);
         let mut cache = Cache::default();
         let mut diagnostics = Vec::new();
-        let first = load_daily_history(&transport, &mut cache, now, &mut diagnostics);
-        assert!(first.is_some());
-        assert!(cache.values.contains_key(CACHE_KEY));
-        // Fresh: no request, same data from the compact cache copy.
-        let cached = load_daily_history(&transport, &mut cache, now + 60, &mut diagnostics);
-        assert_eq!(cached, first);
-        assert_eq!(transport.calls_left(), 2);
+        refresh_daily_history(&transport, &mut cache, now, &mut diagnostics);
+        assert_eq!(stored(&cache), Some((now, expected.clone())));
+        // Fresh: no request.
+        refresh_daily_history(&transport, &mut cache, now + 3_600, &mut diagnostics);
+        assert_eq!(transport.calls_left(), 3);
+        // Stale but under two days old: the failure is only logged.
+        refresh_daily_history(&transport, &mut cache, now + 7 * 3_600, &mut diagnostics);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        // Two days old: the failure is reported.
+        refresh_daily_history(&transport, &mut cache, now + 2 * 86_400, &mut diagnostics);
+        assert_eq!(diagnostics, ["ArgentinaDatos dollar history HTTP 503"]);
+        assert_eq!(stored(&cache), Some((now, expected.clone())));
+        // A later success replaces the copy.
+        refresh_daily_history(&transport, &mut cache, now + 3 * 86_400, &mut diagnostics);
+        assert_eq!(stored(&cache), Some((now + 3 * 86_400, expected)));
+        assert_eq!(diagnostics.len(), 1);
 
-        let later = now + 7 * 3_600;
-        let stale = load_daily_history(&transport, &mut cache, later, &mut diagnostics);
-        assert_eq!(stale, first);
-        assert_eq!(
-            diagnostics,
-            ["ArgentinaDatos dollar history transport Timeout"]
-        );
-        let stale = load_daily_history(&transport, &mut cache, later, &mut diagnostics);
-        assert_eq!(stale, first);
-        assert_eq!(diagnostics[1], "ArgentinaDatos dollar history HTTP 503");
-
-        let mut broken = Cache {
-            fail_reads: true,
-            ..Cache::default()
-        };
-        let mut diagnostics = Vec::new();
-        let fetched = load_daily_history(
-            &History::with(vec![ok(BODY)]),
-            &mut broken,
-            now,
-            &mut diagnostics,
-        );
-        assert_eq!(fetched, first);
-        assert_eq!(
-            diagnostics,
-            ["could not read dollar cache key dollar_daily_history:v1: synthetic read failure"]
-        );
+        // Without a copy every failure is reported, and invalid data too.
         let mut empty = Cache::default();
         let mut diagnostics = Vec::new();
-        let invalid = load_daily_history(
+        refresh_daily_history(
             &History::with(vec![ok("not json")]),
             &mut empty,
             now,
             &mut diagnostics,
         );
-        assert_eq!(invalid, None);
         assert!(diagnostics[0].starts_with("invalid ArgentinaDatos dollar history"));
+        assert!(empty.values.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn replies_use_any_copy_and_back_off_after_a_failed_download() -> Result<(), String> {
+        let now = 1_795_132_800;
+        let expected = DailyHistory::parse_provider(BODY)?;
+        let mut cache = Cache::default();
+        let mut diagnostics = Vec::new();
+        // No copy, ArgentinaDatos down: one request, then none for a while.
+        let down = History::with(vec![Err(TransportFailureKind::Timeout), ok(BODY)]);
+        assert_eq!(
+            daily_history_for_reply(&down, &mut cache, now, &mut diagnostics),
+            None
+        );
+        assert_eq!(
+            daily_history_for_reply(&down, &mut cache, now + 60, &mut diagnostics),
+            None
+        );
+        assert_eq!(down.calls_left(), 1);
+        assert_eq!(
+            diagnostics,
+            [
+                "ArgentinaDatos dollar history transport Timeout",
+                "ArgentinaDatos dollar history failed recently",
+            ]
+        );
+
+        // Once the backoff ends, a download fills the cache.
+        cache.values.remove(FAILED_KEY);
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            daily_history_for_reply(&down, &mut cache, now, &mut diagnostics),
+            Some(expected.clone())
+        );
+        // A week-old copy still answers without a request.
+        let none = History::with(Vec::new());
+        assert_eq!(
+            daily_history_for_reply(&none, &mut cache, now + 7 * 86_400, &mut diagnostics),
+            Some(expected.clone())
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        // An unreadable cache downloads; a failed write is reported.
+        let mut broken = Cache {
+            fail_reads: true,
+            fail_writes: true,
+            ..Cache::default()
+        };
+        let fetched = daily_history_for_reply(
+            &History::with(vec![ok(BODY)]),
+            &mut broken,
+            now,
+            &mut diagnostics,
+        );
+        assert_eq!(fetched, Some(expected));
+        assert_eq!(
+            diagnostics,
+            [
+                "could not read dollar cache key dollar_daily_history:v1: synthetic read failure",
+                "could not write dollar cache key dollar_daily_history:v1: synthetic write failure",
+            ]
+        );
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            daily_history_for_reply(&none, &mut broken, now, &mut diagnostics),
+            None
+        );
+        assert_eq!(
+            diagnostics[2],
+            "could not write dollar cache key dollar_daily_history:failed: synthetic write failure"
+        );
+        Ok(())
     }
 }

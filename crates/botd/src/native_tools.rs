@@ -471,8 +471,16 @@ mod tests {
             Ok(json!({"question": "synthetic?", "options": ["a", "b"], "anonymous": true}))
         );
         assert_eq!(
-            registry.check_arguments("dollar_rates", json!({"timeframe": "6H"})),
-            Ok(json!({"timeframe": "6h"}))
+            registry.check_arguments(
+                "crypto_prices",
+                json!({"assets": ["BTC"], "timeframe": "7D"})
+            ),
+            Ok(json!({"assets": ["BTC"], "timeframe": "7d"}))
+        );
+        // Dollar periods are free text; the dollar command lowercases them.
+        assert_eq!(
+            registry.check_arguments("dollar_rates", json!({"timeframe": "10Y"})),
+            Ok(json!({"timeframe": "10Y"}))
         );
         let rejected = registry.check_arguments(
             "task_set",

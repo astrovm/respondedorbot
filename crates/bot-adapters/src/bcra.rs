@@ -1559,6 +1559,29 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 3);
 
+        // An unreadable full ITCRM copy is reported, then BCRA is asked.
+        let mut unreadable = Cache {
+            fail_gets: true,
+            ..Cache::default()
+        };
+        let mut itcrm_diagnostics = Vec::new();
+        let offline = Transport {
+            responses: RefCell::new(VecDeque::new()),
+        };
+        assert!(
+            full_itcrm_series(
+                &offline,
+                &mut unreadable,
+                1_700_000_000,
+                &mut itcrm_diagnostics
+            )
+            .is_none()
+        );
+        assert_eq!(
+            itcrm_diagnostics.first().map(String::as_str),
+            Some("could not read BCRA cache itcrm_full_history:v1: synthetic cache read failure")
+        );
+
         let mut invalid = Cache::default();
         invalid
             .values
@@ -1707,6 +1730,7 @@ mod tests {
                 "/bcra/monetarias?limit=2000",
                 "/bcra/monetarias/7?limit=20",
                 "/bcra/monetarias/8?desde=2026-09-02&hasta=2026-09-02&limit=1",
+                "/bcra/monetarias/5?desde=2016-11-10&hasta=2016-11-20&limit=1",
                 "/risk",
                 "/itcrm",
             ] {
@@ -1742,6 +1766,11 @@ mod tests {
             BcraRequest::Value {
                 id: 8,
                 date: "2026-09-02".to_owned(),
+            },
+            BcraRequest::Latest {
+                id: 5,
+                from: "2016-11-10".to_owned(),
+                to: "2016-11-20".to_owned(),
             },
             BcraRequest::CountryRisk,
             BcraRequest::Itcrm,

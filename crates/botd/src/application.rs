@@ -119,8 +119,8 @@ fn chat_is_unreachable(error: &str) -> bool {
         .any(|marker| error.contains(marker))
 }
 
-/// What the polling loop tells its reporter: a failed poll, once per
-/// distinct failure in a row, and the first success after failures.
+/// What the polling loop tells its reporter: every failed poll, and the
+/// first success after failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollHealth<'a> {
     Failed(&'a PollFailure),
@@ -143,26 +143,26 @@ where
     ReportPoll: FnMut(PollHealth<'_>),
     ReportHandler: FnMut(i64, &str),
 {
-    let mut last_poll_failure = None;
-    let recovered = |last_poll_failure: &mut Option<PollFailure>, report_poll: &mut ReportPoll| {
-        if last_poll_failure.take().is_some() {
+    let mut failing = false;
+    let recovered = |failing: &mut bool, report_poll: &mut ReportPoll| {
+        if std::mem::take(failing) {
             report_poll(PollHealth::Recovered);
         }
     };
     while !should_stop() {
         match runtime.step() {
             Ok(StepOutcome::Retry(failure)) => {
-                if last_poll_failure.as_ref() != Some(&failure) {
-                    report_poll(PollHealth::Failed(&failure));
-                }
-                last_poll_failure = Some(failure.clone());
+                // Every failure goes out, so an outage of one repeated error
+                // still reaches the reporter's time threshold.
+                report_poll(PollHealth::Failed(&failure));
+                failing = true;
                 wait(retry_delay(&failure));
             }
             Ok(StepOutcome::HandlerFailures {
                 retrying,
                 quarantined,
             }) => {
-                recovered(&mut last_poll_failure, &mut report_poll);
+                recovered(&mut failing, &mut report_poll);
                 for failure in retrying {
                     report_handler_failure(failure.update_id, &failure.error);
                 }
@@ -174,7 +174,7 @@ where
                 }
             }
             Ok(StepOutcome::Idle | StepOutcome::Dispatched { .. }) => {
-                recovered(&mut last_poll_failure, &mut report_poll);
+                recovered(&mut failing, &mut report_poll);
             }
             Err(error) => return Err(error_text(error)),
         }
@@ -197,16 +197,28 @@ fn poll_failure_is_transient(failure: &PollFailure) -> bool {
     }
 }
 
-/// Decides which polling events become admin reports. Every failure still
-/// goes to the container log.
+/// Decides which polling events become admin reports and which failures go
+/// to the container log.
 #[derive(Debug, Default)]
 struct PollOutage {
     started: Option<Instant>,
     failures: usize,
     reported: bool,
+    last_failure: Option<PollFailure>,
 }
 
 impl PollOutage {
+    /// Whether this failure differs from the one before it in this outage,
+    /// so the container log gets each failure once per change, not once per
+    /// poll.
+    fn is_new_failure(&mut self, failure: &PollFailure) -> bool {
+        if self.last_failure.as_ref() == Some(failure) {
+            return false;
+        }
+        self.last_failure = Some(failure.clone());
+        true
+    }
+
     fn observe(&mut self, health: PollHealth<'_>, now: Instant) -> Option<OperationalReport> {
         match health {
             PollHealth::Failed(failure) => {
@@ -244,6 +256,27 @@ impl PollOutage {
     }
 }
 
+/// Sends an outage report to the admin, or logs a failure the first time
+/// it shows up in a row.
+fn report_poll_health(
+    outage: &mut PollOutage,
+    reports: &BackgroundReports,
+    health: PollHealth<'_>,
+    now: Instant,
+) {
+    let new_failure = match health {
+        PollHealth::Failed(failure) => outage.is_new_failure(failure),
+        PollHealth::Recovered => false,
+    };
+    match (outage.observe(health, now), health) {
+        (Some(report), _) => log_and_queue(reports, report),
+        (None, PollHealth::Failed(failure)) if new_failure => {
+            eprintln!("{}", poll_retry_report(failure).text());
+        }
+        (None, _) => {}
+    }
+}
+
 /// Polls until a shutdown signal or `failed` asks to stop, reporting poll
 /// retries and update failures to the admin in the background.
 fn poll_until_stopped<Source, Handler>(
@@ -262,14 +295,7 @@ where
         runtime,
         || stopping.load(Ordering::Acquire) || failed(),
         |duration| interruptible_wait(stopping, duration),
-        |health| match outage.observe(health, Instant::now()) {
-            Some(report) => log_and_queue(reports, report),
-            None => {
-                if let PollHealth::Failed(failure) = health {
-                    eprintln!("{}", poll_retry_report(failure).text());
-                }
-            }
-        },
+        |health| report_poll_health(&mut outage, reports, health, Instant::now()),
         |update_id, error| log_and_queue(reports, update_failure_report(update_id, error)),
     )
 }
@@ -569,8 +595,9 @@ mod tests {
         ShutdownHandler, build_operational_reporter, configure_telegram_api, diagnostic_line,
         diagnostic_log, install_shutdown_handler, interruptible_wait, log_and_queue,
         opennode_options, poll_failure_is_transient, poll_retry_report, poll_until_stopped,
-        production_secrets, publish_commands, refresh_chat_menus, report_best_effort, retry_delay,
-        run_polling_until, telegram_transport, update_failure_report,
+        production_secrets, publish_commands, refresh_chat_menus, report_best_effort,
+        report_poll_health, retry_delay, run_polling_until, telegram_transport,
+        update_failure_report,
     };
     use crate::config::ProductionConfig;
     use crate::dispatcher::{ActionReceipt, ActionSink};
@@ -915,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn polling_retries_are_reported_once_until_a_success_resets_the_failure() {
+    fn every_failed_poll_is_reported_until_a_success_ends_the_outage() {
         let failure = PollFailure::Transport {
             failure: TransportFailureKind::Request,
         };
@@ -931,8 +958,8 @@ mod tests {
         );
         let (result, log) = poll_steps(&mut runtime, 5);
         assert_eq!(result, Ok(()));
-        // A handler-failure step also resets the retry deduplication.
-        assert_eq!(log.retries, [failure.clone(), failure]);
+        // A handler-failure step also ends the outage.
+        assert_eq!(log.retries, [failure.clone(), failure.clone(), failure]);
         assert_eq!(log.recoveries, 1);
         assert_eq!(log.waits.len(), 3);
         assert_eq!(log.failures, [(5, "synthetic handler failure".to_owned())]);
@@ -978,6 +1005,51 @@ mod tests {
             Some("Telegram polling recovered after 210s")
         );
         assert_eq!(outage.observe(PollHealth::Recovered, at(320)), None);
+    }
+
+    #[test]
+    fn an_outage_of_one_repeated_failure_is_reported_and_logged_once() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let bad_gateway = PollFailure::Http { status_code: 502 };
+        let timeout = PollFailure::Transport {
+            failure: TransportFailureKind::Timeout,
+        };
+        let mut outage = PollOutage::default();
+        let mut logged = Vec::new();
+        let mut reports = Vec::new();
+        let polls = [
+            (0, &bad_gateway),
+            (60, &bad_gateway),
+            (125, &bad_gateway),
+            (130, &bad_gateway),
+            (135, &timeout),
+        ];
+        for (seconds, failure) in polls {
+            if outage.is_new_failure(failure) {
+                logged.push(seconds);
+            }
+            reports.extend(
+                outage
+                    .observe(PollHealth::Failed(failure), at(seconds))
+                    .map(|report| report.text().to_owned()),
+            );
+        }
+        reports.extend(
+            outage
+                .observe(PollHealth::Recovered, at(140))
+                .map(|report| report.text().to_owned()),
+        );
+        assert_eq!(logged, [0, 135]);
+        assert_eq!(
+            reports,
+            [
+                "Telegram polling has failed for 125s (3 failures in a row), last: Http { status_code: 502 }",
+                "Telegram polling recovered after 140s",
+            ]
+        );
+        // A new outage logs its first failure again.
+        assert!(outage.is_new_failure(&bad_gateway));
     }
 
     #[test]
@@ -1297,6 +1369,42 @@ mod tests {
                     "Telegram polling retry: Conflict",
                 ]
         }));
+    }
+
+    #[test]
+    fn poll_health_reaches_the_admin_only_for_lasting_or_fatal_failures() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+        impl OperationalReporter for Recorder {
+            fn report(&self, report: &OperationalReport) -> Result<(), String> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(report.text().to_owned());
+                Ok(())
+            }
+        }
+        let start = Instant::now();
+        let bad_gateway = PollFailure::Http { status_code: 502 };
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let mut reports = BackgroundReports::start(recorder.clone(), 4);
+        let mut outage = PollOutage::default();
+        // A short outage of one repeated failure and its end: logs only.
+        for health in [
+            PollHealth::Failed(&bad_gateway),
+            PollHealth::Failed(&bad_gateway),
+            PollHealth::Recovered,
+            PollHealth::Failed(&PollFailure::Conflict),
+        ] {
+            report_poll_health(&mut outage, &reports, health, start);
+        }
+        reports.shutdown();
+        assert!(
+            recorder
+                .0
+                .lock()
+                .is_ok_and(|delivered| *delivered == ["Telegram polling retry: Conflict"])
+        );
     }
 
     fn signal_now(mut handler: ShutdownHandler) -> Result<(), ctrlc::Error> {
