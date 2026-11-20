@@ -91,10 +91,9 @@ impl RedisMessageState {
         Ok(redis::cmd("GET").arg(key).query(&mut connection)?)
     }
 
-    /// Reads and deletes `key` in one step, so only one reader gets it.
-    pub fn take_value(&self, key: &str) -> Result<Option<String>, RedisMessageStateError> {
+    pub fn delete_value(&self, key: &str) -> Result<(), RedisMessageStateError> {
         let mut connection = self.client.get_connection()?;
-        Ok(redis::cmd("GETDEL").arg(key).query(&mut connection)?)
+        Ok(redis::cmd("DEL").arg(key).query(&mut connection)?)
     }
 
     pub fn set_value(
@@ -442,10 +441,8 @@ mod tests {
             reader
                 .get_mut()
                 .write_all(b"*4\r\n$1\r\n8\r\n$8\r\nmember-8\r\n$1\r\n7\r\n$8\r\nmember-7\r\n")?;
-            assert_eq!(read_command_from(&mut reader)?, ["GETDEL", "reply:1"]);
-            reader.get_mut().write_all(b"$5\r\nhello\r\n")?;
-            assert_eq!(read_command_from(&mut reader)?, ["GETDEL", "reply:1"]);
-            reader.get_mut().write_all(b"$-1\r\n")?;
+            assert_eq!(read_command_from(&mut reader)?, ["DEL", "reply:1"]);
+            reader.get_mut().write_all(b":1\r\n")?;
             Ok(())
         });
         let state = RedisMessageState::new(&RedisEndpoint {
@@ -481,8 +478,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(state.take_value("reply:1")?, Some("hello".to_owned()));
-        assert_eq!(state.take_value("reply:1")?, None);
+        state.delete_value("reply:1")?;
 
         server
             .join()

@@ -23,6 +23,9 @@ const AI_REPLY: &str = "Respuesta sintética del modelo";
 /// A message with this text makes the fake model call `calculate` first.
 const TOOL_PROMPT: &str = "e2e tool check";
 const TOOL_REPLY_PREFIX: &str = "La herramienta devolvió ";
+/// A message with this text makes the fake model call `create_poll` first.
+const POLL_PROMPT: &str = "e2e poll check";
+const POLL_REPLY: &str = "Listo, ahí va la encuesta";
 const STARTING_CREDITS: i32 = 1_000;
 
 #[derive(Debug, Clone)]
@@ -37,6 +40,11 @@ struct FakeState {
     pending_updates: Mutex<VecDeque<Value>>,
     next_message_id: AtomicI64,
     stopping: AtomicBool,
+    /// The next Telegram send or edit with each of these texts fails once
+    /// with a 500.
+    fail_once: Mutex<Vec<String>>,
+    /// Each request that failed on purpose, as its path and text.
+    failed: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeState {
@@ -154,10 +162,28 @@ fn serve_connection(stream: TcpStream, state: &FakeState) {
             body: body.clone(),
         });
     }
-    let (content_type, response) = route(&path, &body, state);
+    let failed = state.fail_once.lock().is_ok_and(|mut fail| {
+        let position = fail.iter().position(|text| body["text"] == text.as_str());
+        position.map(|index| fail.remove(index)).is_some()
+    });
+    if failed && let Ok(mut log) = state.failed.lock() {
+        let text = body["text"].as_str().unwrap_or_default().to_owned();
+        log.push((path.split('?').next().unwrap_or_default().to_owned(), text));
+    }
+    let (status, content_type, response) = if failed {
+        let error = json!({"ok": false, "error_code": 500, "description": "Internal Server Error"});
+        (
+            "500 Internal Server Error",
+            "application/json",
+            error.to_string(),
+        )
+    } else {
+        let (content_type, response) = route(&path, &body, state);
+        ("200 OK", content_type, response)
+    };
     let _result = write!(
         writer,
-        "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
         response.len()
     );
     let _result = writer.flush();
@@ -220,6 +246,7 @@ fn telegram_response(method: &str, body: &Value, state: &FakeState) -> String {
                 "from": {"id": 424_242, "is_bot": true, "first_name": "Synthetic",
                     "username": BOT_USERNAME},
                 "text": body["text"],
+                "poll": (method == "sendPoll").then(|| json!({"id": format!("poll-{message_id}")})),
             })
         }
         _ => json!(true),
@@ -230,11 +257,26 @@ fn telegram_response(method: &str, body: &Value, state: &FakeState) -> String {
 fn openrouter_completion(body: &Value) -> (&'static str, String) {
     let usage = json!({"prompt_tokens": 12, "completion_tokens": 6, "cost": 0.000_01});
     let messages = body["messages"].as_array().cloned().unwrap_or_default();
-    if messages
+    // Only this turn counts: the history still holds earlier prompts.
+    let turn = messages
         .iter()
-        .any(|message| message["content"].to_string().contains(TOOL_PROMPT))
-    {
-        return tool_round(&messages, &usage);
+        .rposition(|message| message["role"] == "user")
+        .map_or(&messages[..], |start| &messages[start..]);
+    let asks = |prompt: &str| {
+        turn.first()
+            .is_some_and(|message| message["content"].to_string().contains(prompt))
+    };
+    if asks(TOOL_PROMPT) {
+        let call = json!({"name": "calculate", "arguments": r#"{"expression":"21 * 2"}"#});
+        return tool_round(turn, &usage, &call, |output| {
+            format!("{TOOL_REPLY_PREFIX}{output}")
+        });
+    }
+    if asks(POLL_PROMPT) {
+        let arguments =
+            json!({"question": "¿Pizza o empanadas?", "options": ["Pizza", "Empanadas"]});
+        let call = json!({"name": "create_poll", "arguments": arguments.to_string()});
+        return tool_round(turn, &usage, &call, |_| POLL_REPLY.to_owned());
     }
     if body["stream"] == true {
         let chunk = json!({"id": "synthetic-generation", "model": "synthetic/model",
@@ -255,8 +297,13 @@ fn openrouter_completion(body: &Value) -> (&'static str, String) {
     )
 }
 
-/// First asks for `calculate`, then answers with what the tool returned.
-fn tool_round(messages: &[Value], usage: &Value) -> (&'static str, String) {
+/// First asks for the tool `call`, then answers with `reply` of what it returned.
+fn tool_round(
+    messages: &[Value],
+    usage: &Value,
+    call: &Value,
+    reply: impl FnOnce(&str) -> String,
+) -> (&'static str, String) {
     let tool_output = messages
         .iter()
         .find(|message| message["role"] == "tool")
@@ -264,9 +311,9 @@ fn tool_round(messages: &[Value], usage: &Value) -> (&'static str, String) {
     let delta = tool_output.map_or_else(
         || {
             json!({"tool_calls": [{"index": 0, "id": "call-e2e", "type": "function",
-                "function": {"name": "calculate", "arguments": r#"{"expression":"21 * 2"}"#}}]})
+                "function": call}]})
         },
-        |output| json!({"content": format!("{TOOL_REPLY_PREFIX}{output}")}),
+        |output| json!({"content": reply(output)}),
     );
     let finish = if tool_output.is_some() {
         "stop"
@@ -614,6 +661,64 @@ fn exercise_main_flows(
             .iter()
             .any(|text| text == &format!("{TOOL_REPLY_PREFIX}42"))
     })?;
+
+    // When Telegram fails to take the reply after a poll, the retry sends the
+    // same reply again. It does not run the model or send a second poll, and
+    // it does not report missing credits for the already paid answer. Like
+    // the real failure, the status message fails first, so the reply is a
+    // new message and its failure fails the whole update.
+    if let Ok(mut fail) = server.state.fail_once.lock() {
+        *fail = vec!["Pensando.".to_owned(), POLL_REPLY.to_owned()];
+    }
+    let requests_before = server.state.requests().len();
+    server.queue_update(private_message(
+        first_update + 6,
+        user_id,
+        &format!("/ask {POLL_PROMPT}"),
+    ));
+    server.wait_for("the poll reply after a failed send", |state| {
+        state.fail_once.lock().is_ok_and(|fail| fail.is_empty())
+            && state
+                .sent_texts(user_id)
+                .iter()
+                .filter(|text| *text == POLL_REPLY)
+                .count()
+                >= 2
+    })?;
+    // Give a wrong second run time to show up.
+    thread::sleep(Duration::from_secs(3));
+    let failed = server
+        .state
+        .failed
+        .lock()
+        .map(|failed| failed.clone())
+        .unwrap_or_default();
+    let send = format!("/bot{TOKEN}/sendMessage");
+    assert_eq!(
+        failed,
+        [
+            (send.clone(), "Pensando.".to_owned()),
+            (send, POLL_REPLY.to_owned())
+        ]
+    );
+    let polls = server.state.telegram_calls("sendPoll");
+    assert_eq!(polls.len(), 1, "{polls:#?}");
+    let poll_rounds = server.state.requests()[requests_before..]
+        .iter()
+        .filter(|request| request.path.ends_with("/chat/completions"))
+        .filter(|request| request.body["messages"].to_string().contains(POLL_PROMPT))
+        .count();
+    assert_eq!(
+        poll_rounds, 2,
+        "one call for the tool and one for the reply"
+    );
+    assert!(
+        server
+            .state
+            .sent_texts(user_id)
+            .iter()
+            .all(|text| !text.contains("seco de créditos") && !text.contains("secos de créditos"))
+    );
 
     server.state.stopping.store(true, Ordering::SeqCst);
     stop_bot(bot)

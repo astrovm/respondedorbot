@@ -138,6 +138,9 @@ pub struct AiDelivery {
     pub completion_id: String,
     pub delivered: bool,
     pub sent_message_id: Option<MessageId>,
+    /// The update fails and is retried, so an undelivered reply is kept for
+    /// the retry to send. A send without a message id is not retried.
+    pub retry: bool,
 }
 
 /// The implementation may reserve credits during `prepare`, but must not treat
@@ -414,6 +417,7 @@ mod tests {
                     completion_id: "synthetic-completion".to_owned(),
                     delivered: true,
                     sent_message_id: Some(MessageId(3)),
+                    retry: false,
                 })
                 .is_ok()
         );
@@ -455,6 +459,7 @@ mod tests {
                 completion_id: "gen-1".to_owned(),
                 delivered: true,
                 sent_message_id: Some(MessageId(5)),
+                retry: false,
             }),
             Ok(())
         );

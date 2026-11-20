@@ -270,9 +270,15 @@ impl ConversationState for RedisConversationState {
             .map_err(error_text)
     }
 
-    fn take_undelivered_reply(&mut self, operation_id: &str) -> Result<Option<String>, String> {
+    fn load_undelivered_reply(&mut self, operation_id: &str) -> Result<Option<String>, String> {
         self.state
-            .take_value(&undelivered_reply_key(operation_id))
+            .get_value(&undelivered_reply_key(operation_id))
+            .map_err(error_text)
+    }
+
+    fn clear_undelivered_reply(&mut self, operation_id: &str) -> Result<(), String> {
+        self.state
+            .delete_value(&undelivered_reply_key(operation_id))
             .map_err(error_text)
     }
 
@@ -645,6 +651,37 @@ impl PostgresConversationBilling {
             None => cached_source,
         };
         let mut result = self.charge_reservation(&request, amount, requested_source)?;
+        // A retry of a message that the hourly cap denied shows that denial
+        // again: the first attempt failed to send it.
+        if result.reason.as_deref() == Some("reservation_capped") {
+            return Ok((
+                ReserveDecision {
+                    authorized: false,
+                    user_balance: result.user_balance,
+                    chat_balance: result.chat_balance,
+                    source: None,
+                    denial: Some(ReserveDenial::CreditlessHourlyCap {
+                        limit: request.creditless_user_hourly_limit,
+                    }),
+                },
+                result.reason,
+            ));
+        }
+        // A retried update reserves again under the same operation. Billing
+        // refuses it once the first attempt settled or refunded it; that is
+        // not a shortfall, and no payer fallback may touch it.
+        if crate::native_ai::already_settled(result.reason.as_deref()) {
+            return Ok((
+                ReserveDecision {
+                    authorized: false,
+                    user_balance: result.user_balance,
+                    chat_balance: result.chat_balance,
+                    source: None,
+                    denial: Some(ReserveDenial::AlreadySettled),
+                },
+                result.reason,
+            ));
+        }
         if group_first_chat.is_some() && !result.ok {
             if requested_source == Some("user") {
                 // The member used up what the group pays for this hour and
@@ -782,17 +819,13 @@ impl PostgresConversationBilling {
                 active_operations.mark_active(&request.operation_id);
             }
         }
-        // A retried update reserves again under the same operation. Billing
-        // refuses it once the first attempt settled or refunded it; that is
-        // not a shortfall.
-        let settled = crate::native_ai::already_settled(result.reason.as_deref());
         Ok((
             ReserveDecision {
                 authorized: result.ok,
                 user_balance: result.user_balance,
                 chat_balance: result.chat_balance,
                 source,
-                denial: settled.then_some(ReserveDenial::AlreadySettled),
+                denial: None,
             },
             result.reason,
         ))
@@ -1207,10 +1240,11 @@ mod tests {
         let operation = format!("ai:{chat_id}:2:88");
         state.save_undelivered_reply(&operation, "saved reply")?;
         assert_eq!(
-            state.take_undelivered_reply(&operation)?,
+            state.load_undelivered_reply(&operation)?,
             Some("saved reply".to_owned())
         );
-        assert_eq!(state.take_undelivered_reply(&operation)?, None);
+        state.clear_undelivered_reply(&operation)?;
+        assert_eq!(state.load_undelivered_reply(&operation)?, None);
         let spanish = conversation_input(chat_id, 2, Locale::Es);
         state.record_incoming(&spanish)?;
         let notes = ["task_set {} → created".to_owned()];
@@ -1704,7 +1738,8 @@ mod tests {
             state.record_incoming(&input).err(),
             state.record_outgoing(&input, Some(3), "reply", &[]).err(),
             state.save_undelivered_reply("ai:-100:2:88", "reply").err(),
-            state.take_undelivered_reply("ai:-100:2:88").err(),
+            state.load_undelivered_reply("ai:-100:2:88").err(),
+            state.clear_undelivered_reply("ai:-100:2:88").err(),
         ];
         for failure in failures {
             assert!(
@@ -1868,6 +1903,15 @@ mod tests {
         );
         assert_eq!(denied.chat_balance, 500);
         assert!(!billing.payer_by_operation.contains_key(&blocked));
+        // A retry, after the denial failed to send, is denied the same way
+        // and charges nothing.
+        let retried = billing.reserve(request(&blocked, "first", 400, 0))?;
+        assert!(!retried.authorized);
+        assert_eq!(
+            retried.denial,
+            Some(ReserveDenial::CreditlessHourlyCap { limit: 0 })
+        );
+        assert_eq!(retried.chat_balance, 500);
 
         // A cap that cannot be reached fails the reservation.
         let mut unreachable_cap = PostgresConversationBilling::new(&database_url)
@@ -2019,6 +2063,19 @@ mod tests {
             before_settlement + 50
         );
         assert_eq!(repository.get_balance("chat", chat_id)?, 840);
+
+        // A retried update reserves the settled message again. Under or at
+        // the hourly limit, it is refused as already settled, and no payer
+        // fallback refunds the hourly count or charges anyone.
+        let settled_user = repository.get_balance("user", mover)?;
+        for limit in [5, 0] {
+            let replay = billing.reserve(request(mover, &moved_op, 800, limit))?;
+            assert!(!replay.authorized);
+            assert_eq!(replay.denial, Some(ReserveDenial::AlreadySettled));
+            assert_eq!(used(mover)?, Some(0));
+            assert_eq!(repository.get_balance("user", mover)?, settled_user);
+            assert_eq!(repository.get_balance("chat", chat_id)?, 840);
+        }
 
         // When the member can't cover it either, the group keeps its hold.
         let stuck_op = format!("synthetic-stuck:{nonce}");

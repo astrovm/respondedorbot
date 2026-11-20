@@ -90,8 +90,12 @@ pub trait ConversationState {
     /// update can send it without running the model and its tools again.
     fn save_undelivered_reply(&mut self, operation_id: &str, reply: &str) -> Result<(), String>;
 
-    /// Removes and returns the reply an earlier attempt could not deliver.
-    fn take_undelivered_reply(&mut self, operation_id: &str) -> Result<Option<String>, String>;
+    /// Returns the reply an earlier attempt could not deliver. It stays
+    /// saved until a resend ends, so a crash during the resend loses nothing.
+    fn load_undelivered_reply(&mut self, operation_id: &str) -> Result<Option<String>, String>;
+
+    /// Removes a saved reply once it needs no further resend.
+    fn clear_undelivered_reply(&mut self, operation_id: &str) -> Result<(), String>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,7 +448,7 @@ where
         operation_id: &str,
         input: &AiConversationInput,
     ) -> Option<AiPreparation> {
-        let saved = match self.state.take_undelivered_reply(operation_id) {
+        let saved = match self.state.load_undelivered_reply(operation_id) {
             Ok(saved) => saved?,
             Err(error) => {
                 eprintln!("AI undelivered reply read failed operation={operation_id}: {error}");
@@ -453,6 +457,8 @@ where
         };
         let Ok(reply) = serde_json::from_str::<UndeliveredReply>(&saved) else {
             eprintln!("AI undelivered reply is invalid operation={operation_id}");
+            // The normal path answers instead and saves a new reply if needed.
+            let _cleared = self.state.clear_undelivered_reply(operation_id);
             return None;
         };
         let text = reply.text.clone();
@@ -488,10 +494,14 @@ where
         delivery: &AiDelivery,
         redelivery: &Redelivery,
     ) -> Result<(), String> {
-        if !delivery.delivered {
-            return self.save_undelivered(&delivery.completion_id, &redelivery.reply);
+        if !delivery.delivered && delivery.retry {
+            // Still saved for the next retry.
+            return Ok(());
         }
-        if redelivery.reply.record {
+        // Cleared first: a reply in the history must not be sent again.
+        self.state
+            .clear_undelivered_reply(&delivery.completion_id)?;
+        if delivery.delivered && redelivery.reply.record {
             self.state.record_outgoing(
                 &redelivery.input,
                 delivery.sent_message_id.map(|id| id.0),
@@ -1792,7 +1802,7 @@ where
                 provider_failed: false,
             } => false,
         };
-        record_and_settle_with_actual(
+        let settled = record_and_settle_with_actual(
             &mut self.billing,
             &pending.input,
             &delivery.completion_id,
@@ -1800,7 +1810,7 @@ where
             delivery.delivered,
             reason,
             waive_charge.then_some(0),
-        )?;
+        );
         // Error and fallback replies stay out of the history, so the model
         // never reads them back as something it said. A tool's own
         // confirmation is the exception: it is true, and without it a later
@@ -1812,9 +1822,14 @@ where
             PendingKind::MediaCommand | PendingKind::SummaryCommand { .. } => false,
         };
         if !delivery.delivered {
+            if !delivery.retry {
+                return settled;
+            }
             // The update is retried, and the retry sends this reply instead
-            // of running the model and its tools again.
-            return self.save_undelivered(
+            // of running the model and its tools again. It is saved even when
+            // billing failed, because a retry that runs again could repeat
+            // tools such as polls.
+            let saved = self.save_undelivered(
                 &delivery.completion_id,
                 &UndeliveredReply {
                     text: pending.text,
@@ -1822,7 +1837,9 @@ where
                     tool_notes: pending.tool_notes,
                 },
             );
+            return settled.and(saved);
         }
+        settled?;
         if record {
             self.state.record_outgoing(
                 &pending.input,
@@ -2739,6 +2756,7 @@ mod tests {
         outgoing_error: Option<String>,
         undelivered: HashMap<String, String>,
         undelivered_error: Option<String>,
+        clear_error: Option<String>,
     }
 
     impl ConversationState for State {
@@ -2799,11 +2817,19 @@ mod tests {
             Ok(())
         }
 
-        fn take_undelivered_reply(&mut self, operation_id: &str) -> Result<Option<String>, String> {
+        fn load_undelivered_reply(&mut self, operation_id: &str) -> Result<Option<String>, String> {
             if let Some(error) = &self.undelivered_error {
                 return Err(error.clone());
             }
-            Ok(self.undelivered.remove(operation_id))
+            Ok(self.undelivered.get(operation_id).cloned())
+        }
+
+        fn clear_undelivered_reply(&mut self, operation_id: &str) -> Result<(), String> {
+            if let Some(error) = &self.clear_error {
+                return Err(error.clone());
+            }
+            self.undelivered.remove(operation_id);
+            Ok(())
         }
     }
 
@@ -3110,6 +3136,7 @@ mod tests {
             completion_id,
             delivered,
             sent_message_id: delivered.then_some(MessageId(99)),
+            retry: !delivered,
         }
     }
 
@@ -3133,6 +3160,7 @@ mod tests {
                 completion_id: completion_id.clone(),
                 delivered: true,
                 sent_message_id: Some(MessageId(99)),
+                retry: false,
             }),
             Ok(())
         );
@@ -3148,6 +3176,7 @@ mod tests {
                 completion_id,
                 delivered: true,
                 sent_message_id: Some(MessageId(99)),
+                retry: false,
             }),
             Ok(())
         );
@@ -3222,7 +3251,7 @@ mod tests {
             let mut request = input();
             request.spontaneous = spontaneous;
 
-            let preparation = service.prepare(request);
+            let preparation = service.prepare(request.clone());
 
             assert!(matches!(
                 preparation,
@@ -3240,13 +3269,20 @@ mod tests {
             );
 
             // The confirmation is true, so the history keeps it and the call
-            // behind it even though the model never answered.
+            // behind it even though the model never answered. That holds
+            // for a confirmation resent after a failed delivery too.
             let (_, completion_id, _) = pending(reply(preparation));
+            assert_eq!(
+                service.complete_delivery(deliver(completion_id, false)),
+                Ok(())
+            );
+            let (_, completion_id, _) = pending(reply(service.prepare(request)));
             assert_eq!(
                 service.complete_delivery(AiDelivery {
                     completion_id,
                     delivered: true,
                     sent_message_id: Some(MessageId(77)),
+                    retry: false,
                 }),
                 Ok(())
             );
@@ -3335,6 +3371,7 @@ mod tests {
                     completion_id,
                     delivered: true,
                     sent_message_id: Some(MessageId(99)),
+                    retry: false,
                 })
                 .is_ok()
         );
@@ -3372,6 +3409,7 @@ mod tests {
                             completion_id,
                             delivered: true,
                             sent_message_id: Some(MessageId(99)),
+                            retry: false,
                         })
                         .is_ok()
                 );
@@ -3478,6 +3516,7 @@ mod tests {
                     completion_id: completion_id.clone(),
                     delivered: true,
                     sent_message_id: Some(MessageId(99)),
+                    retry: false,
                 })
                 .is_err()
         );
@@ -3491,6 +3530,7 @@ mod tests {
                     completion_id: completion_id.clone(),
                     delivered: true,
                     sent_message_id: Some(MessageId(99)),
+                    retry: false,
                 })
                 .is_ok()
         );
@@ -3510,6 +3550,7 @@ mod tests {
                     completion_id: completion_id.clone(),
                     delivered: true,
                     sent_message_id: Some(MessageId(99)),
+                    retry: false,
                 })
                 .is_err()
         );
@@ -3536,6 +3577,7 @@ mod tests {
             completion_id,
             delivered: true,
             sent_message_id: Some(MessageId(99)),
+            retry: false,
         })?;
         let scheduled = scheduled.borrow();
         assert_eq!(scheduled.len(), 1);
@@ -3654,6 +3696,7 @@ mod tests {
                 completion_id,
                 delivered: true,
                 sent_message_id: Some(MessageId(99)),
+                retry: false,
             }),
             Ok(())
         );
@@ -3686,6 +3729,7 @@ mod tests {
                 completion_id,
                 delivered: true,
                 sent_message_id: Some(MessageId(99)),
+                retry: false,
             }),
             Ok(())
         );
@@ -3751,6 +3795,7 @@ mod tests {
                         completion_id,
                         delivered: true,
                         sent_message_id: Some(MessageId(99)),
+                        retry: false,
                     })
                     .is_ok()
             );
@@ -4039,6 +4084,7 @@ mod tests {
                     completion_id,
                     delivered: false,
                     sent_message_id: None,
+                    retry: false,
                 })
                 .is_ok()
         );
@@ -4192,6 +4238,7 @@ mod tests {
                     completion_id,
                     delivered: true,
                     sent_message_id: Some(MessageId(99)),
+                    retry: false,
                 })
                 .is_ok()
         );
@@ -4231,6 +4278,7 @@ mod tests {
                     completion_id,
                     delivered: true,
                     sent_message_id: Some(MessageId(99)),
+                    retry: false,
                 })
                 .is_ok()
         );
@@ -4316,13 +4364,26 @@ mod tests {
             assert!(
                 service
                     .complete_delivery(AiDelivery {
-                        completion_id,
+                        completion_id: completion_id.clone(),
                         delivered,
                         sent_message_id: Some(MessageId(99)),
+                        retry: !delivered,
                     })
                     .is_ok()
             );
             assert_eq!(service.billing.settlements[0].reason, expected_reason);
+            // An undelivered reply is kept for the retry. Only a chat reply
+            // joins the history once it is resent.
+            let saved = service.state.undelivered.get(&completion_id);
+            assert_eq!(saved.is_some(), !delivered);
+            if let Some(saved) = saved {
+                let saved: UndeliveredReply = serde_json::from_str(saved).must();
+                assert_eq!(saved.text, "synthetic output");
+                assert_eq!(
+                    saved.record,
+                    matches!(kind, PendingKind::Conversation { .. })
+                );
+            }
             if matches!(
                 kind,
                 PendingKind::SummaryCommand {
@@ -4540,6 +4601,7 @@ mod tests {
                 completion_id,
                 delivered: true,
                 sent_message_id: Some(MessageId(99)),
+                retry: false,
             })
             .err()
             .unwrap_or_default();
@@ -4663,6 +4725,83 @@ mod tests {
     }
 
     #[test]
+    fn a_send_that_is_not_retried_keeps_no_reply() {
+        // Telegram took the send but gave no message id. Nothing retries the
+        // update, so a saved reply would only wait to be sent twice.
+        let unconfirmed = |completion_id| AiDelivery {
+            completion_id,
+            delivered: false,
+            sent_message_id: None,
+            retry: false,
+        };
+        let mut service = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing::default(),
+        );
+        let (_, completion_id, _) = pending(reply(service.prepare(input())));
+        assert_eq!(
+            service.complete_delivery(unconfirmed(completion_id)),
+            Ok(())
+        );
+        assert!(service.state.undelivered.is_empty());
+        assert_eq!(service.billing.settlements.len(), 1);
+
+        let saved = serde_json::to_string(&UndeliveredReply {
+            text: "saved answer".to_owned(),
+            record: true,
+            tool_notes: Vec::new(),
+        })
+        .must();
+        service
+            .state
+            .undelivered
+            .insert("ai:42:7:88".to_owned(), saved.clone());
+        let (_, completion_id, _) = pending(reply(service.prepare(input())));
+        assert_eq!(
+            service.complete_delivery(unconfirmed(completion_id)),
+            Ok(())
+        );
+        assert!(service.state.undelivered.is_empty());
+        assert!(service.state.outgoing.is_empty());
+
+        // A delivered resend that cannot clear its saved copy reports it and
+        // stays out of the history, so a replay cannot add it twice.
+        service
+            .state
+            .undelivered
+            .insert("ai:42:7:88".to_owned(), saved);
+        service.state.clear_error = Some("synthetic clear failure".to_owned());
+        let (_, completion_id, _) = pending(reply(service.prepare(input())));
+        assert_eq!(
+            service.complete_delivery(deliver(completion_id, true)),
+            Err("synthetic clear failure".to_owned())
+        );
+        assert!(service.state.outgoing.is_empty());
+    }
+
+    #[test]
+    fn a_reply_is_saved_even_when_its_billing_fails() {
+        let mut service = conversation(
+            vec![Ok(round("synthetic answer", None))],
+            Billing {
+                settlement_failure: true,
+                ..Billing::default()
+            },
+        );
+        let (text, completion_id, _) = pending(reply(service.prepare(input())));
+        assert!(
+            service
+                .complete_delivery(deliver(completion_id, false))
+                .is_err()
+        );
+        // The retry resends the reply instead of running the model and its
+        // tools again.
+        let (resent, _, _) = pending(reply(service.prepare(input())));
+        assert_eq!(resent, text);
+        assert_eq!(service.provider.prompts.borrow().len(), 1);
+    }
+
+    #[test]
     fn an_already_settled_retry_ends_silently_instead_of_reporting_no_credits() {
         let settled = ReserveDecision {
             authorized: false,
@@ -4726,6 +4865,7 @@ mod tests {
                 completion_id,
                 delivered: true,
                 sent_message_id: Some(MessageId(99)),
+                retry: false,
             }),
             Ok(())
         );
@@ -4756,6 +4896,7 @@ mod tests {
                 completion_id,
                 delivered: true,
                 sent_message_id: Some(MessageId(99)),
+                retry: false,
             }),
             Ok(())
         );
@@ -4797,6 +4938,7 @@ mod tests {
                 completion_id,
                 delivered: true,
                 sent_message_id: Some(MessageId(99)),
+                retry: false,
             }),
             Ok(())
         );
@@ -5104,6 +5246,7 @@ mod tests {
                 completion_id,
                 delivered: false,
                 sent_message_id: None,
+                retry: false,
             }),
             Ok(())
         );
@@ -6231,6 +6374,26 @@ mod tests {
         );
         assert_eq!(service.billing.settlements[0].reason, "ai_response_success");
         assert_eq!(service.state.outgoing.len(), 1);
+
+        // A resent reply reports the same failure without touching billing.
+        let saved = serde_json::to_string(&UndeliveredReply {
+            text: "saved answer".to_owned(),
+            record: true,
+            tool_notes: Vec::new(),
+        })
+        .must();
+        service
+            .state
+            .undelivered
+            .insert("ai:42:7:88".to_owned(), saved);
+        let (text, completion_id, _) = pending(reply(service.prepare(input())));
+        assert_eq!(text, "saved answer");
+        assert_eq!(
+            service.complete_delivery(deliver(completion_id, true)),
+            Err("synthetic history failure".to_owned())
+        );
+        assert_eq!(service.billing.settlements.len(), 1);
+        assert_eq!(service.state.outgoing.len(), 2);
     }
 
     #[test]
