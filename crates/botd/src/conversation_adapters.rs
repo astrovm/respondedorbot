@@ -666,6 +666,7 @@ impl PostgresConversationBilling {
                 .ai_operation_settled(request.user_id, &request.operation_id)
                 .map_err(error_text)?
         {
+            self.release_operation_state(&request.operation_id);
             return Ok((already_settled(0, 0), Some("operation_settled".to_owned())));
         }
         let requested_source = match group_first_chat {
@@ -676,6 +677,7 @@ impl PostgresConversationBilling {
         // A retry of a message that the hourly cap denied shows that denial
         // again: the first attempt failed to send it.
         if result.reason.as_deref() == Some("reservation_capped") {
+            self.release_operation_state(&request.operation_id);
             return Ok((
                 ReserveDecision {
                     authorized: false,
@@ -693,6 +695,7 @@ impl PostgresConversationBilling {
         // refuses it once the first attempt settled or refunded it; that is
         // not a shortfall, and no payer fallback may touch it.
         if crate::native_ai::already_settled(result.reason.as_deref()) {
+            self.release_operation_state(&request.operation_id);
             return Ok((
                 already_settled(result.user_balance, result.chat_balance),
                 result.reason,
@@ -1143,6 +1146,16 @@ mod tests {
         ConversationBilling, ConversationState, ReserveDenial, ReserveRequest, SettlementRequest,
     };
     use crate::reconciliation::ActiveOperationRegistry;
+
+    /// A refused replay keeps nothing for an operation that already ended.
+    fn holds_no_operation_state(billing: &PostgresConversationBilling, operation_id: &str) -> bool {
+        !billing.payer_by_operation.contains_key(operation_id)
+            && !billing.held_by_operation.contains_key(operation_id)
+            && !billing.onboarding_checked_operations.contains(operation_id)
+            && !billing.cap_checked_operations.contains(operation_id)
+            && !billing.cap_key_by_operation.contains_key(operation_id)
+            && !billing.active_marked_operations.contains(operation_id)
+    }
 
     #[test]
     fn charge_metadata_keeps_the_pricing_details_and_nothing_else() {
@@ -1656,6 +1669,7 @@ mod tests {
         let replay = billing.reserve(user_reserve(user_id, &paid_operation, "first", 100))?;
         assert!(!replay.authorized);
         assert_eq!(replay.denial, Some(ReserveDenial::AlreadySettled));
+        assert!(holds_no_operation_state(&billing, &paid_operation));
         Ok(())
     }
 
@@ -1928,6 +1942,7 @@ mod tests {
             Some(ReserveDenial::CreditlessHourlyCap { limit: 0 })
         );
         assert_eq!(retried.chat_balance, 500);
+        assert!(holds_no_operation_state(&billing, &blocked));
 
         // A cap that cannot be reached fails the reservation.
         let mut unreachable_cap = PostgresConversationBilling::new(&database_url)
@@ -2088,6 +2103,7 @@ mod tests {
             let replay = billing.reserve(request(mover, &moved_op, 800, limit))?;
             assert!(!replay.authorized);
             assert_eq!(replay.denial, Some(ReserveDenial::AlreadySettled));
+            assert!(holds_no_operation_state(&billing, &moved_op));
             assert_eq!(used(mover)?, Some(0));
             assert_eq!(repository.get_balance("user", mover)?, settled_user);
             assert_eq!(repository.get_balance("chat", chat_id)?, 840);

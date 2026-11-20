@@ -138,8 +138,10 @@ pub struct AiDelivery {
     pub completion_id: String,
     pub delivered: bool,
     pub sent_message_id: Option<MessageId>,
-    /// The update fails and is retried, so an undelivered reply is kept for
-    /// the retry to send. A send without a message id is not retried.
+    /// The send failed and the update fails with it, so an undelivered reply
+    /// is kept for a retry to send. The runtime drops the update instead on a
+    /// permanent failure; the kept reply then expires unsent. A send without
+    /// a message id is not retried.
     pub retry: bool,
 }
 

@@ -478,6 +478,40 @@ where
         })
     }
 
+    /// A reply sent after this attempt already settled its operation, such
+    /// as a refusal after an early refund. Billing has nothing left to do,
+    /// but a failed send must still be saved: a retry finds the operation
+    /// settled and would otherwise end silently.
+    fn settled_reply(
+        &mut self,
+        input: &AiConversationInput,
+        operation_id: &str,
+        preparation: AiPreparation,
+    ) -> AiPreparation {
+        let AiPreparation::Reply {
+            text, diagnostics, ..
+        } = preparation
+        else {
+            return preparation;
+        };
+        self.redeliveries.insert(
+            operation_id.to_owned(),
+            Redelivery {
+                input: input.clone(),
+                reply: UndeliveredReply {
+                    text: text.clone(),
+                    record: false,
+                    tool_notes: Vec::new(),
+                },
+            },
+        );
+        AiPreparation::Reply {
+            text,
+            completion_id: Some(operation_id.to_owned()),
+            diagnostics,
+        }
+    }
+
     fn save_undelivered(
         &mut self,
         operation_id: &str,
@@ -495,8 +529,9 @@ where
         redelivery: &Redelivery,
     ) -> Result<(), String> {
         if !delivery.delivered && delivery.retry {
-            // Still saved for the next retry.
-            return Ok(());
+            // Saved for the next retry. A resent reply is saved already, but a
+            // reply this attempt settled early is not.
+            return self.save_undelivered(&delivery.completion_id, &redelivery.reply);
         }
         // Cleared first: a reply in the history must not be sent again.
         self.state
@@ -1065,33 +1100,37 @@ where
             .transcript
             .filter(|text| !text.trim().is_empty())
         else {
+            let reply = AiPreparation::Reply {
+                text: youtube_context_error(input.locale).to_owned(),
+                completion_id: None,
+                diagnostics: preparation.diagnostics,
+            };
             if preparation.reserve_decision.is_some() {
                 self.settle_immediately(
                     input,
                     &operation_id,
                     "youtube_transcript_unavailable_refund",
                 )?;
+                return Ok(Some(self.settled_reply(input, &operation_id, reply)));
             }
-            return Ok(Some(AiPreparation::Reply {
-                text: youtube_context_error(input.locale).to_owned(),
-                completion_id: None,
-                diagnostics: preparation.diagnostics,
-            }));
+            return Ok(Some(reply));
         };
         let text = sanitize_summary_text(&transcript);
         if segments.is_empty() {
+            let reply = AiPreparation::Reply {
+                text,
+                completion_id: None,
+                diagnostics: preparation.diagnostics,
+            };
             if preparation.reserve_decision.is_some() {
                 self.settle_immediately(
                     input,
                     &operation_id,
                     "youtube_transcript_cache_hit_refund",
                 )?;
+                return Ok(Some(self.settled_reply(input, &operation_id, reply)));
             }
-            return Ok(Some(AiPreparation::Reply {
-                text,
-                completion_id: None,
-                diagnostics: preparation.diagnostics,
-            }));
+            return Ok(Some(reply));
         }
         Ok(Some(self.prepare_media_command_reply(
             input.clone(),
@@ -1193,7 +1232,8 @@ where
                     &operation_id,
                     "summary_reserve_adjustment_failed",
                 )?;
-                return Ok(Self::denied(&input, &extension));
+                let denied = Self::denied(&input, &extension);
+                return Ok(self.settled_reply(&input, &operation_id, denied));
             }
         }
 
@@ -1350,7 +1390,8 @@ where
             .filter(|decision| !decision.authorized)
         {
             self.settle_immediately(&input, &operation_id, "youtube_transcript_reserve_failed")?;
-            return Ok(Self::denied(&input, decision));
+            let denied = Self::denied(&input, decision);
+            return Ok(self.settled_reply(&input, &operation_id, denied));
         }
         let mut segments = prepared_youtube.segments;
         let mut diagnostics = prepared_youtube.diagnostics;
@@ -1404,7 +1445,8 @@ where
             .filter(|decision| !decision.authorized)
         {
             self.settle_immediately(&input, &operation_id, "ai_response_media_reserve_failed")?;
-            return Ok(Self::denied(&input, decision));
+            let denied = Self::denied(&input, decision);
+            return Ok(self.settled_reply(&input, &operation_id, denied));
         }
 
         let PreparedPrompt {
@@ -1457,7 +1499,8 @@ where
                     false,
                     "ai_response_reserve_adjustment_failed",
                 )?;
-                return Ok(Self::denied(&input, &extension));
+                let denied = Self::denied(&input, &extension);
+                return Ok(self.settled_reply(&input, &operation_id, denied));
             }
         }
 
@@ -3834,7 +3877,7 @@ mod tests {
         assert!(matches!(
             failed.prepare_media_command(request),
             Ok(Some(AiPreparation::Reply {
-                completion_id: None,
+                completion_id: Some(_),
                 ..
             }))
         ));
@@ -3984,7 +4027,7 @@ mod tests {
         assert!(matches!(
             result,
             AiPreparation::Reply {
-                completion_id: None,
+                completion_id: Some(_),
                 ..
             }
         ));
@@ -4435,7 +4478,7 @@ mod tests {
         assert!(matches!(
             extension_denied.prepare(input()),
             Ok(AiPreparation::Reply {
-                completion_id: None,
+                completion_id: Some(_),
                 ..
             })
         ));
@@ -4651,6 +4694,46 @@ mod tests {
             service.billing.settlements[0].reason,
             "ai_response_provider_usage_before_delivery_failure"
         );
+    }
+
+    #[test]
+    fn a_refusal_after_an_early_refund_is_saved_and_resent() {
+        let mut service = conversation(
+            Vec::new(),
+            Billing {
+                decisions: VecDeque::from([authorized(), denied()]),
+                ..Billing::default()
+            },
+        );
+        service.state.memory.history = vec![HistoryMessage {
+            role: PromptRole::User,
+            text: "synthetic context ".repeat(1_000),
+            tool_notes: Vec::new(),
+        }];
+        let (text, completion_id, _) = pending(reply(service.prepare(input())));
+        assert!(text.contains("out of AI credits"));
+        assert_eq!(completion_id, "ai:42:7:88");
+        assert_eq!(service.billing.settlements.len(), 1);
+        // The extension refusal settled the operation, so a retry would end
+        // silently without the saved reply.
+        assert!(
+            service
+                .complete_delivery(deliver(completion_id, false))
+                .is_ok()
+        );
+        let saved: UndeliveredReply =
+            serde_json::from_str(&service.state.undelivered["ai:42:7:88"]).must();
+        assert_eq!(saved.text, text);
+        assert!(!saved.record);
+        let reserves = service.billing.reserves.len();
+        let (resent, resent_id, _) = pending(reply(service.prepare(input())));
+        assert_eq!(resent, text);
+        assert_eq!(service.billing.reserves.len(), reserves);
+        assert!(service.provider.prompts.borrow().is_empty());
+        assert!(service.complete_delivery(deliver(resent_id, true)).is_ok());
+        assert!(service.state.undelivered.is_empty());
+        assert!(service.state.outgoing.is_empty());
+        assert_eq!(service.billing.settlements.len(), 1);
     }
 
     #[test]
@@ -5504,7 +5587,7 @@ mod tests {
         assert!(matches!(
             extension_denied.prepare_summary_command_streaming(input(), &mut ignore_token),
             Ok(Some(AiPreparation::Reply {
-                completion_id: None,
+                completion_id: Some(_),
                 ..
             }))
         ));
@@ -6191,7 +6274,7 @@ mod tests {
             } else {
                 let (text, completion_id, _) = reply(preparation);
                 assert!(text.contains("out of AI credits"));
-                assert_eq!(completion_id, None);
+                assert_eq!(completion_id.as_deref(), Some("ai:42:7:88"));
             }
             assert_eq!(
                 service.billing.settlements[0].reason,
@@ -6233,7 +6316,7 @@ mod tests {
             let (text, completion_id, _) =
                 command_reply(service.prepare_media_command(youtube_request("/transcript")));
             assert_eq!(text, expected_text);
-            assert_eq!(completion_id, None);
+            assert!(completion_id.is_some());
             assert_eq!(service.billing.settlements[0].reason, reason);
             assert_eq!(service.billing.settlements[0].actual_credit_units, 0);
 
