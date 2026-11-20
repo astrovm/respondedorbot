@@ -215,12 +215,16 @@ fn timed_closes(result: &serde_json::Map<String, Value>) -> Vec<(i64, f64)> {
         .collect()
 }
 
-/// A bar where shares changed hands: its time, opening and closing price.
-/// On a listing's first day Yahoo adds a bar at the offer price with no
-/// volume before the first trade (ANT: $83 at the open, first trade $111.50
-/// two hours later). A chart that reports volume skips such bars; one
-/// without volume (indices, currencies) keeps every priced bar.
-fn traded_bars(result: &serde_json::Map<String, Value>) -> Vec<(i64, f64, f64)> {
+/// The priced bars of a chart: time, opening and closing price. When the
+/// chart starts on the listing's first day, Yahoo's leading bars at the
+/// offer price with no volume are left out (ANT: $83 at the open, first
+/// trade $111.50 two hours later). Later zero-volume bars stay: Yahoo
+/// reports no volume for US pre-market and after-hours bars, nor for many
+/// crypto bars, and those are real trades.
+fn priced_bars(
+    result: &serde_json::Map<String, Value>,
+    listing_start: bool,
+) -> Vec<(i64, f64, f64)> {
     let quote = result
         .get("indicators")
         .and_then(|indicators| indicators.get("quote"))
@@ -231,29 +235,52 @@ fn traded_bars(result: &serde_json::Map<String, Value>) -> Vec<(i64, f64, f64)> 
             .and_then(|quote| quote.get(name))
             .and_then(Value::as_array)
     };
-    let volumes = series("volume");
-    let reports_volume = volumes.is_some_and(|volumes| {
-        volumes
-            .iter()
-            .any(|volume| number(Some(volume)).is_some_and(|volume| volume > 0.0))
-    });
     let price = |values: Option<&Vec<Value>>, index: usize| {
         number(values?.get(index)).filter(|price| price.is_finite() && *price > 0.0)
     };
-    let (opens, closes) = (series("open"), series("close"));
+    let (opens, closes, volumes) = (series("open"), series("close"), series("volume"));
     // Indexes follow Yahoo's arrays, which keep a null for an empty bar.
-    result
+    let bars = result
         .get("timestamp")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .enumerate()
-        .filter(|(index, _)| !reports_volume || price(volumes, *index).is_some())
         .filter_map(|(index, time)| {
             let close = price(closes, index)?;
-            Some((time.as_i64()?, price(opens, index).unwrap_or(close), close))
+            let traded = price(volumes, index).is_some();
+            Some((
+                time.as_i64()?,
+                price(opens, index).unwrap_or(close),
+                close,
+                traded,
+            ))
         })
+        .collect::<Vec<_>>();
+    let first_traded = bars.iter().position(|bar| bar.3);
+    let skip = match first_traded {
+        Some(first_traded) if listing_start => first_traded,
+        _ => 0,
+    };
+    bars.into_iter()
+        .skip(skip)
+        .map(|(time, open, close, _)| (time, open, close))
         .collect()
+}
+
+/// Whether the chart starts on the listing's first day. Yahoo's first bar
+/// can come minutes after `firstTradeDate`.
+fn chart_starts_at_listing(result: &serde_json::Map<String, Value>) -> bool {
+    let first_trade = result
+        .get("meta")
+        .and_then(|meta| integer(meta.get("firstTradeDate")));
+    let first_bar = result
+        .get("timestamp")
+        .and_then(Value::as_array)
+        .and_then(|timestamps| integer(timestamps.first()));
+    first_trade
+        .zip(first_bar)
+        .is_some_and(|(first_trade, first_bar)| first_bar.abs_diff(first_trade) <= 86_400)
 }
 
 /// Yahoo's `chartPreviousClose` is the close before the whole requested range,
@@ -370,7 +397,8 @@ pub struct DayChange {
 pub fn yahoo_24h_change(chart: &Value) -> Option<DayChange> {
     let (latest_time, price) = yahoo_latest_trade(chart)?;
     let result = chart_result(chart)?;
-    let bars = traded_bars(result);
+    let listing_start = chart_starts_at_listing(result);
+    let bars = priced_bars(result, listing_start);
     let older = bars
         .iter()
         .filter(|(time, _, _)| *time <= latest_time - 86_400)
@@ -378,18 +406,13 @@ pub fn yahoo_24h_change(chart: &Value) -> Option<DayChange> {
         .map(|&(time, _, close)| (time, close));
     let (since, base) = match older {
         Some(base) => base,
-        None => {
-            // Only when the chart starts on the listing's first day (Yahoo's
-            // first bar can come minutes after `firstTradeDate`); otherwise
-            // the bars are just missing.
-            let first_trade = integer(result.get("meta")?.get("firstTradeDate"))?;
-            let first_bar = integer(result.get("timestamp")?.as_array()?.first())?;
-            if first_bar.saturating_sub(first_trade) > 86_400 {
-                return None;
-            }
+        // A listing younger than a day; for an older stock the bars are
+        // just missing.
+        None if listing_start => {
             let &(time, open, _) = bars.iter().min_by_key(|(time, _, _)| *time)?;
             (time - 1, open)
         }
+        None => return None,
     };
     Some(DayChange {
         price,
@@ -697,14 +720,6 @@ fn exchange_aliases(exchange: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// Whether a Yahoo symbol is this ticker on some exchange: `2330.TW` and
-/// `2330` are, `TTWO` and `TTWOX` are not.
-#[must_use]
-pub fn symbol_is_ticker(symbol: &str, ticker: &str) -> bool {
-    let base = symbol.split_once('.').map_or(symbol, |(base, _)| base);
-    !ticker.is_empty() && base.eq_ignore_ascii_case(ticker)
-}
-
 /// The ways to read `TTWO:NASDAQ` or `ETR:SAP` as a ticker and an exchange,
 /// most likely first. Yahoo's search finds nothing for either form, only
 /// for the ticker. When exactly one side is a known exchange code there is
@@ -811,7 +826,7 @@ mod tests {
         classify_oil_command, classify_stock_command, exchange_qualifier_readings,
         listed_on_exchange, parse_yahoo_quote, plan_stock_query, rank_stock_quotes,
         rank_yahoo_candidates, render_oil_quotes, render_stock_quote, render_stock_quotes,
-        select_yahoo_candidates, select_yahoo_symbol, symbol_is_ticker, yahoo_24h_change,
+        select_yahoo_candidates, select_yahoo_symbol, yahoo_24h_change,
         yahoo_candidate_name_matches_query, yahoo_is_futures,
     };
     use crate::locale::Locale;
@@ -912,16 +927,6 @@ mod tests {
                 "{exchange} {listing}"
             );
         }
-    }
-
-    #[test]
-    fn a_ticker_matches_its_listings_on_any_exchange() {
-        assert!(symbol_is_ticker("2330.TW", "2330"));
-        assert!(symbol_is_ticker("ttwo", "TTWO"));
-        assert!(symbol_is_ticker("SQM-B.SN", "sqm-b"));
-        assert!(!symbol_is_ticker("TTWOX", "TTWO"));
-        assert!(!symbol_is_ticker("ETR", "SAP"));
-        assert!(!symbol_is_ticker("ETR", ""));
     }
 
     #[test]
@@ -1481,6 +1486,42 @@ mod tests {
     }
 
     #[test]
+    fn extended_hours_bars_without_volume_count_for_an_old_stock() {
+        // Yahoo reports volume 0 for every US pre-market and after-hours
+        // bar. Yesterday's pre-market bar is the 24h base of today's.
+        let premarket = FRIDAY_CLOSE - 9 * 3_600;
+        let chart = |timestamps: &[i64], closes: serde_json::Value, volumes| {
+            json!({"chart": {"result": [{
+                "meta": {
+                    "regularMarketPrice": 19.0,
+                    "regularMarketTime": premarket - DAY + 6 * 3_600,
+                    "firstTradeDate": 345_479_400,
+                },
+                "timestamp": timestamps,
+                "indicators": {"quote": [{"close": closes, "volume": volumes}]}
+            }]}})
+        };
+        let timestamps = [premarket - DAY, premarket - DAY + 6 * 3_600, premarket];
+        assert_eq!(
+            yahoo_24h_change(&chart(
+                &timestamps,
+                json!([16.0, 19.0, 20.0]),
+                json!([0, 5_000, 0])
+            )),
+            day(20.0, 25.0, premarket - DAY)
+        );
+        // Without a bar 24 hours older, an old stock has no 24h change.
+        assert_eq!(
+            yahoo_24h_change(&chart(
+                &timestamps[1..],
+                json!([19.0, 20.0]),
+                json!([5_000, 0])
+            )),
+            None
+        );
+    }
+
+    #[test]
     fn a_listing_younger_than_a_day_compares_with_its_first_trade() {
         // ANT's first day as Yahoo reports it: the offer price at the open
         // with no volume, the first trade two hours later, then a day later.
@@ -1513,14 +1554,27 @@ mod tests {
             yahoo_24h_change(&chart(json!([0, null, 282_684_770, 120_000]), listed - 300)),
             change
         );
-        // A chart that starts days after the listing has missing bars, not a
-        // young listing.
+        // Up to a whole day apart still counts as the listing's first day.
+        assert_eq!(
+            yahoo_24h_change(&chart(json!([0, null, 282_684_770, 120_000]), listed - DAY)),
+            change
+        );
+        // A chart that starts days after the listing is not a young
+        // listing: its zero-volume bars are trades like any other.
         assert_eq!(
             yahoo_24h_change(&chart(
                 json!([0, null, 282_684_770, 120_000]),
                 listed - DAY - 1
             )),
-            None
+            day(87.16, (87.16 / 83.0 - 1.0) * 100.0, listed)
+        );
+        // A listing time after the first bar is not a young listing either.
+        assert_eq!(
+            yahoo_24h_change(&chart(
+                json!([0, null, 282_684_770, 120_000]),
+                listed + DAY + 1
+            )),
+            day(87.16, (87.16 / 83.0 - 1.0) * 100.0, listed)
         );
         // Without volume data every priced bar counts, the offer price too.
         assert_eq!(

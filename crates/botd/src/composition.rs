@@ -99,7 +99,7 @@ use bot_core::market_prices::{
 };
 use bot_core::stocks::{
     StockQuery, StockQuote, StockSearchCandidate, exchange_qualifier_readings, listed_on_exchange,
-    plan_stock_query, rank_stock_quotes, symbol_is_ticker, yahoo_candidate_name_matches_query,
+    plan_stock_query, rank_stock_quotes, yahoo_candidate_name_matches_query,
 };
 use bot_core::telegram_actions::TelegramAction;
 use bot_core::telegram_commands::command_publication_actions;
@@ -1381,22 +1381,12 @@ where
             }
             searched.push((ticker, candidates));
         }
-        // No listing on the named exchange, which may be a code the table
-        // lacks. With a known code the ticker is certain, so all its
-        // listings stay. Otherwise only listings of one side as a ticker
-        // count (`2330:XYZ` finds 2330.TW), never a company found by name.
+        // No listing on the named exchange. With a known code the ticker is
+        // certain, so all its listings stay. With two unknown sides nothing
+        // is shown: a guess finds the wrong company (`PSX:OGDC` would show
+        // Phillips 66).
         if readings.len() == 1 {
             return searched.swap_remove(0);
-        }
-        for (ticker, candidates) in &searched {
-            let listings = candidates
-                .iter()
-                .filter(|candidate| symbol_is_ticker(&candidate.symbol, ticker))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !listings.is_empty() {
-                return (ticker, listings);
-            }
         }
         match searched.first() {
             Some((ticker, _)) => (ticker, Vec::new()),
@@ -9166,26 +9156,16 @@ mod tests {
             assert_eq!(charted(&nasdaq.yahoo_transport)[1..], ["TTWO"], "{query}");
         }
 
-        // Two unknown sides: both readings are searched. No listing is on
-        // either "exchange", so the listings whose symbol is one side stay.
-        let mut unknown = source(vec![
-            Err(YahooFailure::Request),
-            chart("TTWO", "NasdaqGS"),
-            chart("TTWO.MX", "Mexico"),
-        ]);
+        // Two unknown sides: both readings are searched, and with no
+        // listing on either "exchange" nothing is shown, not even TTWO.
+        let mut unknown = source(vec![Err(YahooFailure::Request)]);
         unknown
             .yahoo_transport
             .search_responses
             .borrow_mut()
             .push(search());
         let load = unknown.load_with_timeframe("XYZ:TTWO", Some("7d"), 1_800_000_000);
-        assert_eq!(
-            quote_symbols(&load),
-            [
-                ("XYZ:TTWO".to_owned(), Some("TTWO".to_owned())),
-                ("XYZ:TTWO".to_owned(), Some("TTWO.MX".to_owned())),
-            ]
-        );
+        assert_eq!(quote_symbols(&load), [("XYZ:TTWO".to_owned(), None)]);
         assert_eq!(
             unknown
                 .yahoo_transport
@@ -9196,17 +9176,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["XYZ", "TTWO"]
         );
-
-        // Neither side is an exchange or a listed symbol: nothing found.
-        let mut neither = source(vec![Err(YahooFailure::Request)]);
-        neither
-            .yahoo_transport
-            .search_responses
-            .borrow_mut()
-            .push(search());
-        let load = neither.load_with_timeframe("ABC:XYZ", Some("7d"), 1_800_000_000);
-        assert_eq!(quote_symbols(&load), [("ABC:XYZ".to_owned(), None)]);
-        assert_eq!(neither.yahoo_transport.searches.borrow().len(), 2);
 
         // A known exchange with no listing still finds every listing.
         let mut elsewhere = source(vec![
