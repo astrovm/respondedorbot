@@ -75,7 +75,7 @@ pub fn plan_dollar_command(message_text: &str) -> DollarCommandPlan {
 pub fn period_label(hours: i64) -> String {
     if hours > 0 && hours % (365 * 24) == 0 {
         format!("{}y", hours / (365 * 24))
-    } else if hours > HOURLY_HISTORY_HOURS && hours % (7 * 24) == 0 {
+    } else if hours > 0 && hours % (7 * 24) == 0 {
         format!("{}w", hours / (7 * 24))
     } else if hours > HOURLY_HISTORY_HOURS && hours % 24 == 0 {
         format!("{}d", hours / 24)
@@ -264,6 +264,7 @@ mod tests {
             (8_760, "1y"),
             (87_600, "10y"),
             (49, "49h"),
+            (0, "0h"),
         ] {
             assert_eq!(period_label(hours), label, "{hours}");
         }
@@ -286,6 +287,13 @@ mod tests {
             render_dollar_rates(&rates, None, 168, Locale::En).as_deref(),
             Some(
                 "Dollar in pesos, 1w change\n\nOfficial: 1,000\n\nI could not find rates from 1w ago"
+            )
+        );
+        // 48 hours is still the hourly snapshots' range.
+        assert_eq!(
+            render_dollar_rates(&rates, None, 48, Locale::En).as_deref(),
+            Some(
+                "Dollar in pesos, 48h change\n\nOfficial: 1,000\n\nNo 48h history yet. Try again later"
             )
         );
     }
