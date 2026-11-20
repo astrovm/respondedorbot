@@ -39,6 +39,12 @@ const COMPACTION_THRESHOLD: usize = 40;
 // The configured history size is a small constant, far inside the Redis range.
 const CHAT_HISTORY_LIMIT: i64 = CHAT_HISTORY_MAX_MESSAGES as i64;
 const COMPACTION_KEEP: usize = 25;
+/// A failed update is retried within seconds; an hour is plenty.
+const UNDELIVERED_REPLY_TTL_SECONDS: i64 = 3_600;
+
+fn undelivered_reply_key(operation_id: &str) -> String {
+    format!("ai_undelivered_reply:{operation_id}")
+}
 
 pub struct RedisConversationState {
     state: RedisMessageState,
@@ -252,6 +258,22 @@ impl ConversationState for RedisConversationState {
         // A marker without its summary is stale and must not trim history.
         let marker = marker.filter(|value| summary.is_some() && !value.is_empty());
         Ok(decode_summary_memory(entries, summary, marker))
+    }
+
+    fn save_undelivered_reply(&mut self, operation_id: &str, reply: &str) -> Result<(), String> {
+        self.state
+            .set_value(
+                &undelivered_reply_key(operation_id),
+                reply,
+                UNDELIVERED_REPLY_TTL_SECONDS,
+            )
+            .map_err(error_text)
+    }
+
+    fn take_undelivered_reply(&mut self, operation_id: &str) -> Result<Option<String>, String> {
+        self.state
+            .take_value(&undelivered_reply_key(operation_id))
+            .map_err(error_text)
     }
 
     fn record_outgoing(
@@ -760,13 +782,17 @@ impl PostgresConversationBilling {
                 active_operations.mark_active(&request.operation_id);
             }
         }
+        // A retried update reserves again under the same operation. Billing
+        // refuses it once the first attempt settled or refunded it; that is
+        // not a shortfall.
+        let settled = crate::native_ai::already_settled(result.reason.as_deref());
         Ok((
             ReserveDecision {
                 authorized: result.ok,
                 user_balance: result.user_balance,
                 chat_balance: result.chat_balance,
                 source,
-                denial: None,
+                denial: settled.then_some(ReserveDenial::AlreadySettled),
             },
             result.reason,
         ))
@@ -906,9 +932,7 @@ impl TaskCreditStore for PostgresConversationBilling {
             reason,
             user_balance: decision.user_balance,
             chat_balance: decision.chat_balance,
-            hourly_limit: decision
-                .denial
-                .map(|ReserveDenial::CreditlessHourlyCap { limit }| limit),
+            hourly_limit: decision.denial.and_then(ReserveDenial::hourly_limit),
         })
     }
 
@@ -1180,6 +1204,13 @@ mod tests {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let chat_id = -i64::try_from(nonce % 1_000_000_000)?;
         let mut state = RedisConversationState::new(&endpoint)?;
+        let operation = format!("ai:{chat_id}:2:88");
+        state.save_undelivered_reply(&operation, "saved reply")?;
+        assert_eq!(
+            state.take_undelivered_reply(&operation)?,
+            Some("saved reply".to_owned())
+        );
+        assert_eq!(state.take_undelivered_reply(&operation)?, None);
         let spanish = conversation_input(chat_id, 2, Locale::Es);
         state.record_incoming(&spanish)?;
         let notes = ["task_set {} → created".to_owned()];
@@ -1560,6 +1591,21 @@ mod tests {
         billing.release_operation(&paid_operation);
         assert!(!active.is_active(&paid_operation));
         assert!(!billing.payer_by_operation.contains_key(&paid_operation));
+
+        // A retried update reserves the settled operation again: billing
+        // refuses it as already settled, not as a shortfall.
+        billing.settle(SettlementRequest {
+            user_id,
+            chat_id: None,
+            operation_id: paid_operation.clone(),
+            actual_credit_units: 150,
+            delivered: true,
+            reason: "synthetic".to_owned(),
+            billing_segments: Vec::new(),
+        })?;
+        let replay = billing.reserve(user_reserve(user_id, &paid_operation, "first", 100))?;
+        assert!(!replay.authorized);
+        assert_eq!(replay.denial, Some(ReserveDenial::AlreadySettled));
         Ok(())
     }
 
@@ -1657,6 +1703,8 @@ mod tests {
             state.load_summary_memory("-100", 20).err(),
             state.record_incoming(&input).err(),
             state.record_outgoing(&input, Some(3), "reply", &[]).err(),
+            state.save_undelivered_reply("ai:-100:2:88", "reply").err(),
+            state.take_undelivered_reply("ai:-100:2:88").err(),
         ];
         for failure in failures {
             assert!(

@@ -500,6 +500,12 @@ fn formatted_date(timezone_offset_hours: i64, locale: Locale) -> String {
     format_date(utc.with_timezone(&offset).date_naive(), locale)
 }
 
+/// Billing refuses a reservation for an operation an earlier attempt
+/// already settled or refunded. That is a replay, not a shortfall.
+pub(crate) fn already_settled(reason: Option<&str>) -> bool {
+    matches!(reason, Some("operation_settled" | "reservation_refunded"))
+}
+
 /// What the database said about reserving credits for one task run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskCharge {
@@ -785,10 +791,7 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
         if result.ok {
             return Ok(TaskReserveOutcome::Authorized);
         }
-        if matches!(
-            result.reason.as_deref(),
-            Some("operation_settled" | "reservation_refunded")
-        ) {
+        if already_settled(result.reason.as_deref()) {
             return Ok(TaskReserveOutcome::AlreadySettled);
         }
         Ok(TaskReserveOutcome::Denied {
