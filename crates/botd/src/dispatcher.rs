@@ -1406,7 +1406,15 @@ pub struct NativeDispatcher<Config, Actions, State, Values, Random, Authorizatio
     /// Why parts of the current update failed or degraded.
     state_diagnostics: Vec<String>,
     diagnostic_log: Option<DiagnosticLog>,
+    /// The random reply draws of recent messages, by chat and message id.
+    /// A failed update is retried within seconds, and the retry must make
+    /// the same choice, or a paid reply that Telegram failed to take is
+    /// never resent.
+    recent_reply_draws: std::collections::VecDeque<((i64, i64), f64)>,
 }
+
+/// How many random reply draws are kept for retries.
+const RECENT_REPLY_DRAWS: usize = 64;
 
 impl<Config, Actions, State, Values, Random, Authorization>
     NativeDispatcher<Config, Actions, State, Values, Random, Authorization>
@@ -1471,6 +1479,7 @@ where
             last_outcome: None,
             state_diagnostics: Vec::new(),
             diagnostic_log: None,
+            recent_reply_draws: std::collections::VecDeque::new(),
         }
     }
 
@@ -1771,6 +1780,25 @@ where
             (known, read) => known.or(read),
         };
         context
+    }
+
+    /// Draws whether to reply on its own to a message once, so a retry of
+    /// the same message makes the same choice.
+    fn reply_draw(&mut self, chat_id: i64, message_id: i64) -> Result<f64, Random::Error> {
+        let key = (chat_id, message_id);
+        if let Some((_, draw)) = self
+            .recent_reply_draws
+            .iter()
+            .find(|(seen, _)| *seen == key)
+        {
+            return Ok(*draw);
+        }
+        let draw = self.random.unit_interval()?;
+        if self.recent_reply_draws.len() == RECENT_REPLY_DRAWS {
+            self.recent_reply_draws.pop_front();
+        }
+        self.recent_reply_draws.push_back((key, draw));
+        Ok(draw)
     }
 
     fn replied_bot_metadata(
@@ -5850,8 +5878,10 @@ where
             // them.
             match evaluate_response_routing(&routing) {
                 ResponseRoutingEvaluation::NeedsRandomSample => {
-                    routing.random_sample =
-                        Some(self.random.unit_interval().map_err(DispatchError::Random)?);
+                    routing.random_sample = Some(
+                        self.reply_draw(chat_id.0, message_id.0)
+                            .map_err(DispatchError::Random)?,
+                    );
                 }
                 resolved => break resolved,
             }
@@ -6030,6 +6060,7 @@ where
                         completion_id,
                         delivered: true,
                         sent_message_id: Some(delivery.message_id),
+                        retry: false,
                     })
                 {
                     self.state_diagnostics
@@ -6044,6 +6075,7 @@ where
                         completion_id,
                         delivered: false,
                         sent_message_id: None,
+                        retry: false,
                     })
                 {
                     self.state_diagnostics
@@ -6060,6 +6092,7 @@ where
                         completion_id,
                         delivered: false,
                         sent_message_id: None,
+                        retry: true,
                     })
                 {
                     self.state_diagnostics
@@ -6195,6 +6228,7 @@ where
                         completion_id,
                         delivered: false,
                         sent_message_id: None,
+                        retry: true,
                     })
                 {
                     self.state_diagnostics.push(format!(
@@ -6210,6 +6244,7 @@ where
                 completion_id,
                 delivered: receipt.message_id.is_some(),
                 sent_message_id: receipt.message_id,
+                retry: false,
             })
         {
             self.state_diagnostics
@@ -6406,6 +6441,7 @@ where
                         completion_id,
                         delivered: false,
                         sent_message_id: None,
+                        retry: false,
                     });
                 }
                 self.state_diagnostics
@@ -6420,6 +6456,7 @@ where
                         completion_id,
                         delivered: false,
                         sent_message_id: None,
+                        retry: true,
                     });
                 }
                 return Err(DispatchError::Action(error));
@@ -6431,6 +6468,7 @@ where
                 completion_id,
                 delivered: true,
                 sent_message_id: Some(receipt.message_id),
+                retry: false,
             })
         {
             self.state_diagnostics
@@ -9186,6 +9224,7 @@ mod tests {
                 completion_id: "conversation-1".to_owned(),
                 delivered: true,
                 sent_message_id: Some(MessageId(700)),
+                retry: false,
             }]
         );
         assert_eq!(dispatcher.state_diagnostics(), ["provider diagnostic"]);
@@ -9330,6 +9369,7 @@ mod tests {
                 completion_id: "media-1".to_owned(),
                 delivered: true,
                 sent_message_id: Some(MessageId(700)),
+                retry: false,
             }]
         );
         assert_eq!(dispatcher.state_diagnostics(), ["media diagnostic"]);
@@ -9383,6 +9423,7 @@ mod tests {
                     completion_id,
                     delivered: true,
                     sent_message_id: Some(MessageId(700)),
+                    retry: false,
                 })
                 .into_iter()
                 .collect::<Vec<_>>();
@@ -9476,6 +9517,7 @@ mod tests {
                 completion_id: "summary-1".to_owned(),
                 delivered: true,
                 sent_message_id: Some(MessageId(700)),
+                retry: false,
             }]
         );
         assert_eq!(dispatcher.state_diagnostics(), ["summary diagnostic"]);
@@ -9639,6 +9681,9 @@ mod tests {
             }
             assert_eq!(deliveries.borrow().len(), 1);
             assert_eq!(deliveries.borrow()[0].delivered, delivered);
+            // Only a rejected send fails the update, so only its reply is
+            // kept for the retry.
+            assert_eq!(deliveries.borrow()[0].retry, rejected);
             assert!(
                 dispatcher
                     .state_diagnostics()
@@ -9682,6 +9727,7 @@ mod tests {
             }
             assert_eq!(deliveries.borrow().len(), 1);
             assert!(!deliveries.borrow()[0].delivered);
+            assert_eq!(deliveries.borrow()[0].retry, rejected);
             assert!(
                 dispatcher
                     .state_diagnostics()
@@ -9721,6 +9767,7 @@ mod tests {
                 deliveries.borrow()[0].delivered,
                 !rejected && matches!(outcome, DeliveryOutcome::Confirmed)
             );
+            assert_eq!(deliveries.borrow()[0].retry, rejected);
             if matches!(outcome, DeliveryOutcome::Confirmed) {
                 assert!(
                     dispatcher
@@ -9777,6 +9824,7 @@ mod tests {
                 completion_id: "conversation-1".to_owned(),
                 delivered: true,
                 sent_message_id: Some(MessageId(700)),
+                retry: false,
             }]
         );
     }
@@ -12467,6 +12515,7 @@ mod tests {
                 completion_id: "task-command-1".to_owned(),
                 delivered: true,
                 sent_message_id: Some(MessageId(700)),
+                retry: false,
             }]
         );
         assert!(matches!(
@@ -23990,6 +24039,22 @@ mod tests {
         assert_eq!(prepared.borrow().len(), 1);
         assert!(prepared.borrow()[0].spontaneous);
         assert!(ignored.borrow().is_empty());
+        // A retry of the same message makes the same choice, so a reply that
+        // Telegram failed to take is resent instead of dropped.
+        dispatcher.random.choice_index = 9_000;
+        assert_eq!(
+            dispatcher.dispatch(group_link_update("che gordo, qué hacés")),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(prepared.borrow().len(), 2);
+        // Only the latest 64 draws are kept: 65 more push out the group
+        // message and the first of them.
+        for message_id in 0..=64 {
+            assert_eq!(dispatcher.reply_draw(-1, message_id), Ok(0.9));
+        }
+        dispatcher.random.choice_index = 0;
+        assert_eq!(dispatcher.reply_draw(-1, 64), Ok(0.9));
+        assert_eq!(dispatcher.reply_draw(-1, 0), Ok(0.0));
 
         let (source, _observations) = ai_source(Ok(AiPreparation::silent()));
         let mut failing = configured(random_replies, Actions::default())

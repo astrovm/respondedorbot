@@ -810,17 +810,24 @@ impl BillingRepository {
                 )?
             {
                 if event_type == "ai_reserve" {
-                    let reservation_refunded = transaction
-                        .query_opt(
-                            "SELECT 1 FROM credit_ledger \
-                                 WHERE user_id = $1 AND event_type = 'ai_refund' \
-                                   AND metadata->>'settlement_id' = $2 LIMIT 1",
-                            &[&user_id, &idempotency_key],
-                        )?
-                        .is_some();
-                    if reservation_refunded {
+                    // A refund by the creditless hourly cap means the message
+                    // was denied, not answered, so it gets its own reason.
+                    let refunds = transaction.query_one(
+                        "SELECT COUNT(*) > 0, \
+                                COALESCE(BOOL_OR(metadata->>'reason' = 'creditless_hourly_cap'), FALSE) \
+                         FROM credit_ledger \
+                         WHERE user_id = $1 AND event_type = 'ai_refund' \
+                           AND metadata->>'settlement_id' = $2",
+                        &[&user_id, &idempotency_key],
+                    )?;
+                    if refunds.get::<_, bool>(0) {
+                        let reason = if refunds.get::<_, bool>(1) {
+                            "reservation_capped"
+                        } else {
+                            "reservation_refunded"
+                        };
                         return Ok(Self::rejected_ai_charge(
-                            "reservation_refunded",
+                            reason,
                             user_balance,
                             chat_balance,
                         ));
@@ -989,6 +996,15 @@ impl BillingRepository {
                 )?
                 .is_some())
         })
+    }
+
+    /// Whether an AI message operation already has its settlement.
+    pub fn ai_operation_settled(
+        &self,
+        user_id: i64,
+        operation_id: &str,
+    ) -> Result<bool, BillingError> {
+        self.compaction_reservation_settled(user_id, operation_id, "")
     }
 
     pub fn compaction_reservation_settled(
@@ -3245,6 +3261,29 @@ mod tests {
             "operation-5",
         );
         assert_eq!(outcome?.reason, Some("reservation_refunded".to_owned()));
+        // A refund by the creditless hourly cap reports its own reason.
+        let outcome = client.execute(
+            "INSERT INTO credit_ledger \
+                (event_type, actor_user_id, user_id, chat_id, amount, metadata) \
+             VALUES ('ai_refund', $1, $1, $2, 0, $3)",
+            &[
+                &7_000_000_000_022_i64,
+                &7_000_000_000_023_i64,
+                &json!({"settlement_id": "synthetic-reserve-5", "reason": "creditless_hourly_cap"}),
+            ],
+        );
+        outcome?;
+        let outcome = repository.charge_ai_credits(
+            7_000_000_000_022,
+            Some(7_000_000_000_023),
+            50,
+            "ai_reserve",
+            &refunded_charge_metadata,
+            Some("user"),
+            Some("synthetic-reserve-5"),
+            "operation-5",
+        );
+        assert_eq!(outcome?.reason, Some("reservation_capped".to_owned()));
         let charge_evidence = client.query_one(
             "SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM credit_ledger \
              WHERE user_id = $1 AND event_type = 'ai_reserve'",
@@ -4516,6 +4555,8 @@ mod tests {
              WHERE metadata->>'operation_id' = 'user-op' AND event_type <> 'ai_reserve'";
         assert_eq!(client.query_one(adjustments, &[])?.get::<_, i64>(0), 1);
         assert!(repository.compaction_reservation_settled(10, "user-op", "")?);
+        assert!(repository.ai_operation_settled(10, "user-op")?);
+        assert!(!repository.ai_operation_settled(10, "missing-op")?);
         assert!(!repository.compaction_reservation_settled(10, "", "missing-tag")?);
 
         // Replaying a non-reservation charge reports the recorded payer and

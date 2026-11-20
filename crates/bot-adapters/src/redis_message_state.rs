@@ -91,6 +91,11 @@ impl RedisMessageState {
         Ok(redis::cmd("GET").arg(key).query(&mut connection)?)
     }
 
+    pub fn delete_value(&self, key: &str) -> Result<(), RedisMessageStateError> {
+        let mut connection = self.client.get_connection()?;
+        Ok(redis::cmd("DEL").arg(key).query(&mut connection)?)
+    }
+
     pub fn set_value(
         &self,
         key: &str,
@@ -436,6 +441,8 @@ mod tests {
             reader
                 .get_mut()
                 .write_all(b"*4\r\n$1\r\n8\r\n$8\r\nmember-8\r\n$1\r\n7\r\n$8\r\nmember-7\r\n")?;
+            assert_eq!(read_command_from(&mut reader)?, ["DEL", "reply:1"]);
+            reader.get_mut().write_all(b":1\r\n")?;
             Ok(())
         });
         let state = RedisMessageState::new(&RedisEndpoint {
@@ -471,6 +478,7 @@ mod tests {
                 },
             ]
         );
+        state.delete_value("reply:1")?;
 
         server
             .join()
