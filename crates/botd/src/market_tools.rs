@@ -357,12 +357,12 @@ mod tests {
         assert_eq!(
             tool.execute(
                 ExternalToolRequest::DollarRates {
-                    timeframe: "7h".to_owned(),
+                    timeframe: "0h".to_owned(),
                 },
                 "call"
             )
             .output,
-            "No conozco el período '7h'. Usá uno de estos: 1h, 6h, 12h, 24h, 48h"
+            "No conozco el período '0h'. Usá 1h, 6h, 24h, 48h, 7d, 30d, 1y, 10y o N[h/d/w/m/y], hasta 100y"
         );
     }
 

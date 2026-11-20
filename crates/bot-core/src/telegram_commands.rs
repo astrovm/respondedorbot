@@ -67,8 +67,8 @@ const COMMAND_GROUPS: &[CommandGroup] = &[
     },
     CommandGroup {
         aliases: &["dolar", "dollar", "usd"],
-        description_es: "cotizaciones del dólar [1h/6h/12h/24h/48h]",
-        description_en: "dollar exchange rates [1h/6h/12h/24h/48h]",
+        description_es: "cotizaciones del dólar [24h/7d/30d/1y/10y]",
+        description_en: "dollar exchange rates [24h/7d/30d/1y/10y]",
     },
     CommandGroup {
         aliases: &["petroleo", "oil"],

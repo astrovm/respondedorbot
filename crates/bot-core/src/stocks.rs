@@ -565,6 +565,77 @@ pub fn rank_stock_quotes(query: &str, quotes: &mut [StockQuote]) {
     });
 }
 
+/// Exchange names people write next to a ticker (`TTWO:NASDAQ`,
+/// `NYSE:BP`), and the names Yahoo's search shows for those exchanges.
+const EXCHANGE_ALIASES: &[(&[&str], &[&str])] = &[
+    (&["NASDAQ", "NMS", "NGM", "NCM", "NAS"], &["nasdaq"]),
+    (&["NYSE", "NYQ"], &["nyse"]),
+    (
+        &["AMEX", "NYSEAMERICAN", "NYSEMKT", "ASE"],
+        &["nyse american", "nysemkt", "amex"],
+    ),
+    (&["ARCA", "NYSEARCA", "PCX"], &["nysearca", "nyse arca"]),
+    (&["BATS", "CBOE", "BTS"], &["bats trading", "bats", "cboe"]),
+    (&["OTC", "OTCMKTS", "PNK"], &["otc markets", "other otc"]),
+    (&["BCBA", "BYMA", "BUE"], &["buenos aires"]),
+    (
+        &["B3", "BOVESPA", "BVMF", "SAO"],
+        &["são paulo", "sao paulo"],
+    ),
+    (&["BMV", "MEX"], &["mexico"]),
+    (&["TSX", "TOR"], &["toronto"]),
+    (&["LSE", "LON"], &["london"]),
+    (&["XETRA", "XETR", "GER"], &["xetra"]),
+    (&["FRA", "FWB"], &["frankfurt"]),
+    (&["EPA", "PAR"], &["paris"]),
+    (&["BME", "MCE"], &["madrid"]),
+    (&["TSE", "TYO", "JPX"], &["tokyo"]),
+    (&["HKEX", "HKG"], &["hong kong"]),
+];
+
+fn exchange_aliases(exchange: &str) -> Option<&'static [&'static str]> {
+    EXCHANGE_ALIASES
+        .iter()
+        .find(|(codes, _)| codes.iter().any(|code| code.eq_ignore_ascii_case(exchange)))
+        .map(|(_, names)| *names)
+}
+
+/// Splits `TTWO:NASDAQ` or `NASDAQ:TTWO` into the ticker and the exchange.
+/// Yahoo's search finds nothing for either form, only for the ticker. The
+/// side that names a known exchange is the exchange; when neither does,
+/// the ticker comes first.
+#[must_use]
+pub fn split_exchange_qualifier(query: &str) -> Option<(&str, &str)> {
+    let (left, right) = query.trim().trim_start_matches('$').split_once(':')?;
+    let (left, right) = (left.trim().trim_start_matches('$'), right.trim());
+    if left.is_empty() || right.is_empty() || right.contains(':') {
+        return None;
+    }
+    if exchange_aliases(left).is_some() && exchange_aliases(right).is_none() {
+        Some((right, left))
+    } else {
+        Some((left, right))
+    }
+}
+
+/// Whether Yahoo's exchange name for a listing is the exchange the user
+/// named, by code (`NASDAQ`, `BCBA`) or by name (`Tokyo`).
+#[must_use]
+pub fn listed_on_exchange(exchange: &str, listing_exchange: &str) -> bool {
+    let listing = listing_exchange.trim().to_lowercase();
+    let wanted = exchange.trim().to_lowercase();
+    let matches = |name: &str| {
+        listing == name
+            || listing
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with(' '))
+    };
+    !wanted.is_empty()
+        && (matches(&wanted)
+            || exchange_aliases(exchange)
+                .is_some_and(|names| names.iter().any(|name| matches(name))))
+}
+
 #[must_use]
 pub fn select_yahoo_symbol(response: &Value) -> Option<String> {
     select_yahoo_candidates(response)
@@ -623,12 +694,71 @@ mod tests {
 
     use super::{
         ChangeWindow, DayChange, StockQuery, StockQueryPlan, StockQuote, StockSearchCandidate,
-        classify_oil_command, classify_stock_command, parse_yahoo_quote, plan_stock_query,
-        rank_stock_quotes, rank_yahoo_candidates, render_oil_quotes, render_stock_quote,
-        render_stock_quotes, select_yahoo_candidates, select_yahoo_symbol, yahoo_24h_change,
-        yahoo_candidate_name_matches_query, yahoo_is_futures,
+        classify_oil_command, classify_stock_command, listed_on_exchange, parse_yahoo_quote,
+        plan_stock_query, rank_stock_quotes, rank_yahoo_candidates, render_oil_quotes,
+        render_stock_quote, render_stock_quotes, select_yahoo_candidates, select_yahoo_symbol,
+        split_exchange_qualifier, yahoo_24h_change, yahoo_candidate_name_matches_query,
+        yahoo_is_futures,
     };
     use crate::locale::Locale;
+
+    #[test]
+    fn exchange_qualified_tickers_split_on_either_side() {
+        assert_eq!(
+            split_exchange_qualifier("TTWO:NASDAQ"),
+            Some(("TTWO", "NASDAQ"))
+        );
+        assert_eq!(
+            split_exchange_qualifier(" nasdaq:ttwo "),
+            Some(("ttwo", "nasdaq"))
+        );
+        assert_eq!(
+            split_exchange_qualifier("$GGAL:BCBA"),
+            Some(("GGAL", "BCBA"))
+        );
+        // Both sides are exchanges, or neither is: the ticker comes first.
+        assert_eq!(split_exchange_qualifier("LSE:NYSE"), Some(("LSE", "NYSE")));
+        assert_eq!(split_exchange_qualifier("ABC:XYZ"), Some(("ABC", "XYZ")));
+        for query in ["TTWO", "TTWO:", ":NASDAQ", "A:B:C", "BRK-B", "BZ=F"] {
+            assert_eq!(split_exchange_qualifier(query), None, "{query}");
+        }
+    }
+
+    #[test]
+    fn exchange_codes_and_names_match_yahoos_exchange_names() {
+        // Exchange names from real Yahoo search answers.
+        for (exchange, listing) in [
+            ("NASDAQ", "NASDAQ"),
+            ("nms", "NASDAQ"),
+            ("NYSE", "NYSE"),
+            ("ARCA", "NYSEArca"),
+            ("BCBA", "Buenos Aires"),
+            ("BYMA", "Buenos Aires"),
+            ("B3", "São Paulo"),
+            ("TSE", "Tokyo Stock Exchange"),
+            ("Tokyo", "Tokyo Stock Exchange"),
+            ("BME", "Madrid Stock Exchange CATS"),
+            ("OTC", "OTC Markets"),
+            ("Vienna", "Vienna"),
+        ] {
+            assert!(
+                listed_on_exchange(exchange, listing),
+                "{exchange} {listing}"
+            );
+        }
+        for (exchange, listing) in [
+            ("NYSE", "NYSEArca"),
+            ("NYSE", "NASDAQ"),
+            ("NASDAQ", "Swiss"),
+            ("", "NASDAQ"),
+            ("Tok", "Tokyo Stock Exchange"),
+        ] {
+            assert!(
+                !listed_on_exchange(exchange, listing),
+                "{exchange} {listing}"
+            );
+        }
+    }
 
     #[test]
     fn quote_parser_uses_metadata_and_calculates_variation() {

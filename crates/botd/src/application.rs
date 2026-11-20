@@ -119,11 +119,19 @@ fn chat_is_unreachable(error: &str) -> bool {
         .any(|marker| error.contains(marker))
 }
 
-pub fn run_polling_until<Source, Handler, Stop, Wait, ReportRetry, ReportHandler>(
+/// What the polling loop tells its reporter: a failed poll, once per
+/// distinct failure in a row, and the first success after failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollHealth<'a> {
+    Failed(&'a PollFailure),
+    Recovered,
+}
+
+pub fn run_polling_until<Source, Handler, Stop, Wait, ReportPoll, ReportHandler>(
     runtime: &mut PollingRuntime<Source, Handler>,
     mut should_stop: Stop,
     mut wait: Wait,
-    mut report_poll_retry: ReportRetry,
+    mut report_poll: ReportPoll,
     mut report_handler_failure: ReportHandler,
 ) -> Result<(), String>
 where
@@ -132,15 +140,20 @@ where
     Handler::Error: Display,
     Stop: FnMut() -> bool,
     Wait: FnMut(Duration),
-    ReportRetry: FnMut(&PollFailure),
+    ReportPoll: FnMut(PollHealth<'_>),
     ReportHandler: FnMut(i64, &str),
 {
     let mut last_poll_failure = None;
+    let recovered = |last_poll_failure: &mut Option<PollFailure>, report_poll: &mut ReportPoll| {
+        if last_poll_failure.take().is_some() {
+            report_poll(PollHealth::Recovered);
+        }
+    };
     while !should_stop() {
         match runtime.step() {
             Ok(StepOutcome::Retry(failure)) => {
                 if last_poll_failure.as_ref() != Some(&failure) {
-                    report_poll_retry(&failure);
+                    report_poll(PollHealth::Failed(&failure));
                 }
                 last_poll_failure = Some(failure.clone());
                 wait(retry_delay(&failure));
@@ -149,7 +162,7 @@ where
                 retrying,
                 quarantined,
             }) => {
-                last_poll_failure = None;
+                recovered(&mut last_poll_failure, &mut report_poll);
                 for failure in retrying {
                     report_handler_failure(failure.update_id, &failure.error);
                 }
@@ -160,11 +173,75 @@ where
                     );
                 }
             }
-            Ok(StepOutcome::Idle | StepOutcome::Dispatched { .. }) => last_poll_failure = None,
+            Ok(StepOutcome::Idle | StepOutcome::Dispatched { .. }) => {
+                recovered(&mut last_poll_failure, &mut report_poll);
+            }
             Err(error) => return Err(error_text(error)),
         }
     }
     Ok(())
+}
+
+/// Telegram's API has short outages (HTTP 502, timeouts, refused connects)
+/// that polling rides out on its own. An outage only reaches the admin once
+/// it lasts this long, and then its end is reported too.
+const POLL_OUTAGE_REPORT_AFTER: Duration = Duration::from_secs(120);
+
+/// A failure that retrying cannot fix, like a second bot polling with the
+/// same token or a revoked token, is reported at once.
+fn poll_failure_is_transient(failure: &PollFailure) -> bool {
+    match failure {
+        PollFailure::Transport { .. } | PollFailure::RateLimited { .. } => true,
+        PollFailure::Http { status_code } => *status_code >= 500,
+        PollFailure::Conflict | PollFailure::Api { .. } => false,
+    }
+}
+
+/// Decides which polling events become admin reports. Every failure still
+/// goes to the container log.
+#[derive(Debug, Default)]
+struct PollOutage {
+    started: Option<Instant>,
+    failures: usize,
+    reported: bool,
+}
+
+impl PollOutage {
+    fn observe(&mut self, health: PollHealth<'_>, now: Instant) -> Option<OperationalReport> {
+        match health {
+            PollHealth::Failed(failure) => {
+                let started = *self.started.get_or_insert(now);
+                self.failures += 1;
+                if self.reported {
+                    return None;
+                }
+                let lasted = now.saturating_duration_since(started);
+                if poll_failure_is_transient(failure) && lasted < POLL_OUTAGE_REPORT_AFTER {
+                    return None;
+                }
+                self.reported = true;
+                Some(if lasted.is_zero() {
+                    poll_retry_report(failure)
+                } else {
+                    OperationalReport::new(format!(
+                        "Telegram polling has failed for {}s ({} failures in a row), last: {failure:?}",
+                        lasted.as_secs(),
+                        self.failures
+                    ))
+                })
+            }
+            PollHealth::Recovered => {
+                let outage = std::mem::take(self);
+                let started = outage.started?;
+                outage.reported.then(|| {
+                    OperationalReport::new(format!(
+                        "Telegram polling recovered after {}s",
+                        now.saturating_duration_since(started).as_secs()
+                    ))
+                })
+            }
+        }
+    }
 }
 
 /// Polls until a shutdown signal or `failed` asks to stop, reporting poll
@@ -180,11 +257,19 @@ where
     Handler: UpdateHandler,
     Handler::Error: Display,
 {
+    let mut outage = PollOutage::default();
     run_polling_until(
         runtime,
         || stopping.load(Ordering::Acquire) || failed(),
         |duration| interruptible_wait(stopping, duration),
-        |failure| log_and_queue(reports, poll_retry_report(failure)),
+        |health| match outage.observe(health, Instant::now()) {
+            Some(report) => log_and_queue(reports, report),
+            None => {
+                if let PollHealth::Failed(failure) = health {
+                    eprintln!("{}", poll_retry_report(failure).text());
+                }
+            }
+        },
         |update_id, error| log_and_queue(reports, update_failure_report(update_id, error)),
     )
 }
@@ -471,7 +556,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use bot_adapters::telegram_http::{ReqwestTelegramTransport, TransportFailureKind};
     use bot_adapters::telegram_polling::{
@@ -480,12 +565,12 @@ mod tests {
     use bot_core::telegram_actions::TelegramAction;
 
     use super::{
-        BackgroundReports, MAX_LOGGED_DIAGNOSTIC_CHARS, SecretRedactor, ShutdownHandler,
-        build_operational_reporter, configure_telegram_api, diagnostic_line, diagnostic_log,
-        install_shutdown_handler, interruptible_wait, log_and_queue, opennode_options,
-        poll_retry_report, poll_until_stopped, production_secrets, publish_commands,
-        refresh_chat_menus, report_best_effort, retry_delay, run_polling_until, telegram_transport,
-        update_failure_report,
+        BackgroundReports, MAX_LOGGED_DIAGNOSTIC_CHARS, PollHealth, PollOutage, SecretRedactor,
+        ShutdownHandler, build_operational_reporter, configure_telegram_api, diagnostic_line,
+        diagnostic_log, install_shutdown_handler, interruptible_wait, log_and_queue,
+        opennode_options, poll_failure_is_transient, poll_retry_report, poll_until_stopped,
+        production_secrets, publish_commands, refresh_chat_menus, report_best_effort, retry_delay,
+        run_polling_until, telegram_transport, update_failure_report,
     };
     use crate::config::ProductionConfig;
     use crate::dispatcher::{ActionReceipt, ActionSink};
@@ -760,6 +845,7 @@ mod tests {
     struct PollingLog {
         waits: Vec<Duration>,
         retries: Vec<PollFailure>,
+        recoveries: usize,
         failures: Vec<(i64, String)>,
     }
 
@@ -775,7 +861,10 @@ mod tests {
                 current >= steps
             },
             |duration| log.borrow_mut().waits.push(duration),
-            |failure| log.borrow_mut().retries.push(failure.clone()),
+            |health| match health {
+                PollHealth::Failed(failure) => log.borrow_mut().retries.push(failure.clone()),
+                PollHealth::Recovered => log.borrow_mut().recoveries += 1,
+            },
             |update_id, error| {
                 log.borrow_mut()
                     .failures
@@ -844,8 +933,84 @@ mod tests {
         assert_eq!(result, Ok(()));
         // A handler-failure step also resets the retry deduplication.
         assert_eq!(log.retries, [failure.clone(), failure]);
+        assert_eq!(log.recoveries, 1);
         assert_eq!(log.waits.len(), 3);
         assert_eq!(log.failures, [(5, "synthetic handler failure".to_owned())]);
+    }
+
+    #[test]
+    fn short_polling_outages_stay_out_of_the_admin_chat() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let timeout = PollFailure::Transport {
+            failure: TransportFailureKind::Timeout,
+        };
+        let bad_gateway = PollFailure::Http { status_code: 502 };
+        let mut outage = PollOutage::default();
+        // A one-minute blip like Telegram's nightly 502s: nothing to report.
+        assert_eq!(
+            outage.observe(PollHealth::Failed(&bad_gateway), at(0)),
+            None
+        );
+        assert_eq!(outage.observe(PollHealth::Failed(&timeout), at(53)), None);
+        assert_eq!(outage.observe(PollHealth::Recovered, at(60)), None);
+
+        // A long one is reported once, and so is its end.
+        assert_eq!(outage.observe(PollHealth::Failed(&timeout), at(100)), None);
+        assert_eq!(
+            outage.observe(PollHealth::Failed(&bad_gateway), at(160)),
+            None
+        );
+        let report = outage.observe(PollHealth::Failed(&timeout), at(220));
+        assert_eq!(
+            report.as_ref().map(OperationalReport::text),
+            Some(
+                "Telegram polling has failed for 120s (3 failures in a row), last: Transport { failure: Timeout }"
+            )
+        );
+        assert_eq!(
+            outage.observe(PollHealth::Failed(&bad_gateway), at(300)),
+            None
+        );
+        let report = outage.observe(PollHealth::Recovered, at(310));
+        assert_eq!(
+            report.as_ref().map(OperationalReport::text),
+            Some("Telegram polling recovered after 210s")
+        );
+        assert_eq!(outage.observe(PollHealth::Recovered, at(320)), None);
+    }
+
+    #[test]
+    fn polling_failures_that_retrying_cannot_fix_are_reported_at_once() {
+        let start = Instant::now();
+        for failure in [
+            PollFailure::Conflict,
+            PollFailure::Api {
+                error_code: Some(401),
+            },
+            PollFailure::Http { status_code: 404 },
+        ] {
+            let mut outage = PollOutage::default();
+            let report = outage.observe(PollHealth::Failed(&failure), start);
+            assert_eq!(
+                report.as_ref().map(OperationalReport::text),
+                Some(poll_retry_report(&failure).text()),
+                "{failure:?}"
+            );
+            assert_eq!(outage.observe(PollHealth::Failed(&failure), start), None);
+            assert!(outage.observe(PollHealth::Recovered, start).is_some());
+        }
+        for transient in [
+            PollFailure::RateLimited {
+                retry_after_seconds: None,
+            },
+            PollFailure::Http { status_code: 500 },
+            PollFailure::Transport {
+                failure: TransportFailureKind::Connection,
+            },
+        ] {
+            assert!(poll_failure_is_transient(&transient), "{transient:?}");
+        }
     }
 
     #[test]

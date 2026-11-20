@@ -2,8 +2,14 @@
 
 use crate::locale::Locale;
 
-pub const DOLLAR_TIMEFRAMES: [(&str, i64); 5] =
-    [("1h", 1), ("6h", 6), ("12h", 12), ("24h", 24), ("48h", 48)];
+/// Periods the help text suggests. Any `N` plus `h`, `d`, `w`, `m`/`mo` or
+/// `y` up to 100 years also works: the hourly snapshots cover the last days
+/// and the daily history covers years back.
+pub const DOLLAR_TIMEFRAMES: [&str; 8] = ["1h", "6h", "24h", "48h", "7d", "30d", "1y", "10y"];
+
+/// The last hour the bot's own hourly snapshots still cover. Longer periods
+/// compare against daily closes.
+pub const HOURLY_HISTORY_HOURS: i64 = 48;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DollarCommandPlan {
@@ -31,46 +37,64 @@ pub fn classify_dollar_command(command: &str) -> bool {
     matches!(command, "/dolar" | "/dollar" | "/usd")
 }
 
-#[must_use]
-pub fn plan_dollar_command(message_text: &str) -> DollarCommandPlan {
-    let token = message_text
+fn last_token(message_text: &str) -> String {
+    message_text
         .split_whitespace()
         .next_back()
         .unwrap_or_default()
-        .to_lowercase();
-    if let Some((_, hours)) = DOLLAR_TIMEFRAMES
-        .iter()
-        .find(|(timeframe, _)| *timeframe == token)
-    {
-        return DollarCommandPlan::Load { hours_ago: *hours };
+        .to_lowercase()
+}
+
+/// A count followed by a unit letter, so `/dolar 0h` or `/dolar 500y` get an
+/// error instead of silently showing 24h. Words and bare numbers do not.
+fn looks_like_timeframe(token: &str) -> bool {
+    let Some(split) = token.find(|character: char| !character.is_ascii_digit()) else {
+        return false;
+    };
+    split > 0 && matches!(&token[split..], "h" | "d" | "w" | "m" | "mo" | "y")
+}
+
+#[must_use]
+pub fn plan_dollar_command(message_text: &str) -> DollarCommandPlan {
+    let token = last_token(message_text);
+    if let Some(period) = crate::price_queries::ChartPeriod::parse(&token) {
+        return DollarCommandPlan::Load {
+            hours_ago: period.seconds / 3_600,
+        };
     }
-    let is_timeframe = token.len() >= 2
-        && matches!(token.as_bytes().last(), Some(b'h' | b'd'))
-        && token[..token.len() - 1]
-            .bytes()
-            .all(|character| character.is_ascii_digit());
-    if is_timeframe {
+    if looks_like_timeframe(&token) {
         DollarCommandPlan::InvalidTimeframe
     } else {
         DollarCommandPlan::Load { hours_ago: 24 }
     }
 }
 
+/// The shortest exact name for a period: `8760` hours is `1y`, `168` is `1w`,
+/// `720` is `30d`. Up to 48 hours stays in hours, like the snapshots.
+#[must_use]
+pub fn period_label(hours: i64) -> String {
+    if hours > 0 && hours % (365 * 24) == 0 {
+        format!("{}y", hours / (365 * 24))
+    } else if hours > HOURLY_HISTORY_HOURS && hours % (7 * 24) == 0 {
+        format!("{}w", hours / (7 * 24))
+    } else if hours > HOURLY_HISTORY_HOURS && hours % 24 == 0 {
+        format!("{}d", hours / 24)
+    } else {
+        format!("{hours}h")
+    }
+}
+
 #[must_use]
 pub fn invalid_timeframe_message(message_text: &str, locale: Locale) -> String {
-    let token = message_text
-        .split_whitespace()
-        .next_back()
-        .unwrap_or_default()
-        .to_lowercase();
-    let valid = DOLLAR_TIMEFRAMES
-        .iter()
-        .map(|(timeframe, _)| *timeframe)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let token = last_token(message_text);
+    let valid = DOLLAR_TIMEFRAMES.join(", ");
     match locale {
-        Locale::Es => format!("No conozco el período '{token}'. Usá uno de estos: {valid}"),
-        Locale::En => format!("Unknown period '{token}'. Use one of: {valid}"),
+        Locale::Es => {
+            format!("No conozco el período '{token}'. Usá {valid} o N[h/d/w/m/y], hasta 100y")
+        }
+        Locale::En => {
+            format!("Unknown period '{token}'. Use {valid} or N[h/d/w/m/y], up to 100y")
+        }
     }
 }
 
@@ -144,19 +168,24 @@ pub fn render_dollar_rates(
             }
         })
         .collect::<Vec<_>>();
+    let label = period_label(hours_ago);
     lines.insert(0, String::new());
     lines.insert(
         0,
         match locale {
-            Locale::Es => format!("Dólar en pesos, variación {hours_ago}h"),
-            Locale::En => format!("Dollar in pesos, {hours_ago}h change"),
+            Locale::Es => format!("Dólar en pesos, variación {label}"),
+            Locale::En => format!("Dollar in pesos, {label} change"),
         },
     );
     if hours_ago != 24 && no_history {
         lines.push(String::new());
-        lines.push(match locale {
-            Locale::Es => format!("Todavía no tengo historial de {hours_ago}h. Probá más tarde"),
-            Locale::En => format!("No {hours_ago}h history yet. Try again later"),
+        lines.push(match (locale, hours_ago > HOURLY_HISTORY_HOURS) {
+            (Locale::Es, false) => {
+                format!("Todavía no tengo historial de {label}. Probá más tarde")
+            }
+            (Locale::En, false) => format!("No {label} history yet. Try again later"),
+            (Locale::Es, true) => format!("No conseguí cotizaciones de hace {label}"),
+            (Locale::En, true) => format!("I could not find rates from {label} ago"),
         });
     }
     Some(lines.join("\n"))
@@ -166,7 +195,7 @@ pub fn render_dollar_rates(
 mod tests {
     use super::{
         CurrencyBands, DOLLAR_TIMEFRAMES, DollarCommandPlan, DollarRate, classify_dollar_command,
-        invalid_timeframe_message, plan_dollar_command, render_dollar_rates,
+        invalid_timeframe_message, period_label, plan_dollar_command, render_dollar_rates,
     };
     use crate::locale::Locale;
 
@@ -176,34 +205,88 @@ mod tests {
             assert!(classify_dollar_command(command));
         }
         assert!(!classify_dollar_command("/usdt"));
-        assert_eq!(
-            plan_dollar_command("something 6H"),
-            DollarCommandPlan::Load { hours_ago: 6 }
-        );
-        assert_eq!(
-            plan_dollar_command(""),
-            DollarCommandPlan::Load { hours_ago: 24 }
-        );
-        assert_eq!(
-            plan_dollar_command("7d"),
-            DollarCommandPlan::InvalidTimeframe
-        );
-        assert_eq!(
-            plan_dollar_command("9h"),
-            DollarCommandPlan::InvalidTimeframe
-        );
-        // Words and bare numbers are not timeframes, they fall back to 24h.
-        for word in ["hola", "12", "h", "d", "x9d", "1x"] {
+        for (text, hours_ago) in [
+            ("something 6H", 6),
+            ("", 24),
+            ("/dolar 9h", 9),
+            ("/dolar 7d", 168),
+            ("/dolar 1w", 168),
+            ("/dolar 30d", 720),
+            ("/dolar 1m", 720),
+            ("/dolar 3mo", 2_160),
+            ("/dolar 1y", 8_760),
+            ("/dolar 20y", 175_200),
+            ("/dolar 100y", 876_000),
+        ] {
+            assert_eq!(
+                plan_dollar_command(text),
+                DollarCommandPlan::Load { hours_ago },
+                "{text}"
+            );
+        }
+        for text in [
+            "/dolar 0h",
+            "/dolar 101y",
+            "/dolar 0d",
+            "/dolar 99999999999999999y",
+        ] {
+            assert_eq!(
+                plan_dollar_command(text),
+                DollarCommandPlan::InvalidTimeframe,
+                "{text}"
+            );
+        }
+        // Words, bare numbers and unknown units are not timeframes, they fall back to 24h.
+        for word in ["hola", "12", "h", "d", "x9d", "1x", "2hs", "y"] {
             assert_eq!(
                 plan_dollar_command(&format!("/dolar {word}")),
                 DollarCommandPlan::Load { hours_ago: 24 },
                 "{word}"
             );
         }
-        assert_eq!(DOLLAR_TIMEFRAMES.len(), 5);
+        assert!(DOLLAR_TIMEFRAMES.contains(&"10y"));
         assert_eq!(
-            invalid_timeframe_message("7D", Locale::En),
-            "Unknown period '7d'. Use one of: 1h, 6h, 12h, 24h, 48h"
+            invalid_timeframe_message("0H", Locale::En),
+            "Unknown period '0h'. Use 1h, 6h, 24h, 48h, 7d, 30d, 1y, 10y or N[h/d/w/m/y], up to 100y"
+        );
+    }
+
+    #[test]
+    fn period_labels_pick_the_largest_exact_unit() {
+        for (hours, label) in [
+            (1, "1h"),
+            (24, "24h"),
+            (48, "48h"),
+            (72, "3d"),
+            (168, "1w"),
+            (336, "2w"),
+            (720, "30d"),
+            (8_760, "1y"),
+            (87_600, "10y"),
+            (49, "49h"),
+        ] {
+            assert_eq!(period_label(hours), label, "{hours}");
+        }
+    }
+
+    #[test]
+    fn long_periods_without_any_baseline_say_so() {
+        let rates = [DollarRate {
+            name: "Oficial",
+            price: 1000.0,
+            change: None,
+        }];
+        assert_eq!(
+            render_dollar_rates(&rates, None, 876_000, Locale::Es).as_deref(),
+            Some(
+                "Dólar en pesos, variación 100y\n\nOficial: $1,000\n\nNo conseguí cotizaciones de hace 100y"
+            )
+        );
+        assert_eq!(
+            render_dollar_rates(&rates, None, 168, Locale::En).as_deref(),
+            Some(
+                "Dollar in pesos, 1w change\n\nOfficial: 1,000\n\nI could not find rates from 1w ago"
+            )
         );
     }
 
@@ -270,8 +353,8 @@ mod tests {
     #[test]
     fn spanish_guards_and_rates_without_bands() {
         assert_eq!(
-            invalid_timeframe_message("/dolar 2h", Locale::Es),
-            "No conozco el período '2h'. Usá uno de estos: 1h, 6h, 12h, 24h, 48h"
+            invalid_timeframe_message("/dolar 0d", Locale::Es),
+            "No conozco el período '0d'. Usá 1h, 6h, 24h, 48h, 7d, 30d, 1y, 10y o N[h/d/w/m/y], hasta 100y"
         );
         let rates = [DollarRate {
             name: "Oficial",
