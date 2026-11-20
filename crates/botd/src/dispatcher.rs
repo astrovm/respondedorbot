@@ -652,9 +652,6 @@ const MARKET_CHOICES_LOCK_RETRY: std::time::Duration = if cfg!(test) {
 } else {
     std::time::Duration::from_millis(20)
 };
-/// A vote releases its lock only this long after taking it, safely inside
-/// the lock's expiry.
-const MARKET_CHOICES_LOCK_HOLD: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// How long a chart keeps the button that switches to another match.
 const MARKET_CHART_SELECTION_TTL_SECONDS: i64 = 7 * 86_400;
@@ -1101,6 +1098,12 @@ pub trait MarketPriceSource {
     /// are serialized: exactly one of them wins. Used for single-flight
     /// guards such as one in-flight invoice per user and pack.
     fn claim(&mut self, _key: &str, _value: &str, _ttl_seconds: i64) -> Result<bool, String> {
+        Err("market selection storage unavailable".to_owned())
+    }
+
+    /// Removes a claimed guard key only while it still holds `value`, so a
+    /// claim that expired and was taken by someone else is left alone.
+    fn release(&mut self, _key: &str, _value: &str) -> Result<bool, String> {
         Err("market selection storage unavailable".to_owned())
     }
 
@@ -2241,7 +2244,7 @@ where
         };
         // Two votes on one query at once must not overwrite each other.
         let lock = key.replacen("market_choices:", "market_choices_lock:", 1);
-        let Some(locked_at) = self.lock_market_choices(&lock) else {
+        let Some(token) = self.lock_market_choices(&lock) else {
             return;
         };
         if let Some(mut choices) = self.market_choices(key) {
@@ -2258,11 +2261,10 @@ where
                     .push(format!("market choices write failed key={key}: {error}"));
             }
         }
-        // A lock held past its expiry may be another vote's by now, so it
-        // is left to expire instead of being released.
-        if locked_at.elapsed() < MARKET_CHOICES_LOCK_HOLD
-            && let Some(source) = self.market_price_source.as_mut()
-            && let Err(error) = source.take_selection(&lock)
+        // Only this vote's own lock is removed. One that expired and was
+        // taken by another vote stays.
+        if let Some(source) = self.market_price_source.as_mut()
+            && let Err(error) = source.release(&lock, &token)
         {
             // The lock expires on its own.
             self.state_diagnostics
@@ -2271,19 +2273,19 @@ where
     }
 
     /// Waits briefly for another vote on the same query to finish. Returns
-    /// when the lock was taken, at the latest.
-    fn lock_market_choices(&mut self, lock: &str) -> Option<std::time::Instant> {
+    /// the lock's value, unique to this vote, once the lock is taken.
+    fn lock_market_choices(&mut self, lock: &str) -> Option<String> {
+        let token = format!("{:016x}", rand::random::<u64>());
         for attempt in 0..MARKET_CHOICES_LOCK_ATTEMPTS {
             if attempt > 0 {
                 std::thread::sleep(MARKET_CHOICES_LOCK_RETRY);
             }
-            let claimed_at = std::time::Instant::now();
             let claimed = self.market_price_source.as_mut().map_or(
                 Err("market price source disappeared".to_owned()),
-                |source| source.claim(lock, "1", MARKET_CHOICES_LOCK_TTL_SECONDS),
+                |source| source.claim(lock, &token, MARKET_CHOICES_LOCK_TTL_SECONDS),
             );
             match claimed {
-                Ok(true) => return Some(claimed_at),
+                Ok(true) => return Some(token),
                 Ok(false) => {}
                 Err(error) => {
                     self.state_diagnostics
@@ -12643,6 +12645,21 @@ mod tests {
         }
     }
 
+    /// The test stores' compare-and-delete: removes `key` only while it
+    /// still holds `value`.
+    fn release_stored(
+        stored: &RefCell<HashMap<String, String>>,
+        key: &str,
+        value: &str,
+    ) -> Result<bool, String> {
+        let mut stored = stored.borrow_mut();
+        let owned = stored.get(key).is_some_and(|held| held == value);
+        if owned {
+            stored.remove(key);
+        }
+        Ok(owned)
+    }
+
     struct SelectableMarketPrices {
         initial: MarketPriceLoad,
         candidate: MarketPriceLoad,
@@ -12713,6 +12730,10 @@ mod tests {
                     .insert(key.to_owned(), value.to_owned());
                 Ok(true)
             }
+        }
+
+        fn release(&mut self, key: &str, value: &str) -> Result<bool, String> {
+            release_stored(&self.stored, key, value)
         }
 
         fn clear_selection(&mut self, key: &str) -> Result<(), String> {
@@ -12798,6 +12819,10 @@ mod tests {
             Ok(free)
         }
 
+        fn release(&mut self, key: &str, value: &str) -> Result<bool, String> {
+            release_stored(&self.stored, key, value)
+        }
+
         fn clear_selection(&mut self, key: &str) -> Result<(), String> {
             self.stored.borrow_mut().remove(key);
             Ok(())
@@ -12876,13 +12901,16 @@ mod tests {
 
         fn take_selection(&mut self, key: &str) -> Result<Option<String>, String> {
             // A failing `fail_load` read already stops the callback before
-            // the take. Releasing a vote lock fails like a clear.
-            if key.starts_with("market_choices_lock:")
-                && let Some(error) = &self.fail_clear
-            {
+            // the take.
+            Ok(self.stored.borrow_mut().remove(key))
+        }
+
+        fn release(&mut self, key: &str, value: &str) -> Result<bool, String> {
+            // Releasing a vote lock fails like a clear.
+            if let Some(error) = &self.fail_clear {
                 return Err(error.clone());
             }
-            Ok(self.stored.borrow_mut().remove(key))
+            release_stored(&self.stored, key, value)
         }
 
         fn claim(&mut self, key: &str, value: &str, _: i64) -> Result<bool, String> {

@@ -18,6 +18,9 @@ pub struct RedisJsonCache {
     client: RedisPool,
 }
 
+const DELETE_IF_EQUAL: &str =
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0";
+
 impl RedisJsonCache {
     pub fn new(endpoint: &RedisEndpoint) -> Result<Self, RedisJsonCacheError> {
         Ok(Self {
@@ -58,6 +61,20 @@ impl RedisJsonCache {
     pub fn take(&self, key: &str) -> Result<Option<String>, RedisJsonCacheError> {
         let mut connection = self.client.get_connection()?;
         Ok(redis::cmd("GETDEL").arg(key).query(&mut connection)?)
+    }
+
+    /// Deletes `key` only while it still holds `value`, in one Redis step,
+    /// so a lock holder cannot delete a lock that expired and was taken by
+    /// someone else.
+    pub fn delete_if_equal(&self, key: &str, value: &str) -> Result<bool, RedisJsonCacheError> {
+        let mut connection = self.client.get_connection()?;
+        let deleted: i64 = redis::cmd("EVAL")
+            .arg(DELETE_IF_EQUAL)
+            .arg(1)
+            .arg(key)
+            .arg(value)
+            .query(&mut connection)?;
+        Ok(deleted == 1)
     }
 
     pub fn set_if_absent(
@@ -225,6 +242,14 @@ mod tests {
                     vec!["SET", "refresh:lock", "1", "NX", "EX", "10"],
                     b"$-1\r\n".as_slice(),
                 ),
+                (
+                    vec!["EVAL", super::DELETE_IF_EQUAL, "1", "refresh:lock", "1"],
+                    b":1\r\n".as_slice(),
+                ),
+                (
+                    vec!["EVAL", super::DELETE_IF_EQUAL, "1", "refresh:lock", "1"],
+                    b":0\r\n".as_slice(),
+                ),
             ];
             let (mut stream, _) = listener.accept()?;
             stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -242,6 +267,8 @@ mod tests {
 
         assert!(cache.set_if_absent("refresh:lock", "1", 10)?);
         assert!(!cache.set_if_absent("refresh:lock", "1", 10)?);
+        assert!(cache.delete_if_equal("refresh:lock", "1")?);
+        assert!(!cache.delete_if_equal("refresh:lock", "1")?);
         server
             .join()
             .ok()

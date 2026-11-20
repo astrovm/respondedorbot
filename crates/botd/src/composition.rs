@@ -937,6 +937,10 @@ where
             .map_err(error_text)
     }
 
+    fn release(&mut self, key: &str, value: &str) -> Result<bool, String> {
+        self.cache.release(key, value).map_err(error_text)
+    }
+
     fn clear_selection(&mut self, key: &str) -> Result<(), String> {
         self.cache
             .set(key, &Value::Null.to_string(), 1)
