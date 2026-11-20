@@ -449,7 +449,7 @@ fn format_tool_arguments(raw: &str) -> String {
     };
     arguments
         .into_iter()
-        .map(|(name, value)| format!("{name}={}", format_tool_value(&value)))
+        .map(|(name, value)| format!("{}={}", one_line(&name), format_tool_value(&value)))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -471,7 +471,7 @@ fn format_tool_value(value: &Value) -> String {
             "{{{}}}",
             fields
                 .iter()
-                .map(|(name, value)| format!("{name}: {}", format_tool_value(value)))
+                .map(|(name, value)| format!("{}: {}", one_line(name), format_tool_value(value)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -479,10 +479,16 @@ fn format_tool_value(value: &Value) -> String {
     }
 }
 
+/// Joins words with single spaces, so line breaks and tabs cannot split the
+/// status line.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Quotes text on one line. Text with double quotes and no single quotes
 /// gets single quotes, so its own quotes stay readable.
 fn quote_tool_text(text: &str) -> String {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = one_line(text);
     if text.contains('"') && !text.contains('\'') {
         format!("'{text}'")
     } else {
@@ -756,6 +762,10 @@ mod tests {
                 r#"{"symbols":["BTC","\"ANT\""],"options":{"days":7,"live":true,"note":null}}"#
             ),
             r#"options={days: 7, live: true, note: null}, symbols=["BTC", '"ANT"']"#
+        );
+        assert_eq!(
+            format_tool_arguments(r#"{"top\nname":{"inner\tkey":1}}"#),
+            "top name={inner key: 1}"
         );
         assert_eq!(format_tool_arguments(" not json "), "not json");
     }

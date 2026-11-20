@@ -22,9 +22,14 @@ const BOT_USERNAME: &str = "synthetic_e2e_bot";
 const AI_REPLY: &str = "Respuesta sintética del modelo";
 /// A message with this text makes the fake model call `calculate` first.
 const TOOL_PROMPT: &str = "e2e tool check";
-/// `calculate` ignores `note`; its quotes check how the status line shows text.
-const TOOL_ARGUMENTS: &str = r#"{"expression":"21 * 2","note":"\"quoted\" check"}"#;
-const TOOL_TRACE: &str = r#"🔧 calculate(expression="21 * 2", note='"quoted" check')"#;
+const TRACE_PROMPT: &str = "e2e trace check";
+const TRACE_REPLY: &str = "Encuesta con comillas lista";
+/// A tool call with quoted text, to check how the status line shows it.
+const TRACE_ARGUMENTS: &str = r#"{"options":["sí","no"],"question":"\"Quoted\" poll"}"#;
+const TRACE_LINE: &str = r#"🔧 create_poll(options=["sí", "no"], question='"Quoted" poll')"#;
+/// The status line waits up to a second behind the previous edit. A tool
+/// that answers sooner replaces it with "Pensando." before it is sent.
+const SLOW_POLL: Duration = Duration::from_millis(2_500);
 const TOOL_REPLY_PREFIX: &str = "La herramienta devolvió ";
 const STARTING_CREDITS: i32 = 1_000;
 
@@ -215,6 +220,9 @@ fn telegram_response(method: &str, body: &Value, state: &FakeState) -> String {
             json!(updates)
         }
         method if method.starts_with("send") || method.starts_with("edit") => {
+            if method == "sendPoll" {
+                thread::sleep(SLOW_POLL);
+            }
             let message_id = state.next_message_id.fetch_add(1, Ordering::SeqCst);
             json!({
                 "message_id": message_id,
@@ -233,6 +241,9 @@ fn telegram_response(method: &str, body: &Value, state: &FakeState) -> String {
 fn openrouter_completion(body: &Value) -> (&'static str, String) {
     let usage = json!({"prompt_tokens": 12, "completion_tokens": 6, "cost": 0.000_01});
     let messages = body["messages"].as_array().cloned().unwrap_or_default();
+    if let Some(round) = trace_round(&messages, &usage) {
+        return round;
+    }
     if messages
         .iter()
         .any(|message| message["content"].to_string().contains(TOOL_PROMPT))
@@ -258,6 +269,37 @@ fn openrouter_completion(body: &Value) -> (&'static str, String) {
     )
 }
 
+/// For the trace prompt: first asks for `create_poll` with quoted text, then
+/// answers once the tool ran. Only the current turn counts, since later turns
+/// still carry the prompt in their history.
+fn trace_round(messages: &[Value], usage: &Value) -> Option<(&'static str, String)> {
+    let turn_start = messages
+        .iter()
+        .rposition(|message| message["role"] == "user")?;
+    let turn = &messages[turn_start..];
+    if !turn[0]["content"].to_string().contains(TRACE_PROMPT) {
+        return None;
+    }
+    let tool_ran = turn.iter().any(|message| message["role"] == "tool");
+    let (delta, finish) = if tool_ran {
+        (json!({"content": TRACE_REPLY}), "stop")
+    } else {
+        (
+            json!({"tool_calls": [{"index": 0, "id": "call-trace", "type": "function",
+                "function": {"name": "create_poll", "arguments": TRACE_ARGUMENTS}}]}),
+            "tool_calls",
+        )
+    };
+    let chunk = json!({"id": "synthetic-generation", "model": "synthetic/model",
+        "choices": [{"delta": delta, "finish_reason": null}]});
+    let last = json!({"id": "synthetic-generation", "model": "synthetic/model",
+        "choices": [{"delta": {}, "finish_reason": finish}], "usage": usage});
+    Some((
+        "text/event-stream",
+        format!("data: {chunk}\n\ndata: {last}\n\ndata: [DONE]\n\n"),
+    ))
+}
+
 /// First asks for `calculate`, then answers with what the tool returned.
 fn tool_round(messages: &[Value], usage: &Value) -> (&'static str, String) {
     let tool_output = messages
@@ -267,7 +309,7 @@ fn tool_round(messages: &[Value], usage: &Value) -> (&'static str, String) {
     let delta = tool_output.map_or_else(
         || {
             json!({"tool_calls": [{"index": 0, "id": "call-e2e", "type": "function",
-                "function": {"name": "calculate", "arguments": TOOL_ARGUMENTS}}]})
+                "function": {"name": "calculate", "arguments": r#"{"expression":"21 * 2"}"#}}]})
         },
         |output| json!({"content": format!("{TOOL_REPLY_PREFIX}{output}")}),
     );
@@ -617,16 +659,22 @@ fn exercise_main_flows(
             .iter()
             .any(|text| text == &format!("{TOOL_REPLY_PREFIX}42"))
     })?;
-    // The status line shows the tool's text as written, without JSON escapes.
-    assert!(
-        server
-            .state
+
+    // The status line shows a tool's text as written, without JSON escapes.
+    server.queue_update(private_message(
+        first_update + 6,
+        user_id,
+        &format!("/ask {TRACE_PROMPT}"),
+    ));
+    server.wait_for("a reply after a tool call with quoted text", |state| {
+        state
             .sent_texts(user_id)
             .iter()
-            .any(|text| text == TOOL_TRACE),
-        "{:?}",
-        server.state.sent_texts(user_id)
-    );
+            .any(|text| text == TRACE_REPLY)
+    })?;
+    let texts = server.state.sent_texts(user_id);
+    assert!(texts.iter().any(|text| text == TRACE_LINE), "{texts:?}");
+    assert!(texts.iter().all(|text| !text.contains("\\\"")), "{texts:?}");
 
     server.state.stopping.store(true, Ordering::SeqCst);
     stop_bot(bot)
