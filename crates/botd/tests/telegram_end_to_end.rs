@@ -22,6 +22,9 @@ const BOT_USERNAME: &str = "synthetic_e2e_bot";
 const AI_REPLY: &str = "Respuesta sintética del modelo";
 /// A message with this text makes the fake model call `calculate` first.
 const TOOL_PROMPT: &str = "e2e tool check";
+/// `calculate` ignores `note`; its quotes check how the status line shows text.
+const TOOL_ARGUMENTS: &str = r#"{"expression":"21 * 2","note":"\"quoted\" check"}"#;
+const TOOL_TRACE: &str = r#"🔧 calculate(expression="21 * 2", note='"quoted" check')"#;
 const TOOL_REPLY_PREFIX: &str = "La herramienta devolvió ";
 const STARTING_CREDITS: i32 = 1_000;
 
@@ -264,7 +267,7 @@ fn tool_round(messages: &[Value], usage: &Value) -> (&'static str, String) {
     let delta = tool_output.map_or_else(
         || {
             json!({"tool_calls": [{"index": 0, "id": "call-e2e", "type": "function",
-                "function": {"name": "calculate", "arguments": r#"{"expression":"21 * 2"}"#}}]})
+                "function": {"name": "calculate", "arguments": TOOL_ARGUMENTS}}]})
         },
         |output| json!({"content": format!("{TOOL_REPLY_PREFIX}{output}")}),
     );
@@ -614,6 +617,16 @@ fn exercise_main_flows(
             .iter()
             .any(|text| text == &format!("{TOOL_REPLY_PREFIX}42"))
     })?;
+    // The status line shows the tool's text as written, without JSON escapes.
+    assert!(
+        server
+            .state
+            .sent_texts(user_id)
+            .iter()
+            .any(|text| text == TOOL_TRACE),
+        "{:?}",
+        server.state.sent_texts(user_id)
+    );
 
     server.state.stopping.store(true, Ordering::SeqCst);
     stop_bot(bot)

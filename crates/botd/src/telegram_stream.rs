@@ -454,9 +454,40 @@ fn format_tool_arguments(raw: &str) -> String {
         .join(", ")
 }
 
+/// Shows a tool argument the way a person writes it. JSON escapes such as
+/// `\"` are noise in a status line, so text keeps its own characters.
 fn format_tool_value(value: &Value) -> String {
-    // `Value`'s Display is its compact JSON encoding, so strings stay quoted.
-    value.to_string()
+    match value {
+        Value::String(text) => quote_tool_text(text),
+        Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(format_tool_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Object(fields) => format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .map(|(name, value)| format!("{name}: {}", format_tool_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.to_string(),
+    }
+}
+
+/// Quotes text on one line. Text with double quotes and no single quotes
+/// gets single quotes, so its own quotes stay readable.
+fn quote_tool_text(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.contains('"') && !text.contains('\'') {
+        format!("'{text}'")
+    } else {
+        format!("\"{text}\"")
+    }
 }
 
 #[cfg(test)]
@@ -706,6 +737,27 @@ mod tests {
             Some(TelegramAction::SendMessage(message))
                 if message.text.chars().count() <= bot_core::telegram_actions::MAX_TELEGRAM_TEXT_LENGTH
         ));
+    }
+
+    #[test]
+    fn tool_arguments_show_text_without_json_escapes() {
+        assert_eq!(
+            format_tool_arguments(
+                r#"{"query":"\"S&P 500 Shariah\" index excludes \"aerospace and defense\""}"#
+            ),
+            r#"query='"S&P 500 Shariah" index excludes "aerospace and defense"'"#
+        );
+        assert_eq!(
+            format_tool_arguments(r#"{"query":"it's \"fine\"\n  next\tline "}"#),
+            r#"query="it's "fine" next line""#
+        );
+        assert_eq!(
+            format_tool_arguments(
+                r#"{"symbols":["BTC","\"ANT\""],"options":{"days":7,"live":true,"note":null}}"#
+            ),
+            r#"options={days: 7, live: true, note: null}, symbols=["BTC", '"ANT"']"#
+        );
+        assert_eq!(format_tool_arguments(" not json "), "not json");
     }
 
     #[test]
