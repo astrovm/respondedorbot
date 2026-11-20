@@ -100,6 +100,7 @@ mod tests {
 
     use super::{RedisJsonCache, RedisJsonCacheError};
     use crate::redis_connection::{RedisEndpoint, test_support::read_command};
+    use crate::request_cache::RequestCache;
 
     #[test]
     fn speaks_compatible_get_set_and_setex() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -279,11 +280,7 @@ mod tests {
         assert!(cache.delete_if_equal("refresh:lock", "1")?);
         // Through the cache trait too, as the vote lock uses it.
         let mut cache = cache;
-        assert!(!crate::request_cache::RequestCache::release(
-            &mut cache,
-            "refresh:lock",
-            "1"
-        )?);
+        assert!(!RequestCache::release(&mut cache, "refresh:lock", "1")?);
         server
             .join()
             .ok()
