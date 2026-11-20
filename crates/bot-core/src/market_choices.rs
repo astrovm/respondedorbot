@@ -45,10 +45,8 @@ impl MarketChoices {
             self.votes.remove(index);
         }
         self.votes.push((user_id, candidate_id.to_owned()));
-        if self.votes.len() > MAX_VOTES {
-            let excess = self.votes.len() - MAX_VOTES;
-            self.votes.drain(..excess);
-        }
+        let excess = self.votes.len().saturating_sub(MAX_VOTES);
+        self.votes.drain(..excess);
     }
 
     fn own(&self, user_id: i64) -> Option<&str> {
@@ -59,8 +57,9 @@ impl MarketChoices {
     }
 
     /// The asset with the most votes among `candidates`, if one leads.
+    /// With no votes, a lone candidate leads, which leaves the order as is.
     fn leader<'a>(&self, candidates: &'a [MarketCandidate]) -> Option<&'a str> {
-        let mut counts = candidates
+        let counts = candidates
             .iter()
             .map(|candidate| {
                 let votes = self
@@ -70,12 +69,11 @@ impl MarketChoices {
                     .count();
                 (votes, candidate.id.as_str())
             })
-            .filter(|(votes, _)| *votes > 0)
             .collect::<Vec<_>>();
-        counts.sort_by_key(|(votes, _)| std::cmp::Reverse(*votes));
-        match counts.as_slice() {
-            [(first, id), (second, _), ..] if first > second => Some(id),
-            [(_, id)] => Some(id),
+        let most = counts.iter().map(|(votes, _)| *votes).max()?;
+        let mut leaders = counts.iter().filter(|(votes, _)| *votes == most);
+        match (leaders.next(), leaders.next()) {
+            (Some((_, id)), None) => Some(id),
             _ => None,
         }
     }
@@ -100,7 +98,7 @@ impl MarketChoices {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_VOTES, MarketChoices, choices_key};
+    use super::{MAX_VOTES, MarketChoices, VOTES_TTL_SECONDS, choices_key};
     use crate::market_prices::MarketCandidate;
 
     fn candidates(ids: &[&str]) -> Vec<MarketCandidate> {
@@ -183,10 +181,12 @@ mod tests {
             ["stock:ANT", "ANT", "stock:ANT.MX"]
         );
         // An own choice missing from this search falls back to the leader.
-        choices.record(9, "stock:ANTX", true);
+        let mut missing = MarketChoices::default();
+        missing.record(1, "ANT", false);
+        missing.record(9, "stock:ANTX", true);
         assert_eq!(
-            ordered(&choices, Some(9)),
-            ["stock:ANT", "ANT", "stock:ANT.MX"]
+            ordered(&missing, Some(9)),
+            ["ANT", "stock:ANT", "stock:ANT.MX"]
         );
         // With no votes for these assets, the ranked order stays.
         assert_eq!(
@@ -206,6 +206,8 @@ mod tests {
         }
         assert_eq!(choices.votes.len(), MAX_VOTES);
         assert_eq!(choices.votes[0].0, 3);
+        // Votes are kept for about six months.
+        assert_eq!(VOTES_TTL_SECONDS, 15_552_000);
         let decoded: MarketChoices = serde_json::from_str(r#"{}"#).unwrap_or_default();
         assert!(decoded.votes.is_empty());
     }

@@ -1585,11 +1585,15 @@ fn likelihood(query_match: QueryMatch, well_known: bool, is_stock: bool) -> Like
 }
 
 fn crypto_likelihood(query: &str, asset: &CryptoAsset, quote_parameter: &str) -> Likelihood {
-    // A coin is only offered when its ticker, name or slug is the query.
-    let query_match = if normalized(&asset.symbol) == normalized(query) {
+    let query = normalized(query);
+    // A coin can match only one word of a longer query, as SKY does for
+    // `sky harbour`.
+    let query_match = if normalized(&asset.symbol) == query {
         QueryMatch::Ticker
-    } else {
+    } else if normalized(&asset.name) == query || normalized(&asset.slug) == query {
         QueryMatch::Name
+    } else {
+        QueryMatch::Loose
     };
     let well_known = asset
         .quotes
@@ -2829,6 +2833,19 @@ mod tests {
                 vec![listed_stock("ZPHR", "Zephyr Mining", "NASDAQ", "USD")],
             )?,
             ["ZPR", "stock:ZPHR"]
+        );
+        // A coin that matches one word of a company name comes after the
+        // company.
+        assert_eq!(
+            ids(
+                "sky harbour",
+                vec![with_market_cap(coin("SKY", 0.1), 2e9)],
+                vec![
+                    listed_stock("SKYH", "Sky Harbour Inc.", "NYSE", "USD"),
+                    listed_stock("SKYH.MX", "Sky Harbour Inc.", "Mexico", "MXN"),
+                ],
+            )?,
+            ["stock:SKYH", "stock:SKYH.MX", "SKY"]
         );
         Ok(())
     }
