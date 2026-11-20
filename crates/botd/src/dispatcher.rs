@@ -646,7 +646,12 @@ const MARKET_SELECTION_TTL_SECONDS: i64 = 0;
 /// lock expires on its own if the holder stops.
 const MARKET_CHOICES_LOCK_TTL_SECONDS: i64 = 5;
 const MARKET_CHOICES_LOCK_ATTEMPTS: usize = 5;
-const MARKET_CHOICES_LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
+/// Unit tests exercise the retries without sleeping through them.
+const MARKET_CHOICES_LOCK_RETRY: std::time::Duration = if cfg!(test) {
+    std::time::Duration::ZERO
+} else {
+    std::time::Duration::from_millis(20)
+};
 /// A vote releases its lock only this long after taking it, safely inside
 /// the lock's expiry.
 const MARKET_CHOICES_LOCK_HOLD: std::time::Duration = std::time::Duration::from_secs(4);
@@ -2270,12 +2275,7 @@ where
     fn lock_market_choices(&mut self, lock: &str) -> Option<std::time::Instant> {
         for attempt in 0..MARKET_CHOICES_LOCK_ATTEMPTS {
             if attempt > 0 {
-                // Unit tests exercise the retries without sleeping through them.
-                std::thread::sleep(if cfg!(test) {
-                    std::time::Duration::ZERO
-                } else {
-                    MARKET_CHOICES_LOCK_RETRY
-                });
+                std::thread::sleep(MARKET_CHOICES_LOCK_RETRY);
             }
             let claimed_at = std::time::Instant::now();
             let claimed = self.market_price_source.as_mut().map_or(
