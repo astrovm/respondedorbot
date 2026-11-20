@@ -38,6 +38,7 @@ pub mod language_command;
 pub mod lightning_topup;
 pub mod links;
 pub mod locale;
+pub mod market_choices;
 pub mod market_models;
 pub mod market_prices;
 pub mod mention_targets;

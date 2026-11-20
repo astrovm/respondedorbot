@@ -499,6 +499,7 @@ fn token_signal_state_round_trips_and_reports_storage_failures() {
         tag: "ETH".to_owned(),
         address: "0x0000000000000000000000000000000000000001".to_owned(),
         last_refresh_at: Some(10),
+        alternatives: None,
     };
     let cache = Cache::default();
     let mut adapter = TokenSignalAdapter::new(Transport::default(), cache.clone());

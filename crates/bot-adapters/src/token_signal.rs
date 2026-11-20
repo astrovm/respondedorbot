@@ -3201,6 +3201,7 @@ mod tests {
             tag: "SOL".to_owned(),
             address: "synthetic-mint".to_owned(),
             last_refresh_at: Some(1_800_000_000),
+            alternatives: None,
         };
         let mut adapter = TokenSignalAdapter::new(scripted(Vec::new()), Cache::default());
         assert_eq!(adapter.save_state("synthetic", &state), Ok(()));

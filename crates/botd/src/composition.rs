@@ -1953,6 +1953,7 @@ fn telegram_action_chat_id(action: &TelegramAction) -> Option<i64> {
         | TelegramAction::SendTyping { chat_id }
         | TelegramAction::EditMessage { chat_id, .. }
         | TelegramAction::EditMessageNoPreview { chat_id, .. }
+        | TelegramAction::EditMessageReplyMarkup { chat_id, .. }
         | TelegramAction::DeleteMessage { chat_id, .. } => Some(chat_id.0),
         TelegramAction::SetCommands { .. }
         | TelegramAction::AnswerCallback { .. }
@@ -6932,6 +6933,7 @@ mod tests {
             tag: address.tag,
             address: address.address,
             last_refresh_at: None,
+            alternatives: None,
         };
         assert_eq!(
             TokenSignalSource::load_state(&mut adapter, "missing"),

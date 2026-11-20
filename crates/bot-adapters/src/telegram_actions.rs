@@ -323,6 +323,23 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
                 Some(Value::Object(payload)),
             )
         }
+        TelegramAction::EditMessageReplyMarkup {
+            chat_id,
+            message_id,
+            reply_markup,
+        } => {
+            let mut payload = Map::from_iter([
+                ("chat_id".to_owned(), json!(chat_id.0)),
+                ("message_id".to_owned(), json!(message_id.0)),
+            ]);
+            insert_optional(&mut payload, "reply_markup", reply_markup)?;
+            (
+                "editMessageReplyMarkup",
+                Method::POST,
+                None,
+                Some(Value::Object(payload)),
+            )
+        }
         TelegramAction::DeleteMessage {
             chat_id,
             message_id,
@@ -492,6 +509,7 @@ pub fn execute_with<T: TelegramTransport>(
         } if matches!(action.as_ref(), TelegramAction::EditMessage { .. }) => *ephemeral_message_id,
         TelegramAction::EditMessage { message_id, .. }
         | TelegramAction::EditMessageNoPreview { message_id, .. }
+        | TelegramAction::EditMessageReplyMarkup { message_id, .. }
         | TelegramAction::EditMessagePhoto { message_id, .. } => Some(message_id.0),
         _ => None,
     };
@@ -708,6 +726,11 @@ mod tests {
                 photo: Vec::new().into(),
                 caption: "final".to_owned(),
                 parse_mode: None,
+                reply_markup: None,
+            },
+            TelegramAction::EditMessageReplyMarkup {
+                chat_id: ChatId(-42),
+                message_id: MessageId(7),
                 reply_markup: None,
             },
         ] {
@@ -1179,6 +1202,46 @@ mod tests {
                 "text":"draft https://example.test",
                 "link_preview_options":{"is_disabled":true},
             }))
+        );
+    }
+
+    #[test]
+    fn reply_markup_edits_send_only_the_buttons() {
+        let markup = bot_core::telegram_actions::InlineKeyboardMarkup {
+            inline_keyboard: vec![vec![bot_core::menu_ui::button("More", "mkt:alts:id:0")]],
+        };
+        let mut payloads = Vec::new();
+        for reply_markup in [Some(markup), None] {
+            let transport = transport(r#"{"ok":true,"result":{"message_id":77}}"#);
+            assert_eq!(
+                execute_with(
+                    &transport,
+                    "synthetic-token",
+                    TelegramAction::EditMessageReplyMarkup {
+                        chat_id: ChatId(42),
+                        message_id: MessageId(77),
+                        reply_markup,
+                    },
+                ),
+                Ok(ActionOutcome::Completed {
+                    message_id: Some(77)
+                })
+            );
+            let request = transport.requests.borrow()[0].clone();
+            assert_eq!(request.endpoint, "editMessageReplyMarkup");
+            payloads.push(request.json_payload);
+        }
+        assert_eq!(
+            payloads[0],
+            Some(serde_json::json!({
+                "chat_id":42,
+                "message_id":77,
+                "reply_markup":{"inline_keyboard":[[{"text":"More","callback_data":"mkt:alts:id:0"}]]},
+            }))
+        );
+        assert_eq!(
+            payloads[1],
+            Some(serde_json::json!({"chat_id":42,"message_id":77}))
         );
     }
 
