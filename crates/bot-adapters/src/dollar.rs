@@ -170,7 +170,7 @@ pub fn refresh_dollar_snapshot<T: DollarTransport, C: DollarCache>(
         // A cached copy is dated by when CriptoYa sent it, so a price from
         // before midnight never becomes the next day's close.
         let priced_at = load.fetched_at.unwrap_or(now_unix);
-        record_own_closes(cache, &closes, priced_at, &mut diagnostics);
+        record_own_closes(cache, &closes, priced_at, now_unix, &mut diagnostics);
     }
     if let (true, Some(current)) = (load.refreshed, load.data) {
         let hourly_value = json!({"timestamp": now_unix, "data": current}).to_string();
@@ -1347,6 +1347,7 @@ mod tests {
         crate::dollar_history::record_own_closes(
             &mut cache,
             &[("ccb", 1400.0)],
+            1_725_000_000 - 7 * 86_400,
             1_725_000_000 - 7 * 86_400,
             &mut Vec::new(),
         );

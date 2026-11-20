@@ -39,7 +39,8 @@ const OWN_CLOSES_KEY: &str = "dollar_own_daily_closes:v1";
 const OWN_CLOSES_TTL_SECONDS: i64 = 10 * 365 * 86_400;
 /// Where a saved closes value that does not parse is set aside, for a
 /// person to look at, before the closes start again. The key ends with the
-/// time it was set aside, so a later bad value cannot replace it.
+/// time of the run that set it aside, so a later bad value cannot replace
+/// it.
 const OWN_CLOSES_INVALID_PREFIX: &str = "dollar_own_daily_closes:v1:invalid";
 
 /// The ArgentinaDatos `casa` for each `/dolar` row it has a history for.
@@ -270,7 +271,7 @@ pub fn own_closes_for_reply<C: RequestCache>(
 }
 
 /// Saves `prices` (own source name and price) as the closes of the day
-/// they were priced on. The price refresh job calls this on each run, so
+/// they were priced on (`priced_at`); `now_unix` is when this run happens. The price refresh job calls this on each run, so
 /// the last run of a day leaves the day's close. Nothing is written when
 /// the saved closes cannot be read, so they are never wiped. A saved value
 /// that does not parse is copied to its own key and the closes start
@@ -279,6 +280,7 @@ pub fn record_own_closes<C: RequestCache>(
     cache: &mut C,
     prices: &[(&str, f64)],
     priced_at: i64,
+    now_unix: i64,
     diagnostics: &mut Vec<String>,
 ) {
     if prices.is_empty() {
@@ -289,7 +291,9 @@ pub fn record_own_closes<C: RequestCache>(
         Ok(OwnCloses::Missing) => DailyHistory::default(),
         Ok(OwnCloses::Saved(history)) => history,
         Ok(OwnCloses::Invalid(raw)) => {
-            let aside = format!("{OWN_CLOSES_INVALID_PREFIX}:{priced_at}");
+            // Named by this run's time, not the price time: while CriptoYa is
+            // down, every run reuses one cached price time.
+            let aside = format!("{OWN_CLOSES_INVALID_PREFIX}:{now_unix}");
             if let Err(error) = cache.set(&aside, &raw, OWN_CLOSES_TTL_SECONDS) {
                 diagnostics.push(format!("could not write dollar cache key {aside}: {error}"));
                 return;
@@ -493,17 +497,20 @@ mod tests {
             &mut cache,
             &[("ccb", 1400.0)],
             now - 86_400,
+            now - 86_400,
             &mut diagnostics,
         );
         record_own_closes(
             &mut cache,
             &[("ccb", 1450.0), ("usdc", 1460.0)],
             now,
+            now,
             &mut diagnostics,
         );
         record_own_closes(
             &mut cache,
             &[("ccb", 1470.0)],
+            now + 3_600,
             now + 3_600,
             &mut diagnostics,
         );
@@ -517,9 +524,9 @@ mod tests {
         // No prices touch nothing, and an unreadable copy is not replaced.
         let saved = cache.values.get(OWN_CLOSES_KEY).cloned();
         cache.fail_reads = true;
-        record_own_closes(&mut cache, &[], now, &mut diagnostics);
+        record_own_closes(&mut cache, &[], now, now, &mut diagnostics);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        record_own_closes(&mut cache, &[("ccb", 1.0)], now, &mut diagnostics);
+        record_own_closes(&mut cache, &[("ccb", 1.0)], now, now, &mut diagnostics);
         assert_eq!(cache.values.get(OWN_CLOSES_KEY), saved.as_ref());
         assert_eq!(own_closes_for_reply(&mut cache, &mut diagnostics), None);
         assert_eq!(
@@ -541,13 +548,13 @@ mod tests {
         let mut diagnostics = Vec::new();
         assert_eq!(own_closes_for_reply(&mut cache, &mut diagnostics), None);
         cache.fail_writes = true;
-        record_own_closes(&mut cache, &[("ccb", 1.0)], now, &mut diagnostics);
+        record_own_closes(&mut cache, &[("ccb", 1.0)], now, now, &mut diagnostics);
         assert_eq!(
             cache.values.get(OWN_CLOSES_KEY).map(String::as_str),
             Some(broken)
         );
         cache.fail_writes = false;
-        record_own_closes(&mut cache, &[("ccb", 1.0)], now, &mut diagnostics);
+        record_own_closes(&mut cache, &[("ccb", 1.0)], now, now, &mut diagnostics);
         assert_eq!(cache.values.get(&aside).map(String::as_str), Some(broken));
         let closes = own_closes_for_reply(&mut cache, &mut diagnostics).unwrap_or_default();
         assert_eq!(closes.close("ccb", today), Some(1.0));
@@ -562,14 +569,21 @@ mod tests {
         );
         // The next refresh finds good closes and says nothing.
         let mut diagnostics = Vec::new();
-        record_own_closes(&mut cache, &[("ccb", 2.0)], now, &mut diagnostics);
+        record_own_closes(&mut cache, &[("ccb", 2.0)], now, now, &mut diagnostics);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        // A later bad value is set aside next to the first one.
+        // A later bad value is set aside next to the first one, also while
+        // CriptoYa is down and every run reuses one cached price time.
         cache
             .values
             .insert(OWN_CLOSES_KEY.to_owned(), "later".to_owned());
-        record_own_closes(&mut cache, &[("ccb", 2.0)], now + 60, &mut diagnostics);
-        let later = format!("{OWN_CLOSES_INVALID_PREFIX}:{}", now + 60);
+        record_own_closes(
+            &mut cache,
+            &[("ccb", 2.0)],
+            now,
+            now + 1_800,
+            &mut diagnostics,
+        );
+        let later = format!("{OWN_CLOSES_INVALID_PREFIX}:{}", now + 1_800);
         assert_eq!(cache.values.get(&later).map(String::as_str), Some("later"));
         assert_eq!(cache.values.get(&aside).map(String::as_str), Some(broken));
         assert_eq!(
@@ -581,7 +595,7 @@ mod tests {
         cache.values.remove(OWN_CLOSES_KEY);
         cache.fail_writes = true;
         let mut diagnostics = Vec::new();
-        record_own_closes(&mut cache, &[("ccb", 1.0)], now, &mut diagnostics);
+        record_own_closes(&mut cache, &[("ccb", 1.0)], now, now, &mut diagnostics);
         assert_eq!(
             diagnostics,
             [format!(
