@@ -332,7 +332,7 @@ pub(crate) fn tool_schema(tool: NativeTool) -> Value {
             "Get current Argentine dollar exchange rates and their change over an optional historical timeframe.",
             json!({
                 "type": "object",
-                "properties": {"timeframe": {"type": "string", "enum": ["1h", "6h", "12h", "24h", "48h"], "description": "Optional comparison timeframe. Defaults to 24h."}},
+                "properties": {"timeframe": {"type": "string", "description": "Optional comparison timeframe: a count and a unit (h hours, d days, w weeks, m months, y years), from 1h to 100y, such as 6h, 7d, 30d, 1y or 10y. Defaults to 24h. Daily history goes back to 2011 for most rates and to 2002 for the wholesale rate and TCRM."}},
                 "required": []
             }),
         ),
@@ -471,8 +471,16 @@ mod tests {
             Ok(json!({"question": "synthetic?", "options": ["a", "b"], "anonymous": true}))
         );
         assert_eq!(
-            registry.check_arguments("dollar_rates", json!({"timeframe": "6H"})),
-            Ok(json!({"timeframe": "6h"}))
+            registry.check_arguments(
+                "crypto_prices",
+                json!({"assets": ["BTC"], "timeframe": "7D"})
+            ),
+            Ok(json!({"assets": ["BTC"], "timeframe": "7d"}))
+        );
+        // Dollar periods are free text; the dollar command lowercases them.
+        assert_eq!(
+            registry.check_arguments("dollar_rates", json!({"timeframe": "10Y"})),
+            Ok(json!({"timeframe": "10Y"}))
         );
         let rejected = registry.check_arguments(
             "task_set",

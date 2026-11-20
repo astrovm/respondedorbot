@@ -9799,11 +9799,11 @@ mod tests {
             "@mybot",
         );
         assert_eq!(
-            invalid.dispatch(update("/dolar 7d", None)),
+            invalid.dispatch(update("/dolar 101y", None)),
             Ok(DispatchOutcome::Handled)
         );
         let message = first_sent(&invalid.actions.0);
-        assert!(message.text.contains("7d"));
+        assert!(message.text.contains("101y"));
         assert!(message.text.contains("No conozco el período"));
 
         let config = Config {

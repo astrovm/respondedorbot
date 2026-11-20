@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bot_adapters::bcra::{
     BcraTransport, ReqwestBcraTransport, TransportFailureKind as BcraTransportFailureKind,
-    load_bcra, load_dollar_references,
+    load_bcra, load_dollar_baselines, load_dollar_references,
 };
 use bot_adapters::billing_read::{BillingRepository, ChargeHistoryRow};
 use bot_adapters::chat_bans::ChatBanRepository;
@@ -28,7 +28,7 @@ use bot_adapters::criptoya::{
 };
 use bot_adapters::dollar::{
     DollarCache, DollarTransport, ReqwestDollarTransport,
-    TransportFailureKind as DollarTransportFailureKind, load_dollar_market_with_references,
+    TransportFailureKind as DollarTransportFailureKind, load_dollar_market_with_history,
 };
 use bot_adapters::finviz::{
     FinvizTransport, ReqwestFinvizTransport, TransportFailureKind as FinvizTransportFailureKind,
@@ -98,8 +98,8 @@ use bot_core::market_prices::{
     execute_stock_candidate,
 };
 use bot_core::stocks::{
-    StockQuery, StockQuote, StockSearchCandidate, plan_stock_query, rank_stock_quotes,
-    yahoo_candidate_name_matches_query,
+    StockQuery, StockQuote, StockSearchCandidate, exchange_qualifier_readings, listed_on_exchange,
+    plan_stock_query, rank_stock_quotes, yahoo_candidate_name_matches_query,
 };
 use bot_core::telegram_actions::TelegramAction;
 use bot_core::telegram_commands::command_publication_actions;
@@ -1033,15 +1033,29 @@ impl<T: DollarTransport, B: BcraTransport, C: DollarCache> DollarMarketSource
         now_unix: i64,
     ) -> DollarMarketLoad {
         let references = load_dollar_references(&self.bcra_transport, &mut self.cache, now_unix);
-        let mut load = load_dollar_market_with_references(
+        // Past the hourly snapshots, BCRA gives the wholesale rate and the
+        // TCRM 100 of the period's first day.
+        let baselines = (hours_ago > bot_core::dollar::HOURLY_HISTORY_HOURS).then(|| {
+            load_dollar_baselines(
+                &self.bcra_transport,
+                &mut self.cache,
+                now_unix.saturating_sub(hours_ago.saturating_mul(3_600)),
+                now_unix,
+            )
+        });
+        let mut load = load_dollar_market_with_history(
             &self.transport,
             &mut self.cache,
             hours_ago,
             locale,
             now_unix,
             Some(&references),
+            baselines.as_ref(),
         );
         load.diagnostics.extend(references.diagnostics);
+        if let Some(baselines) = baselines {
+            load.diagnostics.extend(baselines.diagnostics);
+        }
         DollarMarketLoad {
             text: load.text,
             diagnostics: load.diagnostics,
@@ -1341,6 +1355,51 @@ where
         candidates
     }
 
+    /// Yahoo's search knows `TTWO`, not `TTWO:NASDAQ` or `NASDAQ:TTWO`, so
+    /// an exchange-qualified query searches its ticker and keeps the
+    /// listings on that exchange. Returns the searched text and candidates.
+    fn discover_candidates<'q>(
+        &mut self,
+        query: &'q str,
+        now_unix: i64,
+        diagnostics: &mut Vec<String>,
+    ) -> (&'q str, Vec<StockSearchCandidate>) {
+        let readings = exchange_qualifier_readings(query);
+        let mut searched = Vec::with_capacity(readings.len());
+        for &(ticker, exchange) in &readings {
+            let candidates = Self::candidates_for_query(
+                self.resolve_candidates(ticker, now_unix, diagnostics),
+                ticker,
+            );
+            let on_exchange = candidates
+                .iter()
+                .filter(|candidate| listed_on_exchange(exchange, &candidate.exchange))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !on_exchange.is_empty() {
+                return (ticker, on_exchange);
+            }
+            searched.push((ticker, candidates));
+        }
+        // No listing on the named exchange. With a known code the ticker is
+        // certain, so all its listings stay. With two unknown sides nothing
+        // is shown: a guess finds the wrong company (`PSX:OGDC` would show
+        // Phillips 66).
+        if readings.len() == 1 {
+            return searched.swap_remove(0);
+        }
+        match searched.first() {
+            Some((ticker, _)) => (ticker, Vec::new()),
+            None => (
+                query,
+                Self::candidates_for_query(
+                    self.resolve_candidates(query, now_unix, diagnostics),
+                    query,
+                ),
+            ),
+        }
+    }
+
     fn resolve_missing(
         &mut self,
         quotes: Vec<(String, Option<StockQuote>)>,
@@ -1358,10 +1417,7 @@ where
                 resolved.push((query, quote));
                 continue;
             }
-            let candidates = Self::candidates_for_query(
-                self.resolve_candidates(&query, now_unix, diagnostics),
-                &query,
-            );
+            let (search, candidates) = self.discover_candidates(&query, now_unix, diagnostics);
             let candidate_quotes = candidates
                 .iter()
                 .filter_map(|candidate| {
@@ -1380,7 +1436,7 @@ where
                 resolved.push((query, None));
                 continue;
             }
-            rank_stock_quotes(&query, &mut merged);
+            rank_stock_quotes(search, &mut merged);
             merged.truncate(10);
             resolved.extend(merged.into_iter().map(|quote| (query.clone(), Some(quote))));
         }
@@ -2844,6 +2900,16 @@ impl<Transport: TelegramTransport> TelegramActionSink<Transport> {
                         .max(1);
                     (self.wait)(Duration::from_secs(seconds));
                 }
+                // A refused or dropped connect never reached Telegram, so
+                // sending again cannot deliver the action twice. Timeouts
+                // might have been delivered and are not retried here.
+                ActionOutcome::TransportFailed(TransportFailureKind::Connection)
+                    if attempts < TELEGRAM_ACTION_MAX_ATTEMPTS =>
+                {
+                    let seconds = TELEGRAM_ACTION_DEFAULT_RETRY_SECONDS
+                        .saturating_mul(u64::try_from(attempts).unwrap_or(u64::MAX));
+                    (self.wait)(Duration::from_secs(seconds));
+                }
                 outcome => return Ok(outcome),
             }
         }
@@ -4129,6 +4195,13 @@ mod tests {
 
     impl bot_adapters::dollar::DollarTransport for DollarTransportStub {
         fn get(
+            &self,
+        ) -> Result<bot_adapters::dollar::HttpResponse, bot_adapters::dollar::TransportFailureKind>
+        {
+            Err(bot_adapters::dollar::TransportFailureKind::Request)
+        }
+
+        fn get_daily_history(
             &self,
         ) -> Result<bot_adapters::dollar::HttpResponse, bot_adapters::dollar::TransportFailureKind>
         {
@@ -6492,8 +6565,55 @@ mod tests {
             })
         );
 
-        let transport = Transport::with(vec![Err(TransportFailureKind::Connection)]);
+        let transport = Transport::with(vec![Err(TransportFailureKind::Timeout)]);
+        // A timeout might have been delivered, so it is not sent again.
         let mut sink = TelegramActionSink::new(transport, "token");
+        assert_eq!(
+            sink.execute(TelegramAction::SendMessage(SendMessage::new(
+                ChatId(1),
+                "hello"
+            ))),
+            Err(TelegramActionSinkError::Transport(
+                TransportFailureKind::Timeout
+            ))
+        );
+        assert_eq!(sink.transport.requests.borrow().len(), 1);
+    }
+
+    #[test]
+    fn action_sink_resends_after_a_failed_connect_with_growing_waits() {
+        let waits = Arc::new(Mutex::new(Vec::new()));
+        let recorder = |waits: &Arc<Mutex<Vec<Duration>>>| {
+            let waits = waits.clone();
+            move |duration| {
+                if let Ok(mut waits) = waits.lock() {
+                    waits.push(duration);
+                }
+            }
+        };
+        let transport = Transport::with(vec![
+            Err(TransportFailureKind::Connection),
+            telegram_response(200, r#"{"ok":true,"result":{"message_id":9}}"#),
+        ]);
+        let mut sink = TelegramActionSink::new(transport, "token").with_wait(recorder(&waits));
+        assert_eq!(
+            sink.execute(TelegramAction::SendMessage(SendMessage::new(
+                ChatId(1),
+                "hello"
+            ))),
+            Ok(ActionReceipt {
+                message_id: Some(bot_core::telegram_input::MessageId(9))
+            })
+        );
+        assert_eq!(sink.transport.requests.borrow().len(), 2);
+
+        let transport = Transport::with(vec![
+            Err(TransportFailureKind::Connection),
+            Err(TransportFailureKind::Connection),
+            Err(TransportFailureKind::Connection),
+            telegram_response(200, r#"{"ok":true,"result":{"message_id":9}}"#),
+        ]);
+        let mut sink = TelegramActionSink::new(transport, "token").with_wait(recorder(&waits));
         assert_eq!(
             sink.execute(TelegramAction::SendMessage(SendMessage::new(
                 ChatId(1),
@@ -6503,6 +6623,15 @@ mod tests {
                 TransportFailureKind::Connection
             ))
         );
+        assert_eq!(sink.transport.requests.borrow().len(), 3);
+        assert!(waits.lock().is_ok_and(|waits| {
+            waits.as_slice()
+                == [
+                    Duration::from_secs(1),
+                    Duration::from_secs(1),
+                    Duration::from_secs(2),
+                ]
+        }));
     }
 
     #[test]
@@ -8043,6 +8172,11 @@ mod tests {
         };
         let load = source.load(6, Locale::En, 1_700_000_000);
         assert!(load.text.is_none());
+        // Without CriptoYa rates there is nothing to compare, so the daily
+        // history is not read; the stub fails it like every other request.
+        assert!(
+            bot_adapters::dollar::DollarTransport::get_daily_history(&source.transport).is_err()
+        );
         assert!(
             load.diagnostics
                 .iter()
@@ -8947,6 +9081,118 @@ mod tests {
     }
 
     #[test]
+    fn stock_source_searches_the_ticker_of_an_exchange_qualified_query() {
+        let chart = |symbol: &str, exchange: &str| {
+            Ok(YahooHttpResponse {
+                status_code: 200,
+                body: serde_json::json!({
+                    "chart": {"result": [{"meta": {
+                        "symbol": symbol,
+                        "regularMarketPrice": 230,
+                        "chartPreviousClose": 200,
+                        "currency": "USD",
+                        "exchangeName": exchange,
+                    }}]}
+                })
+                .to_string(),
+            })
+        };
+        // Yahoo's search finds nothing for `TTWO:NASDAQ`, only for `TTWO`.
+        let search = || {
+            Ok(YahooHttpResponse {
+                status_code: 200,
+                body: r#"{"quotes":[
+                    {"quoteType":"EQUITY","symbol":"TTWO","longname":"Take-Two Interactive Software, Inc.","exchange":"NMS","exchDisp":"NASDAQ"},
+                    {"quoteType":"EQUITY","symbol":"TTWO.MX","longname":"Take-Two Interactive Software, Inc.","exchange":"MEX","exchDisp":"Mexico"},
+                    {"quoteType":"EQUITY","symbol":"TKE.F","longname":"Take-Two Interactive Software, Inc.","exchange":"FRA","exchDisp":"Frankfurt"}
+                ]}"#
+                .to_owned(),
+            })
+        };
+        let source = |chart_responses| YahooStockPriceSource {
+            yahoo_transport: StockYahooTransportStub {
+                chart_responses: RefCell::new(chart_responses),
+                search_responses: RefCell::new(vec![search()]),
+                charts: RefCell::default(),
+                searches: RefCell::default(),
+            },
+            finviz_transport: FinvizTransportStub {
+                response: RefCell::new(None),
+            },
+            cache: WeatherCacheStub,
+        };
+        let charted = |transport: &StockYahooTransportStub| {
+            transport
+                .charts
+                .borrow()
+                .iter()
+                .filter(|request| !request.intraday)
+                .map(|request| request.symbol.clone())
+                .collect::<Vec<_>>()
+        };
+
+        for query in ["ttwo:nasdaq", "NASDAQ:TTWO"] {
+            let mut nasdaq = source(vec![
+                Ok(YahooHttpResponse {
+                    status_code: 404,
+                    body: String::new(),
+                }),
+                chart("TTWO", "NasdaqGS"),
+            ]);
+            let load = nasdaq.load_with_timeframe(query, Some("7d"), 1_800_000_000);
+            assert_eq!(
+                quote_symbols(&load),
+                [(query.to_owned(), Some("TTWO".to_owned()))],
+                "{query}"
+            );
+            assert_eq!(
+                nasdaq.yahoo_transport.searches.borrow()[0].query,
+                if query.starts_with('t') {
+                    "ttwo"
+                } else {
+                    "TTWO"
+                }
+            );
+            assert_eq!(charted(&nasdaq.yahoo_transport)[1..], ["TTWO"], "{query}");
+        }
+
+        // Two unknown sides: both readings are searched, and with no
+        // listing on either "exchange" nothing is shown, not even TTWO.
+        let mut unknown = source(vec![Err(YahooFailure::Request)]);
+        unknown
+            .yahoo_transport
+            .search_responses
+            .borrow_mut()
+            .push(search());
+        let load = unknown.load_with_timeframe("XYZ:TTWO", Some("7d"), 1_800_000_000);
+        assert_eq!(quote_symbols(&load), [("XYZ:TTWO".to_owned(), None)]);
+        assert_eq!(
+            unknown
+                .yahoo_transport
+                .searches
+                .borrow()
+                .iter()
+                .map(|request| request.query.as_str())
+                .collect::<Vec<_>>(),
+            ["XYZ", "TTWO"]
+        );
+
+        // A known exchange with no listing still finds every listing.
+        let mut elsewhere = source(vec![
+            Err(YahooFailure::Request),
+            chart("TTWO", "NasdaqGS"),
+            chart("TTWO.MX", "Mexico"),
+            chart("TKE.F", "Frankfurt"),
+        ]);
+        let load = elsewhere.load_with_timeframe("TTWO:LSE", Some("7d"), 1_800_000_000);
+        assert_eq!(load.quotes.map_or(0, |quotes| quotes.len()), 3);
+        assert_eq!(
+            charted(&elsewhere.yahoo_transport)[1..],
+            ["TTWO", "TTWO.MX", "TKE.F"]
+        );
+    }
+
+    #[test]
     fn stock_source_keeps_direct_bare_quote_when_discovery_fails() {
         let transport = StockYahooTransportStub {
             chart_responses: RefCell::new(vec![Ok(YahooHttpResponse {
@@ -9425,6 +9671,19 @@ mod tests {
                         .to_owned(),
                 })
             }
+
+            fn get_daily_history(
+                &self,
+            ) -> Result<
+                bot_adapters::dollar::HttpResponse,
+                bot_adapters::dollar::TransportFailureKind,
+            > {
+                Ok(bot_adapters::dollar::HttpResponse {
+                    status_code: 200,
+                    body: r#"[{"casa":"oficial","compra":700,"venta":710,"fecha":"2024-08-30"}]"#
+                        .to_owned(),
+                })
+            }
         }
 
         let mut source = super::CriptoYaDollarMarketSource {
@@ -9441,6 +9700,13 @@ mod tests {
                 .iter()
                 .all(|item| !item.contains("dollar history"))
         );
+
+        // A year back comes from the daily closes: 2025-08-30 vs 2024-08-30.
+        let load = source.load(8_760, Locale::En, 1_756_555_200);
+        let text = load.text.unwrap_or_default();
+        assert!(text.starts_with("Dollar in pesos, 1y change"), "{text}");
+        assert!(text.contains("Official: 1,420 (+100%)"), "{text}");
+        assert!(text.lines().any(|line| line == "Blue: 1,430"), "{text}");
     }
 
     #[test]

@@ -105,6 +105,15 @@ Examples: `/c bitcoin 1m`, `/c bitcoin 7d`, `/p apple 1y`, `/s AAPL 5y`.
 - **No history.** If the provider can't supply usable history, delivery falls back to the available quote and says that the chart is unavailable.
 - **No range.** Without an explicit range, the caption keeps the default daily change.
 
+### Dollar change periods
+
+`/dolar` takes the same suffixes, from `1h` to `100y`, and shows how much each rate changed in that time. Examples: `/dolar 6h`, `/dolar 1w`, `/dolar 30d`, `/dolar 10y`.
+
+- **Up to 48 hours.** The change uses the bot's own hourly snapshots.
+- **Longer periods.** The change uses the daily closes from [ArgentinaDatos](https://argentinadatos.com): blue, official and wholesale since 2011, CCL since 2013, MEP since 2018, card since 2019 and USDT since 2023.
+- **Wholesale and TCRM 100.** Before 2011, the wholesale rate comes from BCRA, which starts in 2002. TCRM 100 uses BCRA's wholesale rate and ITCRM of that day.
+- **No history.** A rate without a close from that time shows only its price.
+
 ## ⬇️ Run it yourself
 
 You need:

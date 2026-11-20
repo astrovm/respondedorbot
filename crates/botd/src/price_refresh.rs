@@ -580,6 +580,13 @@ mod tests {
         {
             Err(bot_adapters::dollar::TransportFailureKind::Connection)
         }
+
+        fn get_daily_history(
+            &self,
+        ) -> Result<bot_adapters::dollar::HttpResponse, bot_adapters::dollar::TransportFailureKind>
+        {
+            Err(bot_adapters::dollar::TransportFailureKind::Connection)
+        }
     }
 
     impl bot_adapters::coinmarketcap::CoinMarketCapMarketTransport for OfflineTransport {

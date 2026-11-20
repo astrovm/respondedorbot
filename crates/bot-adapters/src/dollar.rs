@@ -4,12 +4,13 @@ use std::thread;
 use std::time::Duration;
 
 use bot_core::cache_policy::{CacheDecision, evaluate_cache, request_cache_history_key};
-use bot_core::dollar::{CurrencyBands, DollarRate, render_dollar_rates};
+use bot_core::dollar::{CurrencyBands, DollarRate, HOURLY_HISTORY_HOURS, render_dollar_rates};
 use bot_core::locale::Locale;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
+use crate::dollar_history::{baseline_day, daily_history_for_reply, daily_source};
 use crate::redis_json_cache::{RedisJsonCache, RedisJsonCacheError};
 use crate::request_cache::{
     JsonHttpResponse, RequestCache, load_cached_json, python_request_cache_key,
@@ -21,6 +22,7 @@ const DOLLAR_REQUEST_ARGUMENTS: &str = concat!(
     "\"headers\": null, \"parameters\": null}"
 );
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const HISTORY_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const REQUEST_TTL_SECONDS: i64 = 300;
 const HISTORY_TTL_SECONDS: i64 = 3 * 24 * 60 * 60;
 const FORMATTED_TTL_SECONDS: i64 = 300;
@@ -37,6 +39,10 @@ use crate::http_client::classify_error;
 
 pub trait DollarTransport {
     fn get(&self) -> Result<HttpResponse, TransportFailureKind>;
+
+    /// Every daily close ArgentinaDatos has, for periods past the hourly
+    /// snapshots.
+    fn get_daily_history(&self) -> Result<HttpResponse, TransportFailureKind>;
 
     fn before_retry(&self) {}
 }
@@ -64,6 +70,7 @@ impl DollarCache for RedisJsonCache {
 pub struct ReqwestDollarTransport {
     client: Client,
     dollar_url: String,
+    history_url: String,
 }
 
 impl ReqwestDollarTransport {
@@ -75,6 +82,7 @@ impl ReqwestDollarTransport {
         .map(|client| Self {
             client,
             dollar_url: DOLLAR_URL.to_owned(),
+            history_url: crate::dollar_history::HISTORY_URL.to_owned(),
         })
         .map_err(|_| TransportFailureKind::Request)
     }
@@ -83,16 +91,16 @@ impl ReqwestDollarTransport {
     fn with_url(dollar_url: &str) -> Result<Self, TransportFailureKind> {
         Self::new().map(|mut transport| {
             transport.dollar_url = dollar_url.to_owned();
+            transport.history_url = dollar_url.to_owned();
             transport
         })
     }
-}
 
-impl DollarTransport for ReqwestDollarTransport {
-    fn get(&self) -> Result<HttpResponse, TransportFailureKind> {
+    fn get_url(&self, url: &str, timeout: Duration) -> Result<HttpResponse, TransportFailureKind> {
         let response = self
             .client
-            .get(&self.dollar_url)
+            .get(url)
+            .timeout(timeout)
             .send()
             .map_err(classify_error)?;
         let status_code = response.status().as_u16();
@@ -100,6 +108,17 @@ impl DollarTransport for ReqwestDollarTransport {
             .text()
             .map(|body| HttpResponse { status_code, body })
             .map_err(classify_error)
+    }
+}
+
+impl DollarTransport for ReqwestDollarTransport {
+    fn get(&self) -> Result<HttpResponse, TransportFailureKind> {
+        self.get_url(&self.dollar_url, REQUEST_TIMEOUT)
+    }
+
+    fn get_daily_history(&self) -> Result<HttpResponse, TransportFailureKind> {
+        // About 3 MB, 200 KB gzipped: it gets more time than a quote.
+        self.get_url(&self.history_url, HISTORY_REQUEST_TIMEOUT)
     }
 
     fn before_retry(&self) {
@@ -150,6 +169,8 @@ pub fn refresh_dollar_snapshot<T: DollarTransport, C: DollarCache>(
             ));
         }
     }
+    // Long `/dolar` periods read this copy and never wait on ArgentinaDatos.
+    crate::dollar_history::refresh_daily_history(transport, cache, now_unix, &mut diagnostics);
     diagnostics
 }
 
@@ -318,6 +339,7 @@ fn tcrm<C: DollarCache>(
     cache: &mut C,
     fresh: Option<f64>,
     daily_history: Option<f64>,
+    long_baseline: Option<f64>,
     hours_ago: i64,
     now_unix: i64,
     diagnostics: &mut Vec<String>,
@@ -334,7 +356,9 @@ fn tcrm<C: DollarCache>(
         now_unix.saturating_sub(hours_ago.saturating_mul(3_600)),
         diagnostics,
     )
-    .or(daily_history.filter(|value| hours_ago == 24 && value.is_finite() && *value > 0.0));
+    .or(daily_history.filter(|value| hours_ago == 24 && value.is_finite() && *value > 0.0))
+    .or(long_baseline
+        .filter(|value| hours_ago > HOURLY_HISTORY_HOURS && value.is_finite() && *value > 0.0));
     let change = historical
         .map(|value| ((current / value) - 1.0) * 100.0)
         .filter(|value| value.is_finite());
@@ -444,6 +468,56 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
     now_unix: i64,
     references: Option<&crate::bcra::DollarReferencesLoad>,
 ) -> DollarMarketLoad {
+    load_dollar_market_with_history(
+        transport, cache, hours_ago, locale, now_unix, references, None,
+    )
+}
+
+/// Fills the changes the hourly snapshots cannot give, for periods longer
+/// than a day: ArgentinaDatos closes first, then BCRA's wholesale rate.
+fn fill_daily_changes<T: DollarTransport, C: DollarCache>(
+    transport: &T,
+    cache: &mut C,
+    rates: &mut [DollarRate],
+    hours_ago: i64,
+    now_unix: i64,
+    baselines: Option<&crate::bcra::DollarBaselines>,
+    diagnostics: &mut Vec<String>,
+) {
+    // Read only when a row needs it, and at most once.
+    let mut history = None;
+    let day = baseline_day(now_unix, hours_ago);
+    for rate in rates.iter_mut().filter(|rate| rate.change.is_none()) {
+        let baseline = daily_source(rate.name)
+            .and_then(|source| {
+                history
+                    .get_or_insert_with(|| {
+                        daily_history_for_reply(transport, cache, now_unix, diagnostics)
+                    })
+                    .as_ref()?
+                    .close(source, day)
+            })
+            .or_else(|| {
+                (rate.name == "Mayorista")
+                    .then(|| baselines.and_then(|baselines| baselines.wholesale))
+                    .flatten()
+            });
+        rate.change = change(rate.price, None, baseline, hours_ago);
+    }
+}
+
+/// Like [`load_dollar_market_with_references`], with BCRA values from the
+/// start of a long period, for the rows ArgentinaDatos does not cover.
+#[must_use]
+pub fn load_dollar_market_with_history<T: DollarTransport, C: DollarCache>(
+    transport: &T,
+    cache: &mut C,
+    hours_ago: i64,
+    locale: Locale,
+    now_unix: i64,
+    references: Option<&crate::bcra::DollarReferencesLoad>,
+    baselines: Option<&crate::bcra::DollarBaselines>,
+) -> DollarMarketLoad {
     let mut diagnostics = Vec::new();
     if let Some(text) = formatted_snapshot(cache, hours_ago, now_unix, locale, &mut diagnostics) {
         return DollarMarketLoad {
@@ -491,11 +565,23 @@ pub fn load_dollar_market_with_references<T: DollarTransport, C: DollarCache>(
         .as_ref()
         .map(|current| parse_rates(current, history.as_ref().map(unwrap_data), hours_ago))
         .unwrap_or_default();
+    if hours_ago > 24 {
+        fill_daily_changes(
+            transport,
+            cache,
+            &mut rates,
+            hours_ago,
+            now_unix,
+            baselines,
+            &mut diagnostics,
+        );
+    }
     let has_dollar_quotes = !rates.is_empty();
     if let Some(tcrm) = tcrm(
         cache,
         references.and_then(|value| value.tcrm_100),
         references.and_then(|value| value.tcrm_100_previous_day),
+        baselines.and_then(|value| value.tcrm_100),
         hours_ago,
         now_unix,
         &mut diagnostics,
@@ -782,7 +868,15 @@ mod tests {
                 history_key.clone(),
                 serde_json::json!({"timestamp": now - 24 * 3_600, "data": historical}).to_string(),
             );
-            let rate = super::tcrm(&mut cache, Some(1_100.0), None, 24, now, &mut Vec::new());
+            let rate = super::tcrm(
+                &mut cache,
+                Some(1_100.0),
+                None,
+                None,
+                24,
+                now,
+                &mut Vec::new(),
+            );
             assert_eq!(rate.as_ref().map(|rate| rate.price), Some(1_100.0));
             assert_eq!(
                 rate.and_then(|rate| rate.change)
@@ -807,7 +901,15 @@ mod tests {
             })
             .to_string(),
         );
-        let rate = super::tcrm(&mut cache, Some(1100.0), None, 24, now, &mut Vec::new());
+        let rate = super::tcrm(
+            &mut cache,
+            Some(1100.0),
+            None,
+            None,
+            24,
+            now,
+            &mut Vec::new(),
+        );
         assert_eq!(rate.and_then(|rate| rate.change), None);
     }
 
@@ -840,6 +942,7 @@ mod tests {
                 &mut cache,
                 Some(1100.0),
                 daily,
+                None,
                 hours,
                 now,
                 &mut diagnostics,
@@ -1063,7 +1166,25 @@ mod tests {
                 .pop_front()
                 .unwrap_or(Err(TransportFailureKind::Request))
         }
+
+        /// Serves the trimmed shape of a real ArgentinaDatos response.
+        fn get_daily_history(&self) -> Result<HttpResponse, TransportFailureKind> {
+            Ok(HttpResponse {
+                status_code: 200,
+                body: DAILY_HISTORY.to_owned(),
+            })
+        }
     }
+
+    /// Closes for 2024-08-23 and 2014-08-29, a week and ten years before
+    /// the tests' `1_725_000_000` (2024-08-30 06:40 UTC).
+    const DAILY_HISTORY: &str = r#"[
+        {"casa":"oficial","compra":900,"venta":1000,"fecha":"2024-08-23"},
+        {"casa":"blue","compra":1300,"venta":1400,"fecha":"2024-08-23"},
+        {"casa":"bolsa","compra":1300,"venta":1300,"fecha":"2024-08-23"},
+        {"casa":"oficial","compra":8.3,"venta":8.5,"fecha":"2014-08-29"},
+        {"casa":"blue","compra":14,"venta":14.3,"fecha":"2014-08-29"}
+    ]"#;
 
     fn body() -> String {
         serde_json::json!({
@@ -1134,6 +1255,75 @@ mod tests {
                 .writes
                 .iter()
                 .any(|write| write.0 == "market:dolar:formatted:v3:es:24")
+        );
+    }
+
+    #[test]
+    fn long_periods_compare_with_daily_closes_and_bcra_baselines() {
+        let quotes = || Transport {
+            responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                status_code: 200,
+                body: body(),
+            })])),
+            calls: RefCell::new(0),
+        };
+        let baselines = crate::bcra::DollarBaselines {
+            wholesale: Some(1000.0),
+            tcrm_100: Some(1000.0),
+            diagnostics: Vec::new(),
+        };
+        let mut cache = Cache::default();
+        cache.values.insert(
+            "tcrm_100".to_owned(),
+            r#"{"timestamp":1725000000,"data":1410}"#.to_owned(),
+        );
+        let load = super::load_dollar_market_with_history(
+            &quotes(),
+            &mut cache,
+            168,
+            Locale::Es,
+            1_725_000_000,
+            None,
+            Some(&baselines),
+        );
+        let text = load.text.unwrap_or_default();
+        for expected in [
+            "Dólar en pesos, variación 1w",
+            "Oficial: $1,420 (+42%)",
+            "Blue: $1,430 (+2.14%)",
+            "MEP: $1,450 (+11.54%)",
+            "Mayorista: $1,400 (+40%)",
+            "TCRM 100: $1,410 (+41%)",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        // No daily history for these, and CriptoYa's variation is daily.
+        for unchanged in ["Tarjeta: $1,988", "USDC: $1,480"] {
+            assert!(text.lines().any(|line| line == unchanged), "{text}");
+        }
+        assert!(cache.values.contains_key("dollar_daily_history:v1"));
+
+        let load = load_dollar_market(&quotes(), &mut cache, 87_600, Locale::En, 1_725_000_000);
+        let text = load.text.unwrap_or_default();
+        for expected in [
+            "Dollar in pesos, 10y change",
+            "Official: 1,420 (+16,605.88%)",
+            "Blue: 1,430 (+9,900%)",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        // Without BCRA baselines the wholesale row has no change.
+        assert!(
+            text.lines().any(|line| line == "Wholesale: 1,400"),
+            "{text}"
+        );
+
+        // A century back nothing has a baseline, and the reply says so.
+        let load = load_dollar_market(&quotes(), &mut cache, 876_000, Locale::Es, 1_725_000_000);
+        let text = load.text.unwrap_or_default();
+        assert!(
+            text.ends_with("No conseguí cotizaciones de hace 100y"),
+            "{text}"
         );
     }
 
@@ -1239,7 +1429,18 @@ mod tests {
         let diagnostics = refresh_dollar_snapshot(&transport, &mut cache, 1_725_000_001);
         assert!(diagnostics.is_empty());
         assert_eq!(*transport.calls.borrow(), 0);
-        assert!(cache.writes.is_empty());
+        // Only the daily history warm-up writes, and only while it is stale.
+        let written = |cache: &Cache| {
+            cache
+                .writes
+                .iter()
+                .map(|write| write.0.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(written(&cache), ["dollar_daily_history:v1"]);
+        let diagnostics = refresh_dollar_snapshot(&transport, &mut cache, 1_725_000_002);
+        assert!(diagnostics.is_empty());
+        assert_eq!(written(&cache), ["dollar_daily_history:v1"]);
     }
 
     #[test]

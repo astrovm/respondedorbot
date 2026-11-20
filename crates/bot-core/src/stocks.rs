@@ -215,6 +215,79 @@ fn timed_closes(result: &serde_json::Map<String, Value>) -> Vec<(i64, f64)> {
         .collect()
 }
 
+/// The priced bars of a chart: time, opening and closing price. When the
+/// chart starts on the listing's first day, Yahoo's leading bars at the
+/// offer price with no volume are left out (ANT: $83 at the open, first
+/// trade $111.50 two hours later). Later zero-volume bars stay: Yahoo
+/// reports no volume for US pre-market and after-hours bars, nor for many
+/// crypto bars, and those are real trades.
+fn priced_bars(
+    result: &serde_json::Map<String, Value>,
+    listing_start: bool,
+) -> Vec<(i64, f64, f64)> {
+    let quote = result
+        .get("indicators")
+        .and_then(|indicators| indicators.get("quote"))
+        .and_then(Value::as_array)
+        .and_then(|quotes| quotes.first());
+    let series = |name| {
+        quote
+            .and_then(|quote| quote.get(name))
+            .and_then(Value::as_array)
+    };
+    let price = |values: Option<&Vec<Value>>, index: usize| {
+        number(values?.get(index)).filter(|price| price.is_finite() && *price > 0.0)
+    };
+    let (opens, closes, volumes) = (series("open"), series("close"), series("volume"));
+    // Indexes follow Yahoo's arrays, which keep a null for an empty bar.
+    let bars = result
+        .get("timestamp")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, time)| {
+            let close = price(closes, index)?;
+            let traded = price(volumes, index).is_some();
+            Some((
+                time.as_i64()?,
+                price(opens, index).unwrap_or(close),
+                close,
+                traded,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let first_traded = bars.iter().position(|bar| bar.3);
+    let skip = match first_traded {
+        Some(first_traded) if listing_start => first_traded,
+        _ => 0,
+    };
+    bars.into_iter()
+        .skip(skip)
+        .map(|(time, open, close, _)| (time, open, close))
+        .collect()
+}
+
+/// Whether the chart starts on the listing's first day, by the exchange's
+/// calendar. Yahoo's first bar can come minutes after `firstTradeDate`. A
+/// 24-hour distance is not enough: on a listing's third day, a two-day
+/// chart starts at the second day's pre-market, hours after the listing.
+fn chart_starts_at_listing(result: &serde_json::Map<String, Value>) -> bool {
+    let meta = result.get("meta");
+    let first_trade = meta.and_then(|meta| integer(meta.get("firstTradeDate")));
+    let offset = meta
+        .and_then(|meta| integer(meta.get("gmtoffset")))
+        .unwrap_or(0);
+    let day = |time: i64| (time + offset).div_euclid(86_400);
+    let first_bar = result
+        .get("timestamp")
+        .and_then(Value::as_array)
+        .and_then(|timestamps| integer(timestamps.first()));
+    first_trade
+        .zip(first_bar)
+        .is_some_and(|(first_trade, first_bar)| day(first_bar) == day(first_trade))
+}
+
 /// Yahoo's `chartPreviousClose` is the close before the whole requested range,
 /// which for the default five-day chart is days old. The previous session's
 /// close is the last daily bar from an earlier exchange-local day than the
@@ -313,7 +386,9 @@ pub fn yahoo_is_futures(chart: &Value) -> bool {
 pub struct DayChange {
     pub price: f64,
     pub variation: f64,
-    /// The time of the base trade. Bars after it are the day the change covers.
+    /// The time of the base trade, or just before the first trade of a
+    /// listing younger than a day. Bars after it are the period the change
+    /// covers.
     pub since: i64,
 }
 
@@ -321,14 +396,29 @@ pub struct DayChange {
 /// read from an intraday chart with pre-market and after-hours bars. The base
 /// is the last trade at least 24 hours older than the latest one. A closed
 /// market (a weekend, a night) keeps its last session's move instead of a flat
-/// day.
+/// day. A listing that started trading less recently than that compares with
+/// its first trade's opening price, where its chart starts.
 #[must_use]
 pub fn yahoo_24h_change(chart: &Value) -> Option<DayChange> {
     let (latest_time, price) = yahoo_latest_trade(chart)?;
-    let (since, base) = timed_closes(chart_result(chart)?)
-        .into_iter()
-        .filter(|(time, _)| *time <= latest_time - 86_400)
-        .max_by_key(|(time, _)| *time)?;
+    let result = chart_result(chart)?;
+    let listing_start = chart_starts_at_listing(result);
+    let bars = priced_bars(result, listing_start);
+    let older = bars
+        .iter()
+        .filter(|(time, _, _)| *time <= latest_time - 86_400)
+        .max_by_key(|(time, _, _)| *time)
+        .map(|&(time, _, close)| (time, close));
+    let (since, base) = match older {
+        Some(base) => base,
+        // A listing younger than a day; for an older stock the bars are
+        // just missing.
+        None if listing_start => {
+            let &(time, open, _) = bars.iter().min_by_key(|(time, _, _)| *time)?;
+            (time - 1, open)
+        }
+        None => return None,
+    };
     Some(DayChange {
         price,
         variation: (price / base - 1.0) * 100.0,
@@ -565,6 +655,121 @@ pub fn rank_stock_quotes(query: &str, quotes: &mut [StockQuote]) {
     });
 }
 
+/// Exchange codes people write next to a ticker (`TTWO:NASDAQ`, `ETR:SAP`),
+/// and the exchange names Yahoo's search shows for those listings.
+const EXCHANGE_ALIASES: &[(&[&str], &[&str])] = &[
+    (&["NASDAQ", "NMS", "NGM", "NCM", "NAS"], &["nasdaq"]),
+    (&["NYSE", "NYQ"], &["nyse"]),
+    (
+        &["AMEX", "NYSEAMERICAN", "NYSEMKT", "ASE"],
+        &["nyse mkt", "nyse american", "amex"],
+    ),
+    (&["ARCA", "NYSEARCA", "PCX"], &["nysearca", "nyse arca"]),
+    (&["BATS", "CBOE", "BTS"], &["bats trading", "bats", "cboe"]),
+    (&["OTC", "OTCMKTS", "PNK"], &["otc markets", "other otc"]),
+    (&["BCBA", "BYMA", "BUE"], &["buenos aires"]),
+    (
+        &["B3", "BOVESPA", "BVMF", "SAO"],
+        &["são paulo", "sao paulo"],
+    ),
+    (&["BMV", "MEX"], &["mexico"]),
+    // Google Finance writes Toronto as TSE, TradingView writes Tokyo so.
+    (&["TSX", "TOR", "TSE"], &["toronto"]),
+    (&["TSXV", "CVE", "VAN"], &["tsxv", "tsx venture"]),
+    (&["LSE", "LON"], &["london"]),
+    (&["XETRA", "XETR", "ETR", "GER"], &["xetra"]),
+    (&["FRA", "FWB"], &["frankfurt"]),
+    (&["EPA", "PAR"], &["paris"]),
+    (&["AMS"], &["amsterdam"]),
+    (&["EBR", "BRU"], &["brussels"]),
+    (&["BIT", "MIL"], &["milan"]),
+    (&["BME", "MCE"], &["madrid stock exchange cats", "madrid"]),
+    (&["SWX", "SIX", "EBS", "VTX"], &["swiss"]),
+    (&["VIE", "WBAG"], &["vienna"]),
+    (&["STO", "OMX"], &["stockholm"]),
+    (&["CPH"], &["copenhagen"]),
+    (&["HEL"], &["hel", "helsinki"]),
+    (&["OSL"], &["oslo"]),
+    (&["WSE", "GPW"], &["wse", "warsaw"]),
+    (&["JSE", "JNB"], &["johannesburg stock exchange"]),
+    (&["TSE", "TYO", "JPX"], &["tokyo stock exchange"]),
+    (&["HKEX", "HKG"], &["hong kong"]),
+    (&["SSE", "SHA", "SHH"], &["shanghai"]),
+    (&["SZSE", "SHE", "SHZ"], &["shenzhen"]),
+    (&["KRX", "KSC", "KOSPI"], &["korea"]),
+    (&["KOSDAQ", "KOE"], &["kosdaq"]),
+    (&["NSE", "NSI"], &["nse"]),
+    (&["BSE", "BOM"], &["bse", "bombay"]),
+    (&["ASX"], &["australian"]),
+    (&["NZE", "NZX"], &["new zealand"]),
+    (&["SGX", "SES"], &["singapore"]),
+    (&["IDX", "JKT"], &["jakarta"]),
+    (&["KLSE", "KLS", "MYX"], &["kuala lumpur stock exchange"]),
+    (&["SET", "BKK"], &["set", "thailand"]),
+    (&["TWSE", "TPE", "TAI"], &["taiwan"]),
+    (&["TPEX", "TWO"], &["taipei"]),
+    (&["TLV", "TASE"], &["tel aviv"]),
+    (&["IST", "BIST"], &["ist", "istanbul"]),
+    (&["ELI", "LIS"], &["lisbon stock exchange", "lisbon"]),
+    (&["ATH", "ATHEX"], &["athens"]),
+    (&["SGO", "BCS"], &["santiago stock exchange", "santiago"]),
+];
+
+/// Yahoo's names for every exchange that uses this code. Empty for an
+/// unknown code.
+fn exchange_aliases(exchange: &str) -> Vec<&'static str> {
+    EXCHANGE_ALIASES
+        .iter()
+        .filter(|(codes, _)| codes.iter().any(|code| code.eq_ignore_ascii_case(exchange)))
+        .flat_map(|(_, names)| names.iter().copied())
+        .collect()
+}
+
+/// The ways to read `TTWO:NASDAQ` or `ETR:SAP` as a ticker and an exchange,
+/// most likely first. Yahoo's search finds nothing for either form, only
+/// for the ticker. When exactly one side is a known exchange code there is
+/// one reading. Otherwise both sides are tried, ticker first (Google
+/// Finance's order; TradingView puts the exchange first). Empty when
+/// the query has no single `:`.
+#[must_use]
+pub fn exchange_qualifier_readings(query: &str) -> Vec<(&str, &str)> {
+    let Some((left, right)) = query.trim().trim_start_matches('$').split_once(':') else {
+        return Vec::new();
+    };
+    let (left, right) = (left.trim().trim_start_matches('$'), right.trim());
+    if left.is_empty() || right.is_empty() || right.contains(':') {
+        return Vec::new();
+    }
+    match (
+        !exchange_aliases(left).is_empty(),
+        !exchange_aliases(right).is_empty(),
+    ) {
+        (false, true) => vec![(left, right)],
+        (true, false) => vec![(right, left)],
+        _ => vec![(left, right), (right, left)],
+    }
+}
+
+/// Whether Yahoo's exchange name for a listing is the exchange the user
+/// named, by a known code (`NASDAQ`, `ETR`) or by Yahoo's name, whole or
+/// its first words (`Vienna`, `Tokyo`).
+#[must_use]
+pub fn listed_on_exchange(exchange: &str, listing_exchange: &str) -> bool {
+    let listing = listing_exchange.trim().to_lowercase();
+    let wanted = exchange.trim().to_lowercase();
+    if wanted.is_empty() {
+        return false;
+    }
+    let names = exchange_aliases(exchange);
+    if !names.is_empty() {
+        return names.iter().any(|name| listing == *name);
+    }
+    listing == wanted
+        || listing
+            .strip_prefix(&wanted)
+            .is_some_and(|rest| rest.starts_with(' '))
+}
+
 #[must_use]
 pub fn select_yahoo_symbol(response: &Value) -> Option<String> {
     select_yahoo_candidates(response)
@@ -623,12 +828,111 @@ mod tests {
 
     use super::{
         ChangeWindow, DayChange, StockQuery, StockQueryPlan, StockQuote, StockSearchCandidate,
-        classify_oil_command, classify_stock_command, parse_yahoo_quote, plan_stock_query,
-        rank_stock_quotes, rank_yahoo_candidates, render_oil_quotes, render_stock_quote,
-        render_stock_quotes, select_yahoo_candidates, select_yahoo_symbol, yahoo_24h_change,
+        classify_oil_command, classify_stock_command, exchange_qualifier_readings,
+        listed_on_exchange, parse_yahoo_quote, plan_stock_query, rank_stock_quotes,
+        rank_yahoo_candidates, render_oil_quotes, render_stock_quote, render_stock_quotes,
+        select_yahoo_candidates, select_yahoo_symbol, yahoo_24h_change,
         yahoo_candidate_name_matches_query, yahoo_is_futures,
     };
     use crate::locale::Locale;
+
+    #[test]
+    fn exchange_qualified_tickers_split_on_either_side() {
+        assert_eq!(
+            exchange_qualifier_readings("TTWO:NASDAQ"),
+            [("TTWO", "NASDAQ")]
+        );
+        assert_eq!(
+            exchange_qualifier_readings(" nasdaq:ttwo "),
+            [("ttwo", "nasdaq")]
+        );
+        assert_eq!(
+            exchange_qualifier_readings("$GGAL:BCBA"),
+            [("GGAL", "BCBA")]
+        );
+        assert_eq!(exchange_qualifier_readings("ETR:SAP"), [("SAP", "ETR")]);
+        assert_eq!(exchange_qualifier_readings("ASX:BHP"), [("BHP", "ASX")]);
+        assert_eq!(
+            exchange_qualifier_readings("KRX:005930"),
+            [("005930", "KRX")]
+        );
+        // Both sides are codes, or neither is: try both, ticker first.
+        assert_eq!(
+            exchange_qualifier_readings("LSE:NYSE"),
+            [("LSE", "NYSE"), ("NYSE", "LSE")]
+        );
+        assert_eq!(
+            exchange_qualifier_readings("ABC:Vienna"),
+            [("ABC", "Vienna"), ("Vienna", "ABC")]
+        );
+        for query in ["TTWO", "TTWO:", ":NASDAQ", "A:B:C", "BRK-B", "BZ=F"] {
+            assert!(exchange_qualifier_readings(query).is_empty(), "{query}");
+        }
+    }
+
+    #[test]
+    fn exchange_codes_and_names_match_yahoos_exchange_names() {
+        // Exchange names from real Yahoo search answers.
+        for (exchange, listing) in [
+            ("NASDAQ", "NASDAQ"),
+            ("nms", "NASDAQ"),
+            ("NYSE", "NYSE"),
+            ("AMEX", "NYSE MKT"),
+            ("ARCA", "NYSEArca"),
+            ("BCBA", "Buenos Aires"),
+            ("BYMA", "Buenos Aires"),
+            ("B3", "São Paulo"),
+            ("ETR", "XETRA"),
+            ("ASX", "Australian"),
+            ("NSE", "NSE"),
+            ("BIT", "Milan"),
+            ("SWX", "Swiss"),
+            ("STO", "Stockholm"),
+            ("KRX", "Korea"),
+            ("AMS", "Amsterdam"),
+            ("HEL", "HEL"),
+            ("JSE", "Johannesburg Stock Exchange"),
+            ("TSE", "Tokyo Stock Exchange"),
+            ("TSE", "Toronto"),
+            ("TPE", "Taiwan"),
+            ("SGX", "Singapore"),
+            ("IDX", "Jakarta"),
+            ("NZE", "New Zealand"),
+            ("TLV", "Tel Aviv"),
+            ("IST", "IST"),
+            ("ELI", "Lisbon Stock Exchange"),
+            ("ATH", "Athens"),
+            ("SGO", "Santiago Stock Exchange"),
+            ("KLSE", "Kuala Lumpur Stock Exchange"),
+            ("SET", "SET"),
+            ("BME", "Madrid Stock Exchange CATS"),
+            ("OTC", "OTC Markets"),
+            // Yahoo's own names, without a code in the table.
+            ("Tokyo", "Tokyo Stock Exchange"),
+            ("Vienna", "Vienna"),
+            ("Jakarta", "Jakarta"),
+        ] {
+            assert!(
+                listed_on_exchange(exchange, listing),
+                "{exchange} {listing}"
+            );
+        }
+        for (exchange, listing) in [
+            ("NYSE", "NYSEArca"),
+            ("NYSE", "NYSE MKT"),
+            ("NYSE", "NASDAQ"),
+            ("NASDAQ", "Swiss"),
+            ("", "NASDAQ"),
+            ("Tok", "Tokyo Stock Exchange"),
+            ("SAP", "XETRA"),
+            ("TSE", "NASDAQ"),
+        ] {
+            assert!(
+                !listed_on_exchange(exchange, listing),
+                "{exchange} {listing}"
+            );
+        }
+    }
 
     #[test]
     fn quote_parser_uses_metadata_and_calculates_variation() {
@@ -1183,6 +1487,110 @@ mod tests {
         assert_eq!(
             yahoo_24h_change(&chart),
             day(19.0, (19.0 / 15.0 - 1.0) * 100.0, FRIDAY_CLOSE - DAY - 600)
+        );
+    }
+
+    #[test]
+    fn extended_hours_bars_without_volume_count_for_an_old_stock() {
+        // Yahoo reports volume 0 for every US pre-market and after-hours
+        // bar. Yesterday's pre-market bar is the 24h base of today's.
+        let premarket = FRIDAY_CLOSE - 9 * 3_600;
+        let chart = |timestamps: &[i64], closes: serde_json::Value, volumes| {
+            json!({"chart": {"result": [{
+                "meta": {
+                    "regularMarketPrice": 19.0,
+                    "regularMarketTime": premarket - DAY + 6 * 3_600,
+                    "firstTradeDate": 345_479_400,
+                },
+                "timestamp": timestamps,
+                "indicators": {"quote": [{"close": closes, "volume": volumes}]}
+            }]}})
+        };
+        let timestamps = [premarket - DAY, premarket - DAY + 6 * 3_600, premarket];
+        assert_eq!(
+            yahoo_24h_change(&chart(
+                &timestamps,
+                json!([16.0, 19.0, 20.0]),
+                json!([0, 5_000, 0])
+            )),
+            day(20.0, 25.0, premarket - DAY)
+        );
+        // Without a bar 24 hours older, an old stock has no 24h change.
+        assert_eq!(
+            yahoo_24h_change(&chart(
+                &timestamps[1..],
+                json!([19.0, 20.0]),
+                json!([5_000, 0])
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn a_listing_younger_than_a_day_compares_with_its_first_trade() {
+        // ANT's first day as Yahoo reports it: the offer price at the open
+        // with no volume, the first trade two hours later, then a day later.
+        let listed = FRIDAY_CLOSE - DAY - 3 * 3_600;
+        let first_trade = listed + 8_100;
+        let latest = first_trade + DAY - 60;
+        let chart = |volumes: serde_json::Value, first_trade_date: i64| {
+            json!({"chart": {"result": [{
+                "meta": {
+                    "regularMarketPrice": 87.16,
+                    "regularMarketTime": latest,
+                    "firstTradeDate": first_trade_date,
+                    "gmtoffset": OFFSET,
+                },
+                // Empty bars stay in Yahoo's arrays as nulls.
+                "timestamp": [listed, listed + 900, first_trade, latest - 900],
+                "indicators": {"quote": [{
+                    "open": [83.0, null, 111.5, 87.5],
+                    "close": [83.0, null, 105.03, 87.2],
+                    "volume": volumes,
+                }]}
+            }]}})
+        };
+        let change = yahoo_24h_change(&chart(json!([0, null, 282_684_770, 120_000]), listed));
+        assert_eq!(
+            change,
+            day(87.16, (87.16 / 111.5 - 1.0) * 100.0, first_trade - 1)
+        );
+        // Yahoo's first bar can start minutes after the listing time.
+        assert_eq!(
+            yahoo_24h_change(&chart(json!([0, null, 282_684_770, 120_000]), listed - 300)),
+            change
+        );
+        // The listing's first day runs from midnight to midnight at the
+        // exchange, not in UTC.
+        let local_midnight = listed - (listed + OFFSET).rem_euclid(DAY);
+        let next_midnight = local_midnight + DAY;
+        for first_trade_date in [local_midnight, next_midnight - 1] {
+            assert_eq!(
+                yahoo_24h_change(&chart(
+                    json!([0, null, 282_684_770, 120_000]),
+                    first_trade_date
+                )),
+                change,
+                "{first_trade_date}"
+            );
+        }
+        // A chart that starts on a later day is not a young listing: on a
+        // listing's third day the chart starts at the second day's
+        // pre-market, whose zero-volume bars are trades like any other.
+        for first_trade_date in [local_midnight - 1, next_midnight] {
+            assert_eq!(
+                yahoo_24h_change(&chart(
+                    json!([0, null, 282_684_770, 120_000]),
+                    first_trade_date
+                )),
+                day(87.16, (87.16 / 83.0 - 1.0) * 100.0, listed),
+                "{first_trade_date}"
+            );
+        }
+        // Without volume data every priced bar counts, the offer price too.
+        assert_eq!(
+            yahoo_24h_change(&chart(json!([null, null, null, null]), listed)),
+            day(87.16, (87.16 / 83.0 - 1.0) * 100.0, listed)
         );
     }
 

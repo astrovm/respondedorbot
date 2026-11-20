@@ -23,12 +23,35 @@ const RISK_URL: &str = "https://bondterminal.com/api/riesgo-pais";
 const ITCRM_URL: &str = "https://www.bcra.gob.ar/Pdfs/PublicacionesEstadisticas/ITCRMSerie.xlsx";
 const TTL: i64 = 300;
 const ITCRM_CACHE_TTL_SECONDS: i64 = 1_800;
+/// The whole ITCRM series, for long `/dolar` periods. BCRA adds a day at a
+/// time, so a day-old copy is fresh enough; a week-old one still serves.
+const ITCRM_FULL_HISTORY_KEY: &str = "itcrm_full_history:v1";
+const ITCRM_FULL_HISTORY_FRESH_SECONDS: i64 = 86_400;
+const ITCRM_FULL_HISTORY_TTL_SECONDS: i64 = 7 * 86_400;
+/// Past days do not change, so a looked-up wholesale rate keeps for a day.
+const BASELINE_TTL_SECONDS: i64 = 86_400;
+/// BCRA publishes the ITCRM about a month late, and wholesale skips
+/// weekends and holidays. Older values stand in up to these gaps.
+const ITCRM_MAX_GAP_DAYS: i64 = 45;
+const WHOLESALE_LOOKBACK_DAYS: i64 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BcraRequest {
     Variables,
-    Series { id: i64, limit: i64 },
-    Value { id: i64, date: String },
+    Series {
+        id: i64,
+        limit: i64,
+    },
+    Value {
+        id: i64,
+        date: String,
+    },
+    /// The latest value from `from` to `to`, both ISO dates.
+    Latest {
+        id: i64,
+        from: String,
+        to: String,
+    },
     CountryRisk,
     Itcrm,
 }
@@ -103,6 +126,14 @@ impl BcraTransport for ReqwestBcraTransport {
                     ("hasta", date.as_str()),
                     ("limit", "1"),
                 ]),
+            BcraRequest::Latest { id, from, to } => self
+                .client
+                .get(format!("{}/monetarias/{id}", self.bcra_url))
+                .query(&[
+                    ("desde", from.as_str()),
+                    ("hasta", to.as_str()),
+                    ("limit", "1"),
+                ]),
             BcraRequest::CountryRisk => self.client.get(&self.risk_url),
             BcraRequest::Itcrm => self.client.get(&self.itcrm_url),
         };
@@ -171,7 +202,7 @@ fn days(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + (153 * mp + 2) / 5 + day - 1 - 719_468
 }
 
-fn parse_date(value: &str) -> Option<i64> {
+pub(crate) fn parse_date(value: &str) -> Option<i64> {
     let value = value.trim().split(['T', ' ']).next()?;
     if let Some((y, rest)) = value.split_once('-') {
         let (m, d) = rest.split_once('-')?;
@@ -189,7 +220,7 @@ fn parse_date(value: &str) -> Option<i64> {
     Some(days(y, m, d))
 }
 
-fn iso(day: i64) -> String {
+pub(crate) fn iso(day: i64) -> String {
     let (y, m, d) = civil(day);
     format!("{y:04}-{m:02}-{d:02}")
 }
@@ -197,7 +228,7 @@ fn display(day: i64) -> String {
     let (y, m, d) = civil(day);
     format!("{d:02}/{m:02}/{:02}", y.rem_euclid(100))
 }
-fn ba_day(now: i64) -> i64 {
+pub(crate) fn ba_day(now: i64) -> i64 {
     floor(now.saturating_sub(10_800), 86_400)
 }
 fn now_iso(now: i64) -> String {
@@ -250,6 +281,11 @@ fn arguments(request: &BcraRequest) -> Option<String> {
             python_json_string(date),
             python_json_string(date)
         )),
+        BcraRequest::Latest { id, from, to } => Some(format!(
+            "{{\"api_url\": \"{BCRA_URL}/monetarias/{id}\", \"headers\": null, \"parameters\": {{\"desde\": {}, \"hasta\": {}, \"limit\": \"1\"}}}}",
+            python_json_string(from),
+            python_json_string(to)
+        )),
         BcraRequest::CountryRisk => Some(format!(
             "{{\"api_url\": \"{RISK_URL}\", \"headers\": null, \"parameters\": null}}"
         )),
@@ -264,11 +300,22 @@ fn request_json<T: BcraTransport, C: RequestCache>(
     now: i64,
     diagnostics: &mut Vec<String>,
 ) -> Option<Value> {
+    request_json_for(transport, cache, request, TTL, now, diagnostics)
+}
+
+fn request_json_for<T: BcraTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    request: &BcraRequest,
+    ttl_seconds: i64,
+    now: i64,
+    diagnostics: &mut Vec<String>,
+) -> Option<Value> {
     let key = python_request_cache_key(&arguments(request)?);
     let load = load_cached_json(
         cache,
         &key,
-        TTL,
+        ttl_seconds,
         now,
         &format!("BCRA {request:?}"),
         || {
@@ -642,7 +689,7 @@ fn itcrm<T: BcraTransport, C: RequestCache>(
             date: date.to_owned(),
         });
     }
-    let values = itcrm_series(transport, cache, d)?;
+    let values = itcrm_series(transport, cache, now, d)?;
     let result = values
         .range(..=ba_day(now))
         .next_back()
@@ -667,6 +714,7 @@ fn itcrm<T: BcraTransport, C: RequestCache>(
 fn itcrm_series<T: BcraTransport, C: RequestCache>(
     transport: &T,
     cache: &mut C,
+    now: i64,
     d: &mut Vec<String>,
 ) -> Option<BTreeMap<i64, f64>> {
     if let Some(cached) = read(cache, "itcrm_daily_history", d) {
@@ -675,6 +723,17 @@ fn itcrm_series<T: BcraTransport, C: RequestCache>(
             return Some(values);
         }
     }
+    download_itcrm(transport, cache, now, d)
+}
+
+/// Downloads the ITCRM workbook and refreshes both caches: the last 32 days
+/// for the daily TCRM, and the whole series for long periods.
+fn download_itcrm<T: BcraTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    now: i64,
+    d: &mut Vec<String>,
+) -> Option<BTreeMap<i64, f64>> {
     let response = match transport.get(&BcraRequest::Itcrm) {
         Ok(r) if r.status_code < 400 => r,
         Ok(r) => {
@@ -708,7 +767,127 @@ fn itcrm_series<T: BcraTransport, C: RequestCache>(
             "could not write BCRA cache itcrm_daily_history: {error}"
         ));
     }
+    let pairs = values
+        .iter()
+        .map(|(day, value)| json!([day, value]))
+        .collect::<Vec<_>>();
+    if let Err(error) = cache.set(
+        ITCRM_FULL_HISTORY_KEY,
+        &json!({"timestamp": now, "data": pairs}).to_string(),
+        ITCRM_FULL_HISTORY_TTL_SECONDS,
+    ) {
+        d.push(format!(
+            "could not write BCRA cache {ITCRM_FULL_HISTORY_KEY}: {error}"
+        ));
+    }
     Some(values)
+}
+
+/// The whole ITCRM series since 1997. A stale copy serves when BCRA fails.
+fn full_itcrm_series<T: BcraTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    now: i64,
+    d: &mut Vec<String>,
+) -> Option<BTreeMap<i64, f64>> {
+    let cached = cache
+        .get(ITCRM_FULL_HISTORY_KEY)
+        .map_err(|error| {
+            d.push(format!(
+                "could not read BCRA cache {ITCRM_FULL_HISTORY_KEY}: {error}"
+            ));
+        })
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| {
+            let timestamp = value.get("timestamp")?.as_i64()?;
+            let values = value
+                .get("data")?
+                .as_array()?
+                .iter()
+                .filter_map(|pair| {
+                    let day = pair.get(0)?.as_i64()?;
+                    let value = pair.get(1)?.as_f64()?;
+                    (value.is_finite() && value > 0.0).then_some((day, value))
+                })
+                .collect::<BTreeMap<_, _>>();
+            (!values.is_empty()).then_some((timestamp, values))
+        });
+    if let Some((timestamp, values)) = &cached
+        && now.saturating_sub(*timestamp) < ITCRM_FULL_HISTORY_FRESH_SECONDS
+    {
+        return Some(values.clone());
+    }
+    download_itcrm(transport, cache, now, d).or_else(|| cached.map(|(_, values)| values))
+}
+
+fn wholesale_id(variables: &[&Map<String, Value>]) -> Option<i64> {
+    variables
+        .iter()
+        .find(|variable| {
+            variable
+                .get("descripcion")
+                .and_then(Value::as_str)
+                .is_some_and(|description| norm(description).contains("tipo de cambio mayorista"))
+        })?
+        .get("idVariable")?
+        .as_i64()
+}
+
+/// Official BCRA values on a past day, for `/dolar` periods longer than the
+/// hourly snapshots: the wholesale rate (Com. A 3500, since 2002) and the
+/// TCRM 100 built from it and the ITCRM of that day.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DollarBaselines {
+    pub wholesale: Option<f64>,
+    pub tcrm_100: Option<f64>,
+    pub diagnostics: Vec<String>,
+}
+
+#[must_use]
+pub fn load_dollar_baselines<T: BcraTransport, C: RequestCache>(
+    transport: &T,
+    cache: &mut C,
+    target_unix: i64,
+    now: i64,
+) -> DollarBaselines {
+    let mut d = Vec::new();
+    let day = ba_day(target_unix);
+    let wholesale = request_json(transport, cache, &BcraRequest::Variables, now, &mut d)
+        .as_ref()
+        .map(items)
+        .and_then(|variables| wholesale_id(&variables))
+        .and_then(|id| {
+            let request = BcraRequest::Latest {
+                id,
+                from: iso(day - WHOLESALE_LOOKBACK_DAYS),
+                to: iso(day),
+            };
+            request_json_for(
+                transport,
+                cache,
+                &request,
+                BASELINE_TTL_SECONDS,
+                now,
+                &mut d,
+            )
+        })
+        .and_then(|value| series(&value).into_iter().next_back())
+        .map(|(_, value)| value)
+        .filter(|value| *value > 0.0);
+    let tcrm_100 = wholesale.and_then(|wholesale| {
+        let indices = full_itcrm_series(transport, cache, now, &mut d)?;
+        let (index_day, index) = indices.range(..=day).next_back()?;
+        (day - index_day <= ITCRM_MAX_GAP_DAYS)
+            .then(|| tcrm_value(wholesale, *index))
+            .flatten()
+    });
+    DollarBaselines {
+        wholesale,
+        tcrm_100,
+        diagnostics: d,
+    }
 }
 
 fn tcrm_daily_baseline<T: BcraTransport, C: RequestCache>(
@@ -719,16 +898,7 @@ fn tcrm_daily_baseline<T: BcraTransport, C: RequestCache>(
     now: i64,
     d: &mut Vec<String>,
 ) -> Option<f64> {
-    let id = variables
-        .iter()
-        .find(|variable| {
-            variable
-                .get("descripcion")
-                .and_then(Value::as_str)
-                .is_some_and(|description| norm(description).contains("tipo de cambio mayorista"))
-        })?
-        .get("idVariable")?
-        .as_i64()?;
+    let id = wholesale_id(variables)?;
     let wholesale = series(&request_json(
         transport,
         cache,
@@ -736,7 +906,7 @@ fn tcrm_daily_baseline<T: BcraTransport, C: RequestCache>(
         now,
         d,
     )?);
-    let indices = indices.or_else(|| itcrm_series(transport, cache, d))?;
+    let indices = indices.or_else(|| itcrm_series(transport, cache, now, d))?;
     // Daily observations carry forward across weekends and holidays.
     let day = ba_day(now.saturating_sub(86_400));
     let (_, wholesale) = wholesale.range(..=day).next_back()?;
@@ -937,6 +1107,115 @@ mod tests {
             body: v.to_string().into_bytes(),
         })
     }
+    #[test]
+    fn long_dollar_baselines_use_the_wholesale_rate_and_itcrm_of_that_day() {
+        struct Recorded {
+            requests: RefCell<Vec<BcraRequest>>,
+            responses: RefCell<VecDeque<Result<HttpResponse, TransportFailureKind>>>,
+        }
+        impl BcraTransport for Recorded {
+            fn get(&self, request: &BcraRequest) -> Result<HttpResponse, TransportFailureKind> {
+                self.requests.borrow_mut().push(request.clone());
+                self.responses
+                    .borrow_mut()
+                    .pop_front()
+                    .unwrap_or(Err(TransportFailureKind::Request))
+            }
+        }
+        let variables = json!({"results":[
+            {"idVariable":4,"descripcion":"Tipo de cambio minorista (promedio vendedor)","categoria":"Principales Variables"},
+            {"idVariable":5,"descripcion":"Tipo de cambio mayorista de referencia","categoria":"Principales Variables"}
+        ]});
+        // The shape of a real BCRA answer for 2016-11-10 to 2016-11-20.
+        let wholesale = json!({"status":200,"results":[{"idVariable":5,"detalle":[
+            {"fecha":"2016-11-18","valor":15.4817}
+        ]}]});
+        let day = |iso: &str| parse_date(iso).unwrap_or_default();
+        let itcrm =
+            |iso: &str, now: i64| json!({"timestamp": now, "data": [[day(iso), 80.0]]}).to_string();
+        // 2016-11-20 12:00 UTC, a Sunday: Friday's rate stands in.
+        let target = 1_479_643_200;
+        let now = 1_795_132_800;
+        let transport = Recorded {
+            requests: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::from([
+                response(variables.clone()),
+                response(wholesale.clone()),
+            ])),
+        };
+        let mut cache = Cache::default();
+        cache
+            .values
+            .insert(ITCRM_FULL_HISTORY_KEY.to_owned(), itcrm("2016-11-01", now));
+        let baselines = load_dollar_baselines(&transport, &mut cache, target, now);
+        assert_eq!(baselines.wholesale, Some(15.4817));
+        assert_eq!(
+            baselines.tcrm_100.map(|value| (value * 1e6).round() / 1e6),
+            Some(19.352_125)
+        );
+        assert!(
+            baselines.diagnostics.is_empty(),
+            "{:?}",
+            baselines.diagnostics
+        );
+        assert_eq!(
+            transport.requests.borrow()[1],
+            BcraRequest::Latest {
+                id: 5,
+                from: "2016-11-10".to_owned(),
+                to: "2016-11-20".to_owned(),
+            }
+        );
+
+        // An ITCRM more than 45 days older gives no TCRM, and no wholesale
+        // rate (like before 2002) gives neither.
+        let transport = Recorded {
+            requests: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::from([
+                response(variables.clone()),
+                response(wholesale),
+            ])),
+        };
+        let mut cache = Cache::default();
+        cache
+            .values
+            .insert(ITCRM_FULL_HISTORY_KEY.to_owned(), itcrm("2016-09-01", now));
+        let baselines = load_dollar_baselines(&transport, &mut cache, target, now);
+        assert_eq!(
+            (baselines.wholesale.is_some(), baselines.tcrm_100),
+            (true, None)
+        );
+        let transport = Recorded {
+            requests: RefCell::new(Vec::new()),
+            responses: RefCell::new(VecDeque::from([
+                response(variables),
+                response(json!({"results":[{"idVariable":5,"detalle":[]}]})),
+            ])),
+        };
+        let baselines = load_dollar_baselines(&transport, &mut Cache::default(), 0, now);
+        assert_eq!(baselines.wholesale, None);
+        assert_eq!(baselines.tcrm_100, None);
+        // The ITCRM workbook is not downloaded when there is no rate to use.
+        assert_eq!(transport.requests.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_stale_full_itcrm_copy_is_refreshed_and_still_serves_when_bcra_fails() {
+        let now = 1_795_132_800;
+        let stale = json!({"timestamp": now - 2 * 86_400, "data": [[20_000, 90.0]]}).to_string();
+        let mut cache = Cache::default();
+        cache
+            .values
+            .insert(ITCRM_FULL_HISTORY_KEY.to_owned(), stale);
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([Err(TransportFailureKind::Timeout)])),
+        };
+        let mut d = Vec::new();
+        let values = full_itcrm_series(&transport, &mut cache, now, &mut d);
+        assert_eq!(values, Some(BTreeMap::from([(20_000, 90.0)])));
+        assert_eq!(d, ["ITCRM transport Timeout"]);
+    }
+
     #[test]
     fn cache_key_and_time_contract() {
         assert_eq!(
@@ -1280,6 +1559,29 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 3);
 
+        // An unreadable full ITCRM copy is reported, then BCRA is asked.
+        let mut unreadable = Cache {
+            fail_gets: true,
+            ..Cache::default()
+        };
+        let mut itcrm_diagnostics = Vec::new();
+        let offline = Transport {
+            responses: RefCell::new(VecDeque::new()),
+        };
+        assert!(
+            full_itcrm_series(
+                &offline,
+                &mut unreadable,
+                1_700_000_000,
+                &mut itcrm_diagnostics
+            )
+            .is_none()
+        );
+        assert_eq!(
+            itcrm_diagnostics.first().map(String::as_str),
+            Some("could not read BCRA cache itcrm_full_history:v1: synthetic cache read failure")
+        );
+
         let mut invalid = Cache::default();
         invalid
             .values
@@ -1428,6 +1730,7 @@ mod tests {
                 "/bcra/monetarias?limit=2000",
                 "/bcra/monetarias/7?limit=20",
                 "/bcra/monetarias/8?desde=2026-09-02&hasta=2026-09-02&limit=1",
+                "/bcra/monetarias/5?desde=2016-11-10&hasta=2016-11-20&limit=1",
                 "/risk",
                 "/itcrm",
             ] {
@@ -1463,6 +1766,11 @@ mod tests {
             BcraRequest::Value {
                 id: 8,
                 date: "2026-09-02".to_owned(),
+            },
+            BcraRequest::Latest {
+                id: 5,
+                from: "2016-11-10".to_owned(),
+                to: "2016-11-20".to_owned(),
             },
             BcraRequest::CountryRisk,
             BcraRequest::Itcrm,
