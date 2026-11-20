@@ -12938,6 +12938,14 @@ mod tests {
             let free = !stored.contains_key(key);
             if free {
                 stored.insert(key.to_owned(), value.to_owned());
+                if self.steal_lock {
+                    // Keep every lock value a vote used, so a test can show
+                    // that two votes never share one.
+                    stored
+                        .entry(format!("{key}:tokens"))
+                        .or_default()
+                        .push_str(&format!("{value},"));
+                }
             }
             Ok(free)
         }
@@ -13636,6 +13644,18 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.contains("market choices lock expired"))
         );
+        // Each vote claims the lock with its own value. With one shared
+        // value, a slow vote would delete the lock of the vote that took it.
+        stored.borrow_mut().remove("market_choices_lock:any:libra");
+        assert_eq!(
+            slow.dispatch(update("/p libra", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        let tokens = stored.borrow()["market_choices_lock:any:libra:tokens"].clone();
+        let tokens: Vec<&str> = tokens.split_terminator(',').collect();
+        assert_eq!(tokens.len(), 2);
+        assert_ne!(tokens[0], tokens[1]);
+        assert!(!tokens.contains(&"other"));
         Ok(())
     }
 
