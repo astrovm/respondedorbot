@@ -265,7 +265,13 @@ pub fn opennode_provider(
     base_url: &str,
     api_key: &str,
 ) -> Result<OpenNodeProvider<ReqwestOpenNodeTransport>, String> {
-    ReqwestOpenNodeTransport::new(base_url, api_key)
+    opennode_provider_from_transport(ReqwestOpenNodeTransport::new(base_url, api_key))
+}
+
+fn opennode_provider_from_transport(
+    transport: Result<ReqwestOpenNodeTransport, bot_adapters::bcra::TransportFailureKind>,
+) -> Result<OpenNodeProvider<ReqwestOpenNodeTransport>, String> {
+    transport
         .map(|transport| OpenNodeProvider { transport })
         .map_err(|error| format!("could not construct OpenNode transport: {error:?}"))
 }
@@ -688,24 +694,27 @@ mod tests {
             Err("OpenNode response is missing data".to_owned())
         );
         assert_eq!(
-            broken
-                .create(&NewCharge {
-                    usd_cents: 1,
-                    description: String::new(),
-                    order_id: String::new(),
-                    ttl_minutes: 10,
-                })
-                .map(|invoice| invoice.charge_id),
+            broken.create(&NewCharge {
+                usd_cents: 1,
+                description: String::new(),
+                order_id: String::new(),
+                ttl_minutes: 10,
+            }),
             Err("OpenNode response is missing data".to_owned())
         );
         assert!(opennode_provider("https://opennode.example.test", "synthetic-key").is_ok());
+        assert!(matches!(
+            super::opennode_provider_from_transport(Err(TransportFailureKind::Request)),
+            Err(error) if error == "could not construct OpenNode transport: Request"
+        ));
     }
 
     #[test]
     fn billing_repository_backs_the_lightning_ledger() {
-        if let Ok(url) = std::env::var("TEST_DATABASE_URL") {
-            ledger_round_trip(&url);
-        }
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+            return;
+        };
+        ledger_round_trip(&url);
     }
 
     fn ledger_round_trip(url: &str) {

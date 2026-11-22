@@ -342,7 +342,7 @@ mod tests {
         fn set(&mut self, key: &str, value: &str, _ttl: i64) -> Result<(), Self::Error> {
             self.0
                 .lock()
-                .map_err(|_| "cache lock")?
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(key.to_owned(), value.to_owned());
             Ok(())
         }
@@ -373,7 +373,7 @@ mod tests {
         fn get(&self, request: &BcraRequest) -> Result<HttpResponse, TransportFailureKind> {
             self.0
                 .lock()
-                .map_err(|_| TransportFailureKind::Request)?
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(request.clone());
             match request {
                 BcraRequest::Variables => Ok(HttpResponse {

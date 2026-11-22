@@ -2968,51 +2968,45 @@ where
                 // group.  Keeping them separate preserves all candidates,
                 // the request-specific conversion context, and an
                 // independently retryable callback menu.
-                if selection.candidates.len() > 1 || token_signal.is_none() {
+                if selection.candidates.len() != 1 || token_signal.is_none() {
                     pending_selections.push((selection, choices_key.clone()));
                     continue;
                 }
-                let MarketSelection {
-                    candidates,
-                    target_symbol,
-                    target_parameter,
-                    conversion,
-                    ..
-                } = selection;
-                if let Some(candidate) = candidates.into_iter().next() {
-                    direct_market_candidate =
-                        Some((candidate, target_symbol, target_parameter, conversion));
-                }
+                direct_market_candidate = Some((
+                    selection.candidates.remove(0),
+                    selection.target_symbol,
+                    selection.target_parameter,
+                    selection.conversion,
+                ));
             }
             if let Some((candidate, target_symbol, target_parameter, conversion)) =
                 direct_market_candidate
             {
-                load = Some(
-                    self.market_price_source
-                        .as_mut()
-                        .map(|source| {
-                            source.load_candidate(
-                                &candidate,
-                                timeframe.as_deref(),
-                                &target_symbol,
-                                &target_parameter,
-                                conversion.as_ref(),
-                                command,
-                                locale,
-                                timestamp,
-                            )
-                        })
-                        .unwrap_or(MarketPriceLoad {
-                            chart: None,
-                            selection: None,
-                            no_assets_found: true,
-                            text: String::new(),
-                            diagnostics: vec!["market price source disappeared".to_owned()],
-                        }),
-                );
-                if let Some(load) = &load {
-                    self.state_diagnostics.extend(load.diagnostics.clone());
-                }
+                let candidate_load = self
+                    .market_price_source
+                    .as_mut()
+                    .map(|source| {
+                        source.load_candidate(
+                            &candidate,
+                            timeframe.as_deref(),
+                            &target_symbol,
+                            &target_parameter,
+                            conversion.as_ref(),
+                            command,
+                            locale,
+                            timestamp,
+                        )
+                    })
+                    .unwrap_or(MarketPriceLoad {
+                        chart: None,
+                        selection: None,
+                        no_assets_found: true,
+                        text: String::new(),
+                        diagnostics: vec!["market price source disappeared".to_owned()],
+                    });
+                self.state_diagnostics
+                    .extend(candidate_load.diagnostics.iter().cloned());
+                load = Some(candidate_load);
             }
             if let Some(load) = load.as_ref().filter(|load| !load.no_assets_found) {
                 if single && let Some(chart) = &load.chart {
@@ -5233,19 +5227,20 @@ where
         locale: bot_core::locale::Locale,
     ) -> NativeDispatchResult<Config, Actions, Random> {
         let callback_id = context.callback_id.as_deref();
-        let alert_text = if !self.billing_available {
-            Some(bot_core::billing_commands::billing_unavailable(locale))
-        } else if self.lightning_checkout.is_none() {
-            Some(lightning_invoice_failed(locale))
-        } else if callback == LightningCallback::InvalidPack {
-            Some(match locale {
+        if !self.billing_available {
+            return self.answer_callback_alert(
+                callback_id,
+                bot_core::billing_commands::billing_unavailable(locale),
+            );
+        }
+        let Some(checkout) = self.lightning_checkout.as_mut() else {
+            return self.answer_callback_alert(callback_id, lightning_invoice_failed(locale));
+        };
+        if callback == LightningCallback::InvalidPack {
+            let text = match locale {
                 bot_core::locale::Locale::Es => "Ese pack es fruta, elegí otro",
                 bot_core::locale::Locale::En => "That credit pack is invalid, choose another one",
-            })
-        } else {
-            None
-        };
-        if let Some(text) = alert_text {
+            };
             return self.answer_callback_alert(callback_id, text);
         }
         let message_id = MessageId(context.message_id);
@@ -5295,24 +5290,21 @@ where
                 },
             );
         }
-        let created = self
-            .lightning_checkout
-            .as_mut()
-            .map(|checkout| checkout.create(user_id, chat_id.0, &pack, locale));
-        let Some(Ok(invoice)) = created else {
-            if let Some(Err(error)) = created {
+        let invoice = match checkout.create(user_id, chat_id.0, &pack, locale) {
+            Ok(invoice) => invoice,
+            Err(error) => {
                 self.state_diagnostics.push(format!(
                     "lightning invoice user_id={user_id} pack={}: {error}",
                     pack.id
                 ));
+                if let Some(source) = self.market_price_source.as_mut()
+                    && let Err(error) = source.take_selection(claim_key.as_str())
+                {
+                    self.state_diagnostics
+                        .push(format!("lightning invoice claim release failed: {error}"));
+                }
+                return self.answer_callback_alert(callback_id, lightning_invoice_failed(locale));
             }
-            if let Some(source) = self.market_price_source.as_mut()
-                && let Err(error) = source.take_selection(claim_key.as_str())
-            {
-                self.state_diagnostics
-                    .push(format!("lightning invoice claim release failed: {error}"));
-            }
-            return self.answer_callback_alert(callback_id, lightning_invoice_failed(locale));
         };
         let message = lightning_invoice_message(chat_id, &pack, &invoice, locale);
         if context.chat_type != "private" {
@@ -8465,10 +8457,20 @@ mod tests {
         total_amount: i64,
         language: Option<&str>,
     ) -> IncomingUpdate {
+        successful_payment_update_in_chat(pack_id, user_id, total_amount, language, "private")
+    }
+
+    fn successful_payment_update_in_chat(
+        pack_id: &str,
+        user_id: i64,
+        total_amount: i64,
+        language: Option<&str>,
+        chat_type: &str,
+    ) -> IncomingUpdate {
         IncomingUpdate {
             update_id: 102,
             event: IncomingEvent::SuccessfulPayment(Map::from_iter([
-                ("chat".to_owned(), json!({"id":42,"type":"private"})),
+                ("chat".to_owned(), json!({"id":42,"type":chat_type})),
                 (
                     "from".to_owned(),
                     json!({"id":user_id,"language_code":language}),
@@ -9340,9 +9342,11 @@ mod tests {
             message.replied_message_id = Some(MessageId(6));
             message.audio_media_kind = Some("voice".to_owned());
             message.audio_duration_seconds = Some(4);
-            if let Some(content) = message.content.as_mut() {
-                content.audio_file_id = Some("voice-1".to_owned());
-            }
+            let content = message.content.as_mut();
+            assert!(content.is_some(), "audio fixture must have message content");
+            content
+                .into_iter()
+                .for_each(|content| content.audio_file_id = Some("voice-1".to_owned()));
         });
 
         assert_eq!(dispatcher.dispatch(incoming), Ok(DispatchOutcome::Handled));
@@ -9776,6 +9780,43 @@ mod tests {
                         .any(|entry| entry.contains("summary delivery completion"))
                 );
             }
+        }
+    }
+
+    #[test]
+    fn missing_completion_ids_and_successful_completion_do_not_create_delivery_errors() {
+        for (command, outcome) in [
+            ("synthetic question", DeliveryOutcome::Unconfirmed),
+            ("/transcribe", DeliveryOutcome::Rejected),
+            ("/summary", DeliveryOutcome::Unconfirmed),
+            ("/summary", DeliveryOutcome::Rejected),
+        ] {
+            let is_command = command.starts_with('/');
+            let prepared = AiPreparation::Reply {
+                text: "synthetic reply".to_owned(),
+                completion_id: (!is_command).then(|| "ai-turn".to_owned()),
+                diagnostics: Vec::new(),
+            };
+            let (mut source, (_, _, deliveries)) = ai_source(Ok(prepared.clone()));
+            source.summary_preparation = Some(Ok(prepared.clone()));
+            source.media_preparation = Some(Ok(prepared));
+            let mut dispatcher = delivery_dispatcher(source, outcome);
+            let result = dispatcher.dispatch(update(command, Some("en")));
+            if matches!(outcome, DeliveryOutcome::Rejected) {
+                assert_eq!(
+                    result,
+                    Err(DispatchError::Action("synthetic delivery rejection"))
+                );
+            } else {
+                assert_eq!(result, Ok(DispatchOutcome::Handled));
+            }
+            assert_eq!(deliveries.borrow().len(), usize::from(!is_command));
+            assert!(
+                dispatcher
+                    .state_diagnostics()
+                    .iter()
+                    .all(|entry| !entry.contains("completion:"))
+            );
         }
     }
 
@@ -11100,9 +11141,11 @@ mod tests {
                         message.has_reply = true;
                         message.replied_message_id = Some(MessageId(6));
                         message.audio_media_kind = Some("voice".to_owned());
-                        if let Some(content) = message.content.as_mut() {
-                            content.audio_file_id = Some("synthetic-voice".to_owned());
-                        }
+                        let content = message.content.as_mut();
+                        assert!(content.is_some(), "audio fixture must have message content");
+                        content.into_iter().for_each(|content| {
+                            content.audio_file_id = Some("synthetic-voice".to_owned())
+                        });
                     });
                 assert_eq!(dispatcher.dispatch(message), Ok(DispatchOutcome::Handled));
                 assert!(ignored.borrow().is_empty());
@@ -13300,95 +13343,175 @@ mod tests {
                 .any(|diagnostic| diagnostic.contains("clear after send failure"))
         );
 
-        let stored = Rc::new(RefCell::new(HashMap::new()));
-        let mut unconfirmed = NativeDispatcher::new(
-            Config {
-                value: Ok(ChatConfig::default()),
-                chat_ids: Vec::new(),
-            },
-            delivery_actions(DeliveryOutcome::Unconfirmed),
-            State::default(),
-            values(),
-            random(),
-            authorization(),
-            "@mybot",
-        )
-        .with_market_price_source(Box::new(SelectionStorageMarketPrices {
-            initial: market_selection_load(None),
-            candidate: market_candidate_quote(),
-            stored: Rc::clone(&stored),
-            save_calls: Rc::new(RefCell::new(0)),
-            fail_save_at: None,
-            fail_load: None,
-            fail_clear: Some("synthetic clear after unconfirmed".to_owned()),
-            fail_claim: false,
-            steal_lock: false,
-            render_success: false,
-            render_caption: None,
-        }));
-        assert_eq!(
-            unconfirmed.persist_market_selection(
-                &incoming_message("/p libra", Some("en")),
-                menu(&selection),
-                1_672_531_200,
-                bot_core::locale::Locale::En,
-            ),
-            Ok(Some(DispatchOutcome::Handled))
-        );
-        assert_eq!(stored.borrow().len(), 1);
-        assert!(
-            unconfirmed
-                .state_diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.contains("delivery was unconfirmed"))
-        );
-        assert!(
-            unconfirmed
-                .state_diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.contains("clear after unconfirmed delivery"))
-        );
-
-        let stored = Rc::new(RefCell::new(HashMap::new()));
-        let mut update_failure =
-            dispatcher().with_market_price_source(Box::new(SelectionStorageMarketPrices {
+        for fail_clear in [false, true] {
+            let stored = Rc::new(RefCell::new(HashMap::new()));
+            let mut unconfirmed = NativeDispatcher::new(
+                Config {
+                    value: Ok(ChatConfig::default()),
+                    chat_ids: Vec::new(),
+                },
+                delivery_actions(DeliveryOutcome::Unconfirmed),
+                State::default(),
+                values(),
+                random(),
+                authorization(),
+                "@mybot",
+            )
+            .with_market_price_source(Box::new(SelectionStorageMarketPrices {
                 initial: market_selection_load(None),
                 candidate: market_candidate_quote(),
                 stored: Rc::clone(&stored),
                 save_calls: Rc::new(RefCell::new(0)),
-                fail_save_at: Some(2),
+                fail_save_at: None,
                 fail_load: None,
-                fail_clear: Some("synthetic clear after update".to_owned()),
+                fail_clear: fail_clear.then(|| "synthetic clear after unconfirmed".to_owned()),
+                fail_claim: false,
+                steal_lock: false,
+                render_success: false,
+                render_caption: None,
+            }));
+            assert_eq!(
+                unconfirmed.persist_market_selection(
+                    &incoming_message("/p libra", Some("en")),
+                    menu(&selection),
+                    1_672_531_200,
+                    bot_core::locale::Locale::En,
+                ),
+                Ok(Some(DispatchOutcome::Handled))
+            );
+            assert_eq!(stored.borrow().len(), usize::from(fail_clear));
+            assert!(
+                unconfirmed
+                    .state_diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains("delivery was unconfirmed"))
+            );
+            assert_eq!(
+                unconfirmed
+                    .state_diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains("clear after unconfirmed delivery")),
+                fail_clear
+            );
+
+            let stored = Rc::new(RefCell::new(HashMap::new()));
+            let mut update_failure =
+                dispatcher().with_market_price_source(Box::new(SelectionStorageMarketPrices {
+                    initial: market_selection_load(None),
+                    candidate: market_candidate_quote(),
+                    stored: Rc::clone(&stored),
+                    save_calls: Rc::new(RefCell::new(0)),
+                    fail_save_at: Some(2),
+                    fail_load: None,
+                    fail_clear: fail_clear.then(|| "synthetic clear after update".to_owned()),
+                    fail_claim: false,
+                    steal_lock: false,
+                    render_success: false,
+                    render_caption: None,
+                }));
+            assert_eq!(
+                update_failure.persist_market_selection(
+                    &incoming_message("/p libra", Some("en")),
+                    menu(&selection),
+                    1_672_531_200,
+                    bot_core::locale::Locale::En,
+                ),
+                Ok(Some(DispatchOutcome::Handled))
+            );
+            assert_eq!(stored.borrow().len(), usize::from(fail_clear));
+            assert!(
+                update_failure
+                    .state_diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains("market selection update unavailable"))
+            );
+            assert!(update_failure
+                .actions
+                .0
+                .iter()
+                .any(|action| matches!(action, TelegramAction::EditMessage { reply_markup: Some(markup), .. } if markup.inline_keyboard.is_empty())));
+        }
+    }
+
+    #[test]
+    fn charts_omit_the_alternative_button_when_selection_storage_fails() {
+        let selection_id = "lost-selection".to_owned();
+        let mut dispatcher =
+            dispatcher().with_market_price_source(Box::new(SelectionStorageMarketPrices {
+                initial: market_selection_load(None),
+                candidate: market_candidate_quote(),
+                stored: Rc::new(RefCell::new(HashMap::new())),
+                save_calls: Rc::new(RefCell::new(0)),
+                fail_save_at: None,
+                fail_load: Some("synthetic storage failure".to_owned()),
+                fail_clear: None,
                 fail_claim: false,
                 steal_lock: false,
                 render_success: false,
                 render_caption: None,
             }));
         assert_eq!(
-            update_failure.persist_market_selection(
-                &incoming_message("/p libra", Some("en")),
-                menu(&selection),
-                1_672_531_200,
-                bot_core::locale::Locale::En,
-            ),
-            Ok(Some(DispatchOutcome::Handled))
+            dispatcher.live_market_alternatives(Some(&(selection_id, 2)), 700),
+            None
         );
-        assert_eq!(stored.borrow().len(), 1);
-        assert!(
-            update_failure
-                .state_diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.contains("market selection update unavailable"))
-        );
-        assert!(update_failure
-            .actions
-            .0
-            .iter()
-            .any(|action| matches!(action, TelegramAction::EditMessage { reply_markup: Some(markup), .. } if markup.inline_keyboard.is_empty())));
     }
 
     #[test]
-    fn market_pages_preserve_identity_range_and_original_reply() -> Result<(), String> {
+    fn spanish_market_callbacks_report_expired_and_selected_outcomes() {
+        let context = super::CallbackContext {
+            callback_id: Some("callback-1".to_owned()),
+            data: "mkt:select:synthetic:0".to_owned(),
+            route: bot_core::telegram_callbacks::CallbackRoute::Market,
+            chat_id: "42".to_owned(),
+            chat_type: "private".to_owned(),
+            message_id: 700,
+            ephemeral_message_id: None,
+            receiver_user_id: None,
+            user_id: Some(88),
+            user_language_code: Some("es".to_owned()),
+        };
+        let mut dispatcher = dispatcher();
+        for (kind, expected, show_alert) in [
+            ("expired", "Esta selección ya venció", true),
+            ("selected", "Cotización cargada", false),
+        ] {
+            assert_eq!(
+                dispatcher.answer_market_callback(
+                    &context,
+                    bot_core::locale::Locale::Es,
+                    kind,
+                    show_alert
+                ),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(
+                matches!(dispatcher.actions.0.last(), Some(TelegramAction::AnswerCallback {
+                text: Some(text), show_alert: alert, ..
+            }) if text == expected && *alert == show_alert)
+            );
+        }
+    }
+
+    #[test]
+    fn a_callback_without_message_context_is_acknowledged_without_a_diagnostic() {
+        let mut dispatcher = dispatcher();
+        let callback = serde_json::Map::from_iter([("id".to_owned(), json!("guarded"))]);
+        assert_eq!(
+            dispatcher.dispatch(IncomingUpdate {
+                update_id: 1,
+                event: IncomingEvent::CallbackQuery(callback),
+            }),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(dispatcher.state_diagnostics().is_empty());
+        assert!(matches!(dispatcher.actions.0.as_slice(), [
+            TelegramAction::AnswerCallback { callback_id, text: None, .. }
+        ] if callback_id == "guarded"));
+    }
+
+    #[test]
+    fn market_pages_preserve_identity_range_and_original_reply()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut selection = market_selection_fixture(Some("1m"));
         let prototype = selection.candidates[0].clone();
         selection.candidates = (0..7)
@@ -13463,10 +13586,9 @@ mod tests {
             .and_then(|markup| {
                 markup
                     .inline_keyboard
-                    .first()?
-                    .first()?
-                    .callback_data
-                    .clone()
+                    .first()
+                    .and_then(|row| row.first())
+                    .and_then(|button| button.callback_data.clone())
             })
             .ok_or("missing page edit")?;
         assert_eq!(callback, format!("mkt:select:{id}:5"));
@@ -13482,13 +13604,12 @@ mod tests {
         );
         // The switch replies to the request again and replaces the old quote.
         assert_eq!(*selected.borrow(), vec!["1000:1m", "1005:1m"]);
-        let rebound: StoredMarketSelection = serde_json::from_str(
-            stored
-                .borrow()
-                .get(&format!("market_selection:{id}"))
-                .ok_or("rebound selection")?,
-        )
-        .map_err(|error| error.to_string())?;
+        let stored_rows = stored.borrow();
+        let payload = stored_rows
+            .get(&format!("market_selection:{id}"))
+            .ok_or("rebound selection")?;
+        let rebound: StoredMarketSelection = serde_json::from_str(payload)?;
+        drop(stored_rows);
         assert_eq!((rebound.message_id, rebound.shown), (700, Some(5)));
         assert!(dispatcher.actions.0.iter().any(|action| matches!(
             action,
@@ -13919,10 +14040,9 @@ mod tests {
                     ..
                 } => markup
                     .inline_keyboard
-                    .first()?
-                    .first()?
-                    .callback_data
-                    .clone(),
+                    .first()
+                    .and_then(|row| row.first())
+                    .and_then(|button| button.callback_data.clone()),
                 _ => None,
             })
             .ok_or("page edit")?;
@@ -15243,7 +15363,8 @@ mod tests {
     }
 
     #[test]
-    fn dex_market_selection_persists_card_state_for_refresh_and_delete() -> Result<(), String> {
+    fn dex_market_selection_persists_card_state_for_refresh_and_delete()
+    -> Result<(), Box<dyn std::error::Error>> {
         for requested in [None, Some("7d")] {
             let expected = requested.unwrap_or("24h");
             let mut signal = token_signal();
@@ -15382,13 +15503,12 @@ mod tests {
                     ..
                 }
             )));
-            let rebound: StoredMarketSelection = serde_json::from_str(
-                stored
-                    .borrow()
-                    .get(&format!("market_selection:{id}"))
-                    .ok_or("rebound selection")?,
-            )
-            .map_err(|error| error.to_string())?;
+            let stored_rows = stored.borrow();
+            let payload = stored_rows
+                .get(&format!("market_selection:{id}"))
+                .ok_or("rebound selection")?;
+            let rebound: StoredMarketSelection = serde_json::from_str(payload)?;
+            drop(stored_rows);
             assert_eq!((rebound.message_id, rebound.shown), (701, Some(1)));
             assert!(rebound.base_keyboard.is_some_and(|markup| {
                 markup.inline_keyboard[0][0]
@@ -15450,9 +15570,12 @@ mod tests {
                 selection_key.clone(),
                 bound.replacen("\"message_id\":701", "\"message_id\":999", 1),
             );
-            if let Some(state) = token_state.borrow_mut().as_mut() {
-                state.last_refresh_at = None;
-            }
+            let mut token_state_for_refresh = token_state.borrow_mut();
+            assert!(token_state_for_refresh.is_some());
+            token_state_for_refresh
+                .iter_mut()
+                .for_each(|state| state.last_refresh_at = None);
+            drop(token_state_for_refresh);
             assert_eq!(
                 dispatcher.dispatch(callback_update_for_message(
                     &signal_callback,
@@ -16458,10 +16581,9 @@ mod tests {
                     .reply_markup
                     .as_ref()?
                     .inline_keyboard
-                    .first()?
-                    .first()?
-                    .callback_data
-                    .clone()
+                    .first()
+                    .and_then(|row| row.first())
+                    .and_then(|button| button.callback_data.clone())
             })
             .ok_or("selection callback".to_owned())?;
         // The likeliest match had no quote, so the list is shown instead.
@@ -16830,10 +16952,9 @@ mod tests {
                     .reply_markup
                     .as_ref()?
                     .inline_keyboard
-                    .first()?
-                    .first()?
-                    .callback_data
-                    .clone()
+                    .first()
+                    .and_then(|row| row.first())
+                    .and_then(|button| button.callback_data.clone())
             })
             .ok_or("selection callback".to_owned())?;
         assert_eq!(
@@ -20362,14 +20483,12 @@ mod tests {
     #[test]
     fn a_number_replying_to_the_topup_menu_redraws_it_on_that_amount() {
         let reply = |text: &str, replied: &str, from_bot: bool, chat_type: &str| {
-            let mut update = update(text, Some("en"));
-            if let IncomingEvent::Message(message) = &mut update.event {
+            message_update(text, Some("en"), |message| {
                 message.chat_type = Some(chat_type.to_owned());
                 message.has_reply = true;
                 message.replied_sender_is_bot = from_bot;
                 message.replied_text = Some(replied.to_owned());
-            }
-            update
+            })
         };
         let menu = topup_menu(bot_core::locale::Locale::En, 100, true).0;
         for (text, expected) in [
@@ -20414,11 +20533,7 @@ mod tests {
             let mut dispatcher =
                 lightning_dispatcher(Actions::default(), Some(FakeLightningCheckout::default()));
             let _outcome = dispatcher.dispatch(update);
-            assert!(
-                !sent_messages(&dispatcher.actions.0)
-                    .iter()
-                    .any(|message| message.text.starts_with("Add credits")),
-            );
+            assert!(sent_messages(&dispatcher.actions.0).is_empty());
         }
     }
 
@@ -22171,9 +22286,11 @@ mod tests {
             message.has_reply = true;
             message.replied_message_id = Some(MessageId(6));
             message.audio_media_kind = Some("voice".to_owned());
-            if let Some(content) = message.content.as_mut() {
-                content.audio_file_id = Some("synthetic-audio".to_owned());
-            }
+            let content = message.content.as_mut();
+            assert!(content.is_some(), "audio fixture must have message content");
+            content
+                .into_iter()
+                .for_each(|content| content.audio_file_id = Some("synthetic-audio".to_owned()));
         });
         assert_eq!(dispatcher.dispatch(media), Ok(DispatchOutcome::Handled));
         assert!(dispatcher.state_diagnostics().iter().any(|diagnostic| {
@@ -22365,9 +22482,11 @@ mod tests {
             message.has_reply = true;
             message.replied_message_id = Some(MessageId(6));
             message.audio_media_kind = Some("voice".to_owned());
-            if let Some(content) = message.content.as_mut() {
-                content.audio_file_id = Some("synthetic-audio".to_owned());
-            }
+            let content = message.content.as_mut();
+            assert!(content.is_some(), "audio fixture must have message content");
+            content
+                .into_iter()
+                .for_each(|content| content.audio_file_id = Some("synthetic-audio".to_owned()));
         });
         assert_eq!(missing_media.dispatch(media), Ok(DispatchOutcome::Handled));
         assert_eq!(
@@ -23452,12 +23571,7 @@ mod tests {
             dispatcher().with_token_signal_source(Box::new(ScriptedSignals::new(Vec::new(), None)));
         let _ = dispatcher.dispatch(update("JAKAJAJJAJAJAJAJAJAJJAJAJAJAJAJAJJAJA", Some("es")));
         let texts = sent_texts(&dispatcher.actions.0);
-        assert_eq!(
-            texts
-                .iter()
-                .find(|text| text.starts_with("No encontré datos para")),
-            None
-        );
+        assert!(texts.is_empty(), "{texts:?}");
     }
 
     #[test]
@@ -25463,10 +25577,12 @@ mod tests {
             );
             assert_eq!(rows.borrow()[0].1.user_id, 77);
             // The picked member wins over the replied one.
-            let mut reply = replying("/unignore Lemon Pie");
-            if let IncomingEvent::Message(message) = &mut reply.event {
+            let reply = group("/unignore Lemon Pie", |message| {
+                message.has_reply = true;
+                message.replied_sender_id = Some(UserId(77));
+                message.replied_sender_first_name = Some("Ana".to_owned());
                 message.text_mentions = vec![picked("Lemon Pie", 66, false)];
-            }
+            });
             replies(&mut dispatcher, reply);
             assert_eq!(rows.borrow()[0].1.user_id, 77);
             assert_eq!(
@@ -26215,7 +26331,7 @@ mod tests {
                     request
                         .json_payload
                         .clone()
-                        .or_else(|| request.params.clone())
+                        .or(request.params.clone())
                         .unwrap_or(Value::Null),
                 ));
                 Ok(HttpResponse {
@@ -26281,6 +26397,15 @@ mod tests {
     }
 
     fn ephemeral_topup_callback(data: &str, sender: i64, receiver: i64) -> IncomingUpdate {
+        ephemeral_topup_callback_in_chat(data, sender, receiver, json!(-42))
+    }
+
+    fn ephemeral_topup_callback_in_chat(
+        data: &str,
+        sender: i64,
+        receiver: i64,
+        chat_id: Value,
+    ) -> IncomingUpdate {
         IncomingUpdate {
             update_id: 100,
             event: IncomingEvent::CallbackQuery(Map::from_iter([
@@ -26289,7 +26414,7 @@ mod tests {
                 ("from".into(), json!({"id":sender,"language_code":"en"})),
                 (
                     "message".into(),
-                    json!({"ephemeral_message_id":71,"receiver_user":{"id":receiver},"chat":{"id":-42,"type":"supergroup"}}),
+                    json!({"ephemeral_message_id":71,"receiver_user":{"id":receiver},"chat":{"id":chat_id,"type":"supergroup"}}),
                 ),
             ])),
         }
@@ -26560,10 +26685,7 @@ mod tests {
             }),
             records: Rc::clone(&records),
         }));
-        let mut update = successful_payment_update("p50", 42, 25, Some("en"));
-        if let IncomingEvent::SuccessfulPayment(ref mut m) = update.event {
-            m["chat"]["type"] = json!("supergroup");
-        }
+        let update = successful_payment_update_in_chat("p50", 42, 25, Some("en"), "supergroup");
         assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
         assert_eq!(records.borrow()[0].user_id, 42);
         assert!(
@@ -26593,10 +26715,7 @@ mod tests {
             ));
         }
         let mut bot = dispatcher();
-        let mut update = ephemeral_topup_callback("topup:c50", 88, 88);
-        if let IncomingEvent::CallbackQuery(ref mut q) = update.event {
-            q["message"]["chat"]["id"] = json!("invalid");
-        }
+        let update = ephemeral_topup_callback_in_chat("topup:c50", 88, 88, json!("invalid"));
         assert_eq!(bot.dispatch(update), Ok(DispatchOutcome::Handled));
         assert_eq!(bot.state_diagnostics(), ["invalid top-up callback chat id"]);
     }

@@ -726,6 +726,29 @@ mod tests {
     }
 
     #[test]
+    fn null_reasoning_fields_preserve_previous_fragment_values() {
+        let mut details = Vec::new();
+        super::accumulate_reasoning_details(
+            &mut details,
+            vec![json!({
+                "type": "reasoning.text", "index": 0, "text": "first", "id": "provider-id"
+            })],
+        );
+        super::accumulate_reasoning_details(
+            &mut details,
+            vec![json!({
+                "type": "reasoning.text", "index": 0, "text": " second", "id": null
+            })],
+        );
+        assert_eq!(
+            details,
+            [json!({
+                "type": "reasoning.text", "index": 0, "text": "first second", "id": "provider-id"
+            })]
+        );
+    }
+
+    #[test]
     fn the_thinking_limit_stops_once_the_round_answers_or_calls_a_tool() {
         for first in [
             json!({"choices": [{"delta": {"content": "hola"}}]}),
@@ -737,11 +760,8 @@ mod tests {
             }]}}]}),
         ] {
             let provider = paced_provider(vec![first, reasoning_frame("late")]);
-            let failure = provider
-                .stream_round_events(&messages(), &[], ignore_event)
-                .err()
-                .map(|error| error.source);
-            assert_eq!(failure, None);
+            let round = provider.stream_round_events(&messages(), &[], ignore_event);
+            assert!(round.is_ok(), "{round:?}");
         }
     }
 

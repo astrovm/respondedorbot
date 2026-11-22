@@ -372,17 +372,16 @@ impl CompactionBilling for PostgresCompactionBilling {
             ("pricing_complete".to_owned(), json!(pricing_complete)),
         ]);
         if let Some(pricing) = pricing.and_then(|value| value.as_object().cloned()) {
-            for key in [
-                "pricing_version",
-                "raw_usd_micros",
-                "model_breakdown",
-                "tool_breakdown",
-                "segment_breakdown",
-            ] {
-                if let Some(value) = pricing.get(key) {
-                    metadata.insert(key.to_owned(), value.clone());
-                }
-            }
+            metadata.extend(pricing.into_iter().filter(|(key, _)| {
+                matches!(
+                    key.as_str(),
+                    "pricing_version"
+                        | "raw_usd_micros"
+                        | "model_breakdown"
+                        | "tool_breakdown"
+                        | "segment_breakdown"
+                )
+            }));
         }
         if operation_id.is_empty() {
             let usage_tag = reservation_nested_string(reservation, "usage_tag");
@@ -583,12 +582,14 @@ mod tests {
     struct Transport {
         request: RefCell<Option<HttpRequest>>,
         content: &'static str,
+        model: &'static str,
     }
 
     fn transport(content: &'static str) -> Transport {
         Transport {
             request: RefCell::new(None),
             content,
+            model: "resolved/model",
         }
     }
 
@@ -805,7 +806,7 @@ mod tests {
                 status_code: 200,
                 body: json!({
                     "id":"generation-1",
-                    "model":"resolved/model",
+                    "model":self.model,
                     "provider":"Synthetic",
                     "choices":[{"message":{"content":self.content},"finish_reason":"stop"}],
                     "usage":{"prompt_tokens":10,"completion_tokens":5,"cost":"0.0012345"}
@@ -872,6 +873,25 @@ mod tests {
                 .unwrap_or_default()
                 .contains("NUNCA uses markdown")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn compaction_without_a_model_redirect_omits_the_requested_model_alias()
+    -> Result<(), Box<dyn Error>> {
+        let mut fixture = transport(SUMMARY);
+        fixture.model = "requested/model";
+        let mut provider = OpenRouterCompactionProvider::new(
+            fixture,
+            "key",
+            "https://synthetic.invalid/api/v1",
+            "requested/model",
+            "persona",
+        );
+        let result = provider.compact(&[json!({"role": "user", "text": "hello"})], None, "en")?;
+        let segment = result.billing_segment.ok_or("missing billing segment")?;
+        assert_eq!(segment["model"], "requested/model");
+        assert!(segment["metadata"].get("requested_model").is_none());
         Ok(())
     }
 

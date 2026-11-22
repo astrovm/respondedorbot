@@ -326,9 +326,10 @@ mod tests {
         assert_eq!(
             std::thread::spawn(run)
                 .join()
-                .map_err(|_| "fetch thread panicked")?
-                .output,
-            "Title: App\nDrained 5 coins"
+                .ok()
+                .map(|result| result.output)
+                .as_deref(),
+            Some("Title: App\nDrained 5 coins")
         );
 
         let renderer: SharedRenderer = Arc::new(Renderer(Err(RenderError::Failed(

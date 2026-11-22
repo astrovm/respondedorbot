@@ -1194,15 +1194,20 @@ mod tests {
         }
         impl OperationalReporter for GatedReporter {
             fn report(&self, report: &OperationalReport) -> Result<(), String> {
-                if let Ok(entered) = self.entered.lock() {
-                    let _ = entered.send(std::thread::current().id());
-                }
-                if let Ok(release) = self.release.lock() {
-                    let _ = release.recv_timeout(Duration::from_secs(5));
-                }
-                if let Ok(mut delivered) = self.delivered.lock() {
-                    delivered.push(report.text().to_owned());
-                }
+                let entered = self
+                    .entered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = entered.send(std::thread::current().id());
+                let release = self
+                    .release
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = release.recv_timeout(Duration::from_secs(5));
+                self.delivered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(report.text().to_owned());
                 Ok(())
             }
         }

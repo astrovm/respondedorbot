@@ -1838,6 +1838,51 @@ mod tests {
     }
 
     #[test]
+    fn fallback_payer_switch_rejects_oversized_holds_and_totals_before_database_io() {
+        let mut billing = unreachable_billing();
+        let request = user_request("ai:88:overflow", 1);
+        let refused = bot_adapters::billing_read::AiChargeResult {
+            ok: false,
+            applied: false,
+            reason: Some("insufficient balance".to_owned()),
+            source: None,
+            amount: 1,
+            user_balance: i64::MAX,
+            chat_balance: 0,
+        };
+        for held in [i64::from(i32::MAX), i64::from(i32::MAX) + 1] {
+            billing.held_by_operation.insert(
+                request.operation_id.clone(),
+                std::collections::HashMap::from([("initial".to_owned(), held)]),
+            );
+            assert_eq!(
+                billing.move_operation_to_fallback(&request, 1, refused.clone(), PayerSource::User),
+                Err("AI reservation exceeds the database range".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn stored_system_messages_keep_their_role() {
+        assert_eq!(
+            super::role("system", "system:12"),
+            bot_core::ai_prompt::PromptRole::System
+        );
+    }
+
+    #[test]
+    fn older_pricing_copies_present_fields_without_clearing_metadata() {
+        let mut metadata = serde_json::Map::from_iter([("reason".to_owned(), json!("delivered"))]);
+        super::copy_pricing_metadata(&mut metadata, &json!({"pricing_complete": true}));
+        assert_eq!(
+            serde_json::Value::Object(metadata),
+            json!({
+                "reason": "delivered", "pricing_complete": true
+            })
+        );
+    }
+
+    #[test]
     fn zero_cost_settlement_refunds_the_allowance_before_the_ledger() {
         let operation_id = "ai:42:7:55";
         let mut billing = unreachable_billing();

@@ -60,6 +60,16 @@ pub struct ProductionBackgroundOptions<'a> {
 pub fn build_production_background_specs(
     options: ProductionBackgroundOptions<'_>,
 ) -> Result<Vec<BackgroundWorkerSpec>, String> {
+    build_background_specs_with(options, ReqwestTelegramTransport::new)
+}
+
+fn build_background_specs_with(
+    options: ProductionBackgroundOptions<'_>,
+    telegram: impl FnOnce() -> Result<
+        ReqwestTelegramTransport,
+        bot_adapters::telegram_http::TransportFailureKind,
+    >,
+) -> Result<Vec<BackgroundWorkerSpec>, String> {
     let mut task_workers = Vec::with_capacity(TASK_WORKER_COUNT);
     for worker in 0..TASK_WORKER_COUNT {
         let scheduler = build_task_scheduler(TaskServiceOptions {
@@ -119,7 +129,7 @@ pub fn build_production_background_specs(
         ),
     ]);
     if let Some(opennode) = &options.opennode {
-        let transport = ReqwestTelegramTransport::new()
+        let transport = telegram()
             .map_err(|error| format!("could not construct Telegram transport: {error:?}"))?;
         task_workers.push(BackgroundWorkerSpec::new(
             "lightning-payments",
@@ -296,9 +306,8 @@ impl BackgroundSupervisor {
                             Ok(run) => run,
                             Err(_) => {
                                 let fatal = BackgroundError::Panicked { name: name.clone() };
-                                if let Ok(mut recorded) = failure.lock() {
-                                    *recorded = Some(fatal.clone());
-                                }
+                                *failure.lock().unwrap_or_else(PoisonError::into_inner) =
+                                    Some(fatal.clone());
                                 let report = fatal.operational_report();
                                 eprintln!("{fatal}");
                                 if let Err(report_error) = reporter.report(&report) {
@@ -523,7 +532,8 @@ mod tests {
     use super::{
         BackgroundError, BackgroundSupervisor, BackgroundWorker, BackgroundWorkerSpec,
         OpenRouterPricingWarmer, ProductionBackgroundOptions, REPEATED_FAILURE_REPORT_INTERVAL,
-        ReportedFailures, build_production_background_specs, spawn_named_thread,
+        ReportedFailures, ReqwestTelegramTransport, build_production_background_specs,
+        spawn_named_thread,
     };
     use crate::composition::TelegramDeliveryCoordinator;
     use crate::lightning_payments::OpenNodeOptions;
@@ -771,35 +781,47 @@ mod tests {
             "https://openrouter.example.test/api/v1",
         );
         let pricing = Arc::new(pricing?);
-        let build = |openrouter_base_url| {
-            build_production_background_specs(ProductionBackgroundOptions {
-                redis_endpoint: &RedisEndpoint {
-                    host: "synthetic.invalid".to_owned(),
-                    port: 6379,
-                    password: Some("synthetic-password".to_owned()),
+        let build = |openrouter_base_url, telegram| {
+            super::build_background_specs_with(
+                ProductionBackgroundOptions {
+                    redis_endpoint: &RedisEndpoint {
+                        host: "synthetic.invalid".to_owned(),
+                        port: 6379,
+                        password: Some("synthetic-password".to_owned()),
+                    },
+                    database_url: "postgresql://synthetic.invalid/database",
+                    telegram_token: "synthetic-telegram-token",
+                    openrouter_api_key: "synthetic-openrouter-key",
+                    openrouter_base_url,
+                    openrouter_pricing: Arc::clone(&pricing),
+                    firecrawl_api_key: None,
+                    system_prompt: "synthetic persona",
+                    owner_token: "synthetic-owner",
+                    scheduler_mode: SchedulerMode::Authoritative,
+                    reconciliation_interval: Duration::from_secs(60),
+                    reconciliation_settings: ReconciliationSettings::default(),
+                    active_operations: ActiveOperationRegistry::default(),
+                    coinmarketcap_key: Some("synthetic-coinmarketcap-key"),
+                    opennode: Some(OpenNodeOptions {
+                        api_key: "synthetic-opennode-key".to_owned(),
+                        api_url: "https://opennode.example.test".to_owned(),
+                    }),
+                    telegram_delivery: TelegramDeliveryCoordinator::default(),
                 },
-                database_url: "postgresql://synthetic.invalid/database",
-                telegram_token: "synthetic-telegram-token",
-                openrouter_api_key: "synthetic-openrouter-key",
-                openrouter_base_url,
-                openrouter_pricing: Arc::clone(&pricing),
-                firecrawl_api_key: None,
-                system_prompt: "synthetic persona",
-                owner_token: "synthetic-owner",
-                scheduler_mode: SchedulerMode::Authoritative,
-                reconciliation_interval: Duration::from_secs(60),
-                reconciliation_settings: ReconciliationSettings::default(),
-                active_operations: ActiveOperationRegistry::default(),
-                coinmarketcap_key: Some("synthetic-coinmarketcap-key"),
-                opennode: Some(OpenNodeOptions {
-                    api_key: "synthetic-opennode-key".to_owned(),
-                    api_url: "https://opennode.example.test".to_owned(),
-                }),
-                telegram_delivery: TelegramDeliveryCoordinator::default(),
-            })
+                telegram,
+            )
         };
-        assert!(build("not-a-url").is_err());
-        let result = build("https://openrouter.example.test/api/v1");
+        assert!(build("not-a-url", ReqwestTelegramTransport::new as fn() -> _).is_err());
+        let result = build(
+            "https://openrouter.example.test/api/v1",
+            ReqwestTelegramTransport::new,
+        );
+        let error = build("https://openrouter.example.test/api/v1", || {
+            Err(bot_adapters::telegram_http::TransportFailureKind::Request)
+        });
+        assert!(
+            matches!(error, Err(error) if error == "could not construct Telegram transport: Request")
+        );
         assert!(result.is_ok());
         assert_eq!(result.map(|specs| specs.len()), Ok(9));
         Ok(())
@@ -844,11 +866,44 @@ mod tests {
 
     impl OperationalReporter for FailingReporter {
         fn report(&self, _report: &OperationalReport) -> Result<(), String> {
-            if let Ok(mut attempts) = self.attempts.lock() {
-                *attempts += 1;
-            }
+            *self.attempts.lock().unwrap_or_else(PoisonError::into_inner) += 1;
             Err("synthetic admin chat outage".to_owned())
         }
+    }
+
+    #[test]
+    fn shutdown_failures_reach_the_operational_reporter() -> TestResult {
+        struct FailsShutdown;
+        impl BackgroundWorker for FailsShutdown {
+            fn run_once(&mut self, _now_epoch_seconds: i64) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn shutdown(&mut self) -> Result<(), String> {
+                Err("synthetic job flush failure".to_owned())
+            }
+        }
+
+        let reporter = Arc::new(Reporter::default());
+        let mut supervisor = BackgroundSupervisor::start(
+            vec![BackgroundWorkerSpec::new(
+                "flush",
+                Duration::from_secs(60),
+                Box::new(FailsShutdown),
+            )],
+            reporter.clone(),
+        )?;
+        supervisor.stop()?;
+        let reports = reporter
+            .messages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            reports[0].text(),
+            "background worker flush shutdown failed: synthetic job flush failure"
+        );
+        Ok(())
     }
 
     #[test]

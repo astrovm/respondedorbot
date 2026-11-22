@@ -442,16 +442,25 @@ struct NativeLinkReplacementSource<T, R, W> {
 
 /// Runs the link reader the bot uses in production, for replaying real links.
 pub fn read_live_link_context(request: LinkContextRequest<'_>) -> Result<LinkContext, String> {
-    let debug = |failure: &dyn std::fmt::Debug| format!("{failure:?}");
+    read_live_link_context_with(
+        request,
+        ReqwestLinkPreviewTransport::new,
+        || ReqwestLinkPreviewTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT),
+        || ReqwestWebFetchTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT),
+    )
+}
+
+fn read_live_link_context_with(
+    request: LinkContextRequest<'_>,
+    preview: impl FnOnce() -> Result<ReqwestLinkPreviewTransport, PreviewFailure>,
+    context_preview: impl FnOnce() -> Result<ReqwestLinkPreviewTransport, PreviewFailure>,
+    context_fetch: impl FnOnce() -> Result<ReqwestWebFetchTransport, WebFetchTransportError>,
+) -> Result<LinkContext, String> {
     Ok(NativeLinkReplacementSource {
-        transport: ReqwestLinkPreviewTransport::new().map_err(|error| debug(&error))?,
-        context_transport: ReqwestLinkPreviewTransport::with_timeout(
-            AI_LINK_CONTEXT_REQUEST_TIMEOUT,
-        )
-        .map_err(|error| debug(&error))?,
+        transport: preview().map_err(|error| format!("{error:?}"))?,
+        context_transport: context_preview().map_err(|error| format!("{error:?}"))?,
         context_resolver: SystemHostResolver,
-        context_fetch: ReqwestWebFetchTransport::with_timeout(AI_LINK_CONTEXT_REQUEST_TIMEOUT)
-            .map_err(|error| debug(&error))?,
+        context_fetch: context_fetch().map_err(|error| format!("{error:?}"))?,
     }
     .preview_context(request))
 }
@@ -2160,9 +2169,7 @@ impl TelegramStreamDeliveryState {
         let key = pending.key;
         if self.has_final(key) {
             // A newer final answer arrived while this one was in flight.
-            if let Some(response) = pending.final_response {
-                let _ = response.send(Ok(false));
-            }
+            respond_to_stream_edit(pending.final_response, Ok(false));
             return;
         }
         if !self.pending.contains_key(&key) {
@@ -2449,9 +2456,7 @@ impl TelegramStreamDeliveryShard {
             state.prune_inactive_intermediate_edit(key.chat_id);
             response
         };
-        if let Some(response) = response {
-            let _ = response.send(Ok(false));
-        }
+        respond_to_stream_edit(response, Ok(false));
         let _ = self.wake.try_send(());
     }
 
@@ -2590,7 +2595,14 @@ fn deliver_telegram_stream_final<Transport: TelegramTransport>(
         }
         Err(error) => Err(TelegramActionSinkError::from(error)),
     };
-    if let Some(response) = pending.final_response {
+    respond_to_stream_edit(pending.final_response, result);
+}
+
+fn respond_to_stream_edit(
+    response: Option<mpsc::Sender<Result<bool, TelegramActionSinkError>>>,
+    result: Result<bool, TelegramActionSinkError>,
+) {
+    if let Some(response) = response {
         let _ = response.send(result);
     }
 }
@@ -2689,9 +2701,7 @@ fn random_biguint_below(upper_exclusive: &BigUint) -> Result<BigUint, SystemRand
         rand::fill(&mut bytes);
         if retained_bits != 0 {
             let mask = (1_u8 << retained_bits) - 1;
-            if let Some(last) = bytes.last_mut() {
-                *last &= mask;
-            }
+            bytes[byte_count - 1] &= mask;
         }
         let candidate = BigUint::from_bytes_le(&bytes);
         if &candidate < upper_exclusive {
@@ -2753,6 +2763,12 @@ impl ScheduledTaskSource for RedisScheduledTaskSource {
             .cancel_task(task_id.as_str(), chat_id)
             .map_err(error_text)
     }
+}
+
+fn task_admin_transport(
+    transport: Result<ReqwestTelegramTransport, TransportFailureKind>,
+) -> Result<ReqwestTelegramTransport, String> {
+    transport.map_err(|kind| format!("{kind:?}"))
 }
 
 pub struct TelegramGroupAuthorizer<Transport> {
@@ -3518,8 +3534,7 @@ impl ConversationToolFactory for ProductionToolFactory {
                             match &self.telegram_token {
                                 Some(token) => {
                                     funds.with_admin_check(Box::new(TelegramGroupAuthorizer::new(
-                                        ReqwestTelegramTransport::new()
-                                            .map_err(|kind| format!("{kind:?}"))?,
+                                        task_admin_transport(ReqwestTelegramTransport::new())?,
                                         token,
                                         &self.redis_endpoint,
                                     )))
@@ -4422,6 +4437,124 @@ mod tests {
     }
 
     #[test]
+    fn link_context_reports_setup_failures_at_every_transport_boundary() {
+        use super::read_live_link_context_with;
+        use bot_adapters::link_preview::ReqwestLinkPreviewTransport;
+
+        assert!(
+            super::read_live_link_context(replied_to(""))
+                .is_ok_and(|context| context.text.is_none())
+        );
+
+        for stage in 0..3 {
+            let result = read_live_link_context_with(
+                replied_to(""),
+                || {
+                    if stage == 0 {
+                        Err(PreviewFailure::Connection)
+                    } else {
+                        ReqwestLinkPreviewTransport::new()
+                    }
+                },
+                || {
+                    if stage == 1 {
+                        Err(PreviewFailure::Timeout)
+                    } else {
+                        ReqwestLinkPreviewTransport::new()
+                    }
+                },
+                || {
+                    Err(WebFetchTransportError::Other(
+                        "synthetic client failure".to_owned(),
+                    ))
+                },
+            );
+            assert_eq!(
+                result.err().as_deref(),
+                Some(
+                    [
+                        "Connection",
+                        "Timeout",
+                        r#"Other("synthetic client failure")"#
+                    ][stage]
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_link_metadata_keeps_the_source_and_omits_empty_fields() {
+        let url = "https://example.test/resource";
+        let preview = bot_adapters::link_preview::PreviewInspection {
+            final_url: url.to_owned(),
+            metadata: bot_adapters::link_preview::PreviewMetadata {
+                title: None,
+                description: Some("Description".to_owned()),
+                canonical_url: None,
+                media_url: None,
+                media_content_type: None,
+                media_size: None,
+                image_url: None,
+            },
+            embeddable: false,
+            status_code: Some(200),
+            failure: None,
+        };
+        assert_eq!(
+            super::preview_lines(&preview),
+            [url, "descripcion: Description"]
+        );
+        let tweet = bot_adapters::web_fetch::TweetContent {
+            url: url.to_owned(),
+            author: " ".to_owned(),
+            date: "Nov 22".to_owned(),
+            text: String::new(),
+            quote: None,
+            photos: Vec::new(),
+            video_count: 0,
+            media_unavailable: false,
+        };
+        assert_eq!(super::tweet_lines(&tweet), [url, "fecha: Nov 22"]);
+    }
+
+    #[test]
+    fn task_admin_client_setup_errors_stay_diagnostic() {
+        assert!(matches!(
+            super::task_admin_transport(Err(TransportFailureKind::Request)),
+            Err(error) if error == "Request"
+        ));
+    }
+
+    #[test]
+    fn invalid_preview_redirects_stop_before_the_second_request() {
+        struct InvalidRedirect;
+        impl LinkPreviewTransport for InvalidRedirect {
+            fn request(&self, request: &PreviewRequest) -> Result<PreviewResponse, PreviewFailure> {
+                assert_eq!(request.url, "https://example.test/resource");
+                assert!(!request.follow_redirects);
+                Ok(PreviewResponse {
+                    status_code: 302,
+                    final_url: request.url.clone(),
+                    content_type: String::new(),
+                    content_length: None,
+                    location: Some("http://[".to_owned()),
+                    body: String::new(),
+                })
+            }
+        }
+        let transport = super::PublicLinkPreviewTransport {
+            inner: &InvalidRedirect,
+            resolver: &PublicResolverStub,
+        };
+        let outcome = transport.request(&PreviewRequest {
+            url: "https://example.test/resource".to_owned(),
+            method: bot_adapters::link_preview::PreviewMethod::Get,
+            follow_redirects: true,
+        });
+        assert!(matches!(outcome, Err(PreviewFailure::Request)));
+    }
+
+    #[test]
     fn a_replied_tweet_link_brings_its_text_and_photo_to_the_turn() {
         let mut source = link_source(tweet_routes(Some(b"pixels")));
         let context = crate::dispatcher::LinkReplacementSource::preview_context(
@@ -4866,9 +4999,7 @@ mod tests {
 
     impl CriptoYaTransport for CriptoTransport {
         fn get(&self, request: &CriptoYaRequest) -> Result<CriptoYaHttpResponse, CriptoYaFailure> {
-            if let Ok(mut requests) = self.requests.lock() {
-                requests.push(request.clone());
-            }
+            super::lock_unpoisoned(&self.requests).push(request.clone());
             let index = match request {
                 CriptoYaRequest::Dollar => 0,
                 CriptoYaRequest::Exchange { fiat, .. } if fiat == "USD" => 1,
@@ -5025,9 +5156,7 @@ mod tests {
         let waits = Arc::new(Mutex::new(Vec::new()));
         let recorded_waits = waits.clone();
         let mut sink = TelegramActionSink::new(transport, "token").with_wait(move |duration| {
-            if let Ok(mut waits) = recorded_waits.lock() {
-                waits.push(duration);
-            }
+            super::lock_unpoisoned(&recorded_waits).push(duration);
         });
         assert_eq!(
             sink.execute(TelegramAction::SendMessage(SendMessage::new(
@@ -5076,9 +5205,7 @@ mod tests {
         let waits = Arc::new(Mutex::new(Vec::new()));
         let recorded_waits = waits.clone();
         let mut sink = TelegramActionSink::new(transport, "token").with_wait(move |duration| {
-            if let Ok(mut waits) = recorded_waits.lock() {
-                waits.push(duration);
-            }
+            super::lock_unpoisoned(&recorded_waits).push(duration);
         });
         let action = TelegramAction::SendMessage(SendMessage::new(ChatId(1), "hello"));
 
@@ -5136,10 +5263,8 @@ mod tests {
                 .is_err()
         );
 
-        if let Ok(mut released) = release.0.lock() {
-            *released = true;
-            release.1.notify_all();
-        }
+        *super::lock_unpoisoned(&release.0) = true;
+        release.1.notify_all();
         assert!(first_send.join().is_ok_and(|result| result.is_ok()));
         assert!(second_send.join().is_ok_and(|result| result.is_ok()));
         assert_eq!(maximum.load(Ordering::SeqCst), 1);
@@ -5253,13 +5378,35 @@ mod tests {
     }
 
     #[test]
+    fn thinking_frame_replaces_an_unsent_draft_in_the_same_queue_slot() {
+        let (delivery, shared, _receiver) = stream_delivery_fixture();
+        delivery.start_thinking(ChatId(7), MessageId(80), "Thinking");
+        delivery.enqueue(stream_edit(7, 80, "first draft"));
+        let key = super::TelegramStreamKey {
+            chat_id: 7,
+            message_id: 80,
+        };
+        let mut state = super::lock_unpoisoned(&shared);
+        state.thinking.get_mut(&key).must().next_frame_at = Instant::now();
+        state.enqueue_due_thinking_edits();
+        assert_eq!(state.order.len(), 1);
+        assert!(matches!(
+            state.pending.get(&key).map(|pending| &pending.action),
+            Some(TelegramAction::EditMessageNoPreview { text, .. }) if text == "Thinking.."
+        ));
+    }
+
+    #[test]
     fn telegram_action_sink_forwards_thinking_animation_lifecycle() {
-        let (delivery, state, receiver) = stream_delivery_fixture();
-        let mut sink = TelegramActionSink::new(
+        let mut direct_sink = TelegramActionSink::new(
             transport(200, r#"{"ok":true,"result":true}"#),
             "synthetic-token",
-        )
-        .with_stream_delivery(delivery);
+        );
+        direct_sink.start_stream_thinking(ChatId(7), MessageId(80), "Pensando");
+        direct_sink.stop_stream_thinking(ChatId(7), MessageId(80));
+
+        let (delivery, state, receiver) = stream_delivery_fixture();
+        let mut sink = direct_sink.with_stream_delivery(delivery);
         let key = super::TelegramStreamKey {
             chat_id: 7,
             message_id: 80,
@@ -6166,14 +6313,12 @@ mod tests {
             {
                 let _ = gate.recv_timeout(Duration::from_secs(5));
             }
-            if let Some(text) = request
+            let text = request
                 .json_payload
                 .as_ref()
                 .and_then(|payload| payload.get("text"))
-                .and_then(serde_json::Value::as_str)
-            {
-                super::lock_unpoisoned(&self.texts).push(text.to_owned());
-            }
+                .and_then(serde_json::Value::as_str);
+            super::lock_unpoisoned(&self.texts).extend(text.map(str::to_owned));
             telegram_response(200, r#"{"ok":true,"result":true}"#)
         }
     }
@@ -6592,9 +6737,7 @@ mod tests {
         let recorder = |waits: &Arc<Mutex<Vec<Duration>>>| {
             let waits = waits.clone();
             move |duration| {
-                if let Ok(mut waits) = waits.lock() {
-                    waits.push(duration);
-                }
+                super::lock_unpoisoned(&waits).push(duration);
             }
         };
         let transport = Transport::with(vec![
@@ -7760,8 +7903,7 @@ mod tests {
         // Scheduled tasks get the read-only tools only: their web search and
         // polls go through the task's own billed paths.
         let mut task = bot_core::scheduled_tasks::ScheduledTask {
-            id: bot_core::scheduled_tasks::TaskId::new("synthetic-task")
-                .unwrap_or_else(|_| unreachable!("synthetic id is valid")),
+            id: bot_core::scheduled_tasks::TaskId::new("synthetic-task").must(),
             chat_id: "-42".to_owned(),
             text: "synthetic task".to_owned(),
             user_name: "synthetic_user".to_owned(),
@@ -8597,8 +8739,30 @@ mod tests {
         };
         let chat_id = crate::test_env::unique("synthetic-wrapper");
         assert!(tasks.list(&chat_id)?.is_empty());
-        let task_id = TaskId::new("synthetic-missing-task").map_err(super::error_text)?;
+        let task_id =
+            TaskId::new(crate::test_env::unique("synthetic-task")).map_err(super::error_text)?;
         assert!(!tasks.cancel(&task_id, &chat_id)?);
+        let record = bot_adapters::task_record::decode_task_record(
+            &serde_json::json!({
+                "schema_version": 1,
+                "id": task_id.as_str(),
+                "chat_id": chat_id,
+                "text": "synthetic task",
+                "run_date": "2026-11-23T00:00:00Z",
+                "next_run_at": 1_795_392_000i64,
+            })
+            .to_string(),
+        )
+        .map_err(super::error_text)?;
+        assert!(
+            tasks
+                .store
+                .save_task(&record, 60)
+                .map_err(super::error_text)?
+        );
+        assert_eq!(tasks.list(&chat_id)?, [record.task]);
+        assert!(tasks.cancel(&task_id, &chat_id)?);
+        assert!(tasks.list(&chat_id)?.is_empty());
         Ok(())
     }
 

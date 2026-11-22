@@ -472,6 +472,7 @@ mod tests {
         refunds: usize,
         deny: bool,
         refund_error: bool,
+        reservation_override: Option<Value>,
     }
 
     impl CompactionReservationStore for Billing {
@@ -489,11 +490,15 @@ mod tests {
             if self.deny {
                 return Ok(None);
             }
-            Ok(Some(json!({
-                "reserved_credit_units": reserve_credit_units,
-                "source":"user",
-                "usage_tag": usage_tag,
-            })))
+            Ok(Some(self.reservation_override.clone().unwrap_or_else(
+                || {
+                    json!({
+                        "reserved_credit_units": reserve_credit_units,
+                        "source":"user",
+                        "usage_tag": usage_tag,
+                    })
+                },
+            )))
         }
         fn refund_enqueue_failure(
             &mut self,
@@ -762,6 +767,27 @@ mod tests {
             .map_err(crate::error_text)?;
         assert!(balance < 100, "reservation was not charged: {balance}");
         Ok(())
+    }
+
+    #[test]
+    fn a_non_object_reservation_is_queued_without_overwriting_it() {
+        let mut scheduler = NativeCompactionScheduler::new(
+            Queue {
+                insert: true,
+                ..Queue::default()
+            },
+            Billing {
+                reservation_override: Some(json!("legacy-reservation")),
+                ..Billing::default()
+            },
+            token,
+            COMPACTION_MODEL,
+            "persona",
+        );
+        assert_eq!(scheduler.schedule(plan(), context()), Ok(true));
+        let (queue, _, _) = scheduler.into_parts();
+        assert_eq!(queue.payloads.len(), 1);
+        assert_eq!(queue.payloads[0]["reservation"], "legacy-reservation");
     }
 
     #[test]
