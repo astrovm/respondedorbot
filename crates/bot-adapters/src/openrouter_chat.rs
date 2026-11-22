@@ -3152,7 +3152,7 @@ mod tests {
             parse_catalog_model(&text_only)
                 .is_some_and(|(_, _, transcription)| transcription.is_none())
         );
-        let overflow = format!("{}0", i128::MAX);
+        let overflow = format!("{}.0", i128::MAX);
         for invalid in ["1.2.3", "abc", ".", "1a.5", &overflow] {
             assert_eq!(
                 super::decimal_rate_to_usd_micros_per_million(invalid),

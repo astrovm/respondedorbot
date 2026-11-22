@@ -761,28 +761,28 @@ mod tests {
     #[test]
     fn billing_repository_port_reports_whether_it_applied_the_settlement()
     -> crate::test_env::TestResult {
-        let Some(url) = crate::test_env::database_url() else {
-            return Ok(());
-        };
-        bot_adapters::billing_schema::BillingSchemaRepository::new(&url).ensure_schema()?;
-        let mut repository = BillingRepository::new(&url);
-        let mut operation = operation(&crate::test_env::fresh_op(), "2026-09-02T00:00:00Z", None);
-        operation.chat_id = None;
-        let mut ids = crate::test_env::unique("synthetic-user");
-        ids.retain(|character| character.is_ascii_digit());
-        operation.user_id = ids
-            .chars()
-            .rev()
-            .take(12)
-            .collect::<String>()
-            .parse::<i64>()?
-            + 8_000_000_000_000;
-        let applied = |repository: &mut BillingRepository| {
-            ReconciliationStore::settle_operation(repository, &operation, 0, &Map::new())
-        };
-        assert!(applied(&mut repository)?);
-        assert!(!applied(&mut repository)?);
-        Ok(())
+        crate::test_env::database_url().map_or(Ok(()), |url| {
+            bot_adapters::billing_schema::BillingSchemaRepository::new(&url).ensure_schema()?;
+            let mut repository = BillingRepository::new(&url);
+            let mut operation =
+                operation(&crate::test_env::fresh_op(), "2026-09-02T00:00:00Z", None);
+            operation.chat_id = None;
+            let mut ids = crate::test_env::unique("synthetic-user");
+            ids.retain(|character| character.is_ascii_digit());
+            operation.user_id = ids
+                .chars()
+                .rev()
+                .take(12)
+                .collect::<String>()
+                .parse::<i64>()?
+                + 8_000_000_000_000;
+            let applied = |repository: &mut BillingRepository| {
+                ReconciliationStore::settle_operation(repository, &operation, 0, &Map::new())
+            };
+            assert!(applied(&mut repository)?);
+            assert!(!applied(&mut repository)?);
+            Ok(())
+        })
     }
 
     #[test]

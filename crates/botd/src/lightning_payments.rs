@@ -711,10 +711,9 @@ mod tests {
 
     #[test]
     fn billing_repository_backs_the_lightning_ledger() {
-        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
-            return;
-        };
-        ledger_round_trip(&url);
+        crate::test_env::database_url()
+            .iter()
+            .for_each(|url| ledger_round_trip(url));
     }
 
     fn ledger_round_trip(url: &str) {

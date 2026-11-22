@@ -873,9 +873,10 @@ mod tests {
 
     #[test]
     fn shutdown_failures_reach_the_operational_reporter() -> TestResult {
-        struct FailsShutdown;
+        struct FailsShutdown(mpsc::Sender<()>);
         impl BackgroundWorker for FailsShutdown {
             fn run_once(&mut self, _now_epoch_seconds: i64) -> Result<(), String> {
+                let _ = self.0.send(());
                 Ok(())
             }
 
@@ -884,15 +885,17 @@ mod tests {
             }
         }
 
+        let (ran, started) = mpsc::channel();
         let reporter = Arc::new(Reporter::default());
         let mut supervisor = BackgroundSupervisor::start(
             vec![BackgroundWorkerSpec::new(
                 "flush",
                 Duration::from_secs(60),
-                Box::new(FailsShutdown),
+                Box::new(FailsShutdown(ran)),
             )],
             reporter.clone(),
         )?;
+        started.recv_timeout(Duration::from_secs(5))?;
         supervisor.stop()?;
         let reports = reporter
             .messages

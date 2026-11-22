@@ -957,8 +957,10 @@ mod tests {
 
     #[test]
     fn raw_transport_rejects_invalid_base_paths_mime_types_and_truncated_bodies() -> TestResult {
-        let unusual_base = ReqwestTelegramTransport::with_api_base("mailto:bot@example.test")
-            .map_err(|error| format!("{error:?}"))?;
+        let unusual_base = ReqwestTelegramTransport::with_api_base("mailto:bot@example.test");
+        let unusual_base = unusual_base
+            .ok()
+            .ok_or("non-hierarchical fixture transport")?;
         assert_eq!(
             unusual_base.api_url("synthetic", "getMe"),
             Err(TransportFailureKind::Request)
@@ -998,8 +1000,8 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{")?;
             Ok(())
         });
-        let transport = ReqwestTelegramTransport::with_api_base(&format!("http://{address}"))
-            .map_err(|error| format!("{error:?}"))?;
+        let transport = ReqwestTelegramTransport::with_api_base(&format!("http://{address}"));
+        let transport = transport.ok().ok_or("local fixture transport")?;
         assert_eq!(
             transport.send(&TelegramRequest {
                 token: "synthetic".to_owned(),

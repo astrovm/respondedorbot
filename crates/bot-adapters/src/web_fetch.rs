@@ -1190,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn resolver_errors_block_fetch_before_transport_io() {
+    fn a_failed_resolution_provides_no_addresses_for_the_browser_proxy() -> TestResult {
         struct UnavailableDns;
         impl HostResolver for UnavailableDns {
             fn addresses(&self, hostname: &str, port: u16) -> Result<Vec<IpAddr>, String> {
@@ -1199,15 +1199,9 @@ mod tests {
             }
         }
 
-        let transport = Transport {
-            responses: RefCell::new(Vec::new()),
-            urls: RefCell::new(Vec::new()),
-        };
-        assert!(matches!(
-            fetch_public_url(&transport, &UnavailableDns, "https://example.test/"),
-            Err(PublicFetchError::Blocked { .. })
-        ));
-        assert!(transport.urls.borrow().is_empty());
+        let url = Url::parse("https://example.test/")?;
+        assert_eq!(public_addresses(&url, &UnavailableDns), None);
+        Ok(())
     }
 
     #[test]

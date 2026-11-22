@@ -9787,6 +9787,7 @@ mod tests {
     fn missing_completion_ids_and_successful_completion_do_not_create_delivery_errors() {
         for (command, outcome) in [
             ("synthetic question", DeliveryOutcome::Unconfirmed),
+            ("synthetic question", DeliveryOutcome::Rejected),
             ("/transcribe", DeliveryOutcome::Rejected),
             ("/summary", DeliveryOutcome::Unconfirmed),
             ("/summary", DeliveryOutcome::Rejected),
@@ -12912,12 +12913,15 @@ mod tests {
         }
 
         fn claim(&mut self, key: &str, value: &str, _: i64) -> Result<bool, String> {
-            let mut stored = self.stored.borrow_mut();
-            let free = !stored.contains_key(key);
-            if free {
-                stored.insert(key.to_owned(), value.to_owned());
-            }
-            Ok(free)
+            let mut inserted = false;
+            self.stored
+                .borrow_mut()
+                .entry(key.to_owned())
+                .or_insert_with(|| {
+                    inserted = true;
+                    value.to_owned()
+                });
+            Ok(inserted)
         }
 
         fn release(&mut self, key: &str, value: &str) -> Result<bool, String> {

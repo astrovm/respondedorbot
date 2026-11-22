@@ -742,10 +742,11 @@ mod tests {
                 let (mut stream, _) = listener.accept()?;
                 stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
                 assert!(stream.read(&mut [0_u8; 4_096])? > 0);
-                write!(
+                let written = write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort"
-                )?;
+                );
+                written?;
             }
             Ok(())
         });
@@ -874,8 +875,10 @@ mod tests {
         assert_eq!(result.metadata.media_size, Some(123));
 
         let image_url = "https://example.test/image.png";
+        let mut image = response(200, "image/png", "");
+        image.final_url = image_url.to_owned();
         let transport = FakeTransport {
-            responses: RefCell::new(vec![Ok(response(200, "image/png", ""))]),
+            responses: RefCell::new(vec![Ok(image)]),
             requests: RefCell::new(Vec::new()),
         };
         let result = inspect_with(&transport, image_url);

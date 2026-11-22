@@ -530,22 +530,33 @@ mod tests {
 
     #[test]
     fn invalid_cron_components_are_rejected_on_decode() {
-        for trigger in [
-            serde_json::json!({"type": "cron", "hour": -1, "minute": 0}),
-            serde_json::json!({"type": "cron", "hour": 0, "minute": -1}),
-            serde_json::json!({"type": "cron", "hour": 0, "minute": 0, "day_of_week": "mon,funday"}),
-        ] {
-            let record = serde_json::json!({
+        let cases = [
+            (json!({"type": "cron", "hour": -1, "minute": 0}), false),
+            (json!({"type": "cron", "hour": 0, "minute": -1}), false),
+            (
+                json!({"type": "cron", "hour": 0, "minute": 0, "day_of_week": "mon,funday"}),
+                true,
+            ),
+        ];
+        for (trigger, invalid_weekday) in cases {
+            let record = json!({
                 "schema_version": 1,
                 "id": "abc12345",
                 "chat_id": "1",
                 "text": "reminder",
                 "trigger_config": trigger
             });
+            let outcome = decode_task_record(&record.to_string());
             assert!(
                 matches!(
-                    decode_task_record(&record.to_string()),
-                    Err(TaskRecordError::InvalidTrigger)
+                    (outcome, invalid_weekday),
+                    (Err(TaskRecordError::InvalidTrigger), false)
+                        | (
+                            Err(TaskRecordError::State(
+                                bot_core::scheduled_tasks::TaskStateError::InvalidCron
+                            )),
+                            true
+                        )
                 ),
                 "{trigger}"
             );

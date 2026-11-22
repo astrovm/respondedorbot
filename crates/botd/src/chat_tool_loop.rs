@@ -1351,7 +1351,8 @@ mod tests {
                 streamed.push_str(text);
                 Ok(())
             },
-        )?;
+        );
+        let result = result?;
 
         assert_eq!(result.text, "checkinganswer");
         assert_eq!(streamed, result.text);
@@ -1392,7 +1393,8 @@ mod tests {
                 events.push(event);
                 Ok(())
             },
-        )?;
+        );
+        let result = result?;
 
         assert_eq!(
             events,
@@ -1457,7 +1459,8 @@ mod tests {
                 order.borrow_mut().extend(calls);
                 Ok(())
             },
-        )?;
+        );
+        let result = result?;
 
         assert_eq!(&*order.borrow(), &["final_text", "provider_returned"]);
         assert_eq!(result.text, "streamed");
@@ -1725,7 +1728,8 @@ mod tests {
             false,
             5,
             ignore_text,
-        )?;
+        );
+        let result = result?;
 
         assert_eq!(result.text, "synthetic answer");
         assert_eq!(result.provider_rounds, 3);
@@ -1772,7 +1776,8 @@ mod tests {
                 events.push(event);
                 Ok(())
             },
-        )?;
+        );
+        let result = result?;
 
         assert_eq!(result.text, "it is 4");
         assert!(result.stopped_at_limit);
@@ -2202,7 +2207,8 @@ mod tests {
                 }
                 Ok(())
             },
-        )?;
+        );
+        let result = result?;
 
         assert_eq!(result.text, "done");
         assert_eq!(result.tool_calls_executed, 5);
@@ -2352,7 +2358,8 @@ mod tests {
                 events.push(event);
                 Ok(())
             },
-        )?;
+        );
+        let result = result?;
         assert_eq!(
             events,
             [
@@ -2375,7 +2382,8 @@ mod tests {
                 texts.push(text.to_owned());
                 Ok(())
             },
-        )?;
+        );
+        let round = round?;
         assert_eq!(texts, ["answer"]);
         assert_eq!(round.reasoning, "thinking ");
         assert_eq!(*requests.borrow(), 2);

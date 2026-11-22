@@ -8749,7 +8749,7 @@ mod tests {
                 "chat_id": chat_id,
                 "text": "synthetic task",
                 "run_date": "2026-11-23T00:00:00Z",
-                "next_run_at": 1_795_392_000i64,
+                "next_run_at": "2026-11-23T00:00:00Z",
             })
             .to_string(),
         )
