@@ -230,7 +230,8 @@ fn charset_label(text: &str) -> Option<String> {
         .split(|character: char| {
             character.is_whitespace() || matches!(character, '"' | '\'' | ';' | '/' | '>')
         })
-        .next()?;
+        .next()
+        .unwrap_or_default();
     (!label.is_empty()).then(|| label.to_owned())
 }
 
@@ -733,6 +734,42 @@ mod tests {
     }
 
     #[test]
+    fn truncated_preview_and_video_bodies_are_request_failures() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            for content_type in ["text/html", "video/mp4"] {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+                assert!(stream.read(&mut [0_u8; 4_096])? > 0);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort"
+                )?;
+            }
+            Ok(())
+        });
+        let transport = ReqwestLinkPreviewTransport::new()
+            .ok()
+            .ok_or("preview client")?;
+        let url = format!("http://{address}/resource");
+        assert!(matches!(
+            transport.request(&PreviewRequest {
+                url: url.clone(),
+                method: PreviewMethod::Get,
+                follow_redirects: true,
+            }),
+            Err(PreviewFailure::Request)
+        ));
+        assert_eq!(
+            transport.download_video(&url, 100),
+            Err(PreviewFailure::Request)
+        );
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
     fn video_downloads_reject_errors_non_video_types_and_oversized_bodies() -> TestResult {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
@@ -835,6 +872,16 @@ mod tests {
         let result = inspect_with(&transport, "https://example.test/video");
         assert!(result.embeddable);
         assert_eq!(result.metadata.media_size, Some(123));
+
+        let image_url = "https://example.test/image.png";
+        let transport = FakeTransport {
+            responses: RefCell::new(vec![Ok(response(200, "image/png", ""))]),
+            requests: RefCell::new(Vec::new()),
+        };
+        let result = inspect_with(&transport, image_url);
+        assert!(result.embeddable);
+        assert_eq!(result.metadata.image_url.as_deref(), Some(image_url));
+        assert_eq!(result.metadata.media_url.as_deref(), Some(image_url));
 
         let transport = FakeTransport {
             responses: RefCell::new(vec![Err(PreviewFailure::Timeout)]),

@@ -1560,6 +1560,22 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     #[test]
+    fn lines_crossing_the_edge_only_draw_visible_pixels() {
+        use image::{Rgb, RgbImage};
+
+        let mut image = RgbImage::new(3, 3);
+        let color = Rgb([250, 100, 50]);
+        super::draw_line(&mut image, -2, 1, 4, 1, color);
+        for (x, y, pixel) in image.enumerate_pixels() {
+            assert_eq!(
+                *pixel,
+                if y == 1 { color } else { Rgb([0, 0, 0]) },
+                "{x}, {y}"
+            );
+        }
+    }
+
+    #[test]
     fn chart_price_labels_fit_without_losing_currency_or_precision() {
         // Label sizing only applies when a system font is installed.
         super::chart_font(false).into_iter().for_each(|font| {
@@ -2179,6 +2195,18 @@ mod tests {
         let load = adapter.load_symbol("timba");
         assert!(load.signal.is_none());
         assert_eq!(load.diagnostics, ["pump.fun search HTTP 500"]);
+    }
+
+    #[test]
+    fn pump_coin_with_a_non_string_name_is_rejected() {
+        let mut adapter = TokenSignalAdapter::new(scripted(Vec::new()), Cache::default());
+        let coin = json!({
+            "mint": "F3A1baCgv4TF79TSjdMTvpMDtNv8DJvHZwNc9DG8pump",
+            "symbol": "TIMBA",
+            "name": 123,
+            "total_supply": 1000000,
+        });
+        assert!(adapter.pump_signal(coin, &mut Vec::new()).is_none());
     }
 
     #[test]

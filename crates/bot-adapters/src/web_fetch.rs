@@ -1190,6 +1190,60 @@ mod tests {
     }
 
     #[test]
+    fn resolver_errors_block_fetch_before_transport_io() {
+        struct UnavailableDns;
+        impl HostResolver for UnavailableDns {
+            fn addresses(&self, hostname: &str, port: u16) -> Result<Vec<IpAddr>, String> {
+                assert_eq!((hostname, port), ("example.test", 443));
+                Err("synthetic DNS failure".to_owned())
+            }
+        }
+
+        let transport = Transport {
+            responses: RefCell::new(Vec::new()),
+            urls: RefCell::new(Vec::new()),
+        };
+        assert!(matches!(
+            fetch_public_url(&transport, &UnavailableDns, "https://example.test/"),
+            Err(PublicFetchError::Blocked { .. })
+        ));
+        assert!(transport.urls.borrow().is_empty());
+    }
+
+    #[test]
+    fn standalone_tweet_id_survives_a_provider_payload_without_a_url() {
+        let transport = Transport {
+            responses: RefCell::new(vec![Ok(json_response(
+                r#"{"code":200,"tweet":{"text":"A synthetic post"}}"#,
+            ))]),
+            urls: RefCell::new(Vec::new()),
+        };
+        let resolver = Resolver(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]);
+        let result = fetch_tweet(&transport, &resolver, "https://x.com/i/web/status/12345");
+        assert_eq!(
+            result.map(|tweet| (tweet.url, tweet.text)),
+            Some((
+                "https://x.com/i/status/12345".to_owned(),
+                "A synthetic post".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn skips_empty_html_attribute_names_and_keeps_valid_metadata() {
+        assert_eq!(
+            parse_attributes(
+                r#"/ ="ignored" / checked PROPERTY="og:url" content="https://example.test/""#
+            ),
+            [
+                ("checked".to_owned(), String::new()),
+                ("property".to_owned(), "og:url".to_owned()),
+                ("content".to_owned(), "https://example.test/".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn reqwest_transport_preserves_http_metadata_and_bounds_the_body() -> TestResult {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
@@ -2244,9 +2298,9 @@ pub(crate) mod reqwest_error_fixtures {
 
     /// A request to a local port with no listener.
     pub(crate) fn connection() -> Option<reqwest::Error> {
-        let address = TcpListener::bind("127.0.0.1:0")
-            .and_then(|listener| listener.local_addr())
-            .ok()?;
+        let listener = TcpListener::bind("127.0.0.1:0").ok()?;
+        let address = listener.local_addr().ok()?;
+        drop(listener);
         client(Duration::from_secs(5))?
             .get(format!("http://{address}/closed"))
             .send()

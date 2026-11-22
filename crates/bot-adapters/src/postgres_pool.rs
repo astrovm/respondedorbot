@@ -372,9 +372,10 @@ mod tests {
     #[test]
     fn idle_connections_are_capped() -> Result<(), Box<dyn std::error::Error>> {
         test_pool("cap").map_or(Ok(()), |pool| {
-            let clients = (0..=MAX_IDLE_CONNECTIONS)
-                .map(|_| pool.get())
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut clients = Vec::with_capacity(MAX_IDLE_CONNECTIONS + 1);
+            for _ in 0..=MAX_IDLE_CONNECTIONS {
+                clients.push(pool.get()?);
+            }
             drop(clients);
             let idle = pool.inner.idle.lock().map_or(0, |idle| idle.len());
             assert_eq!(idle, MAX_IDLE_CONNECTIONS);

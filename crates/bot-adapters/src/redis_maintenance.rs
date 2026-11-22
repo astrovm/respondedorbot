@@ -51,7 +51,7 @@ pub fn run_redis_maintenance(
         ("giphy_pool_stale:*", GIPHY_STALE_TTL),
         ("chat_history:*", CHAT_STATE_TTL),
     ] {
-        for key in scan_keys(&mut connection, Some(pattern))? {
+        for key in scan_keys(&mut connection, pattern)? {
             let current_ttl: i64 = redis::cmd("TTL").arg(&key).query(&mut connection)?;
             if current_ttl == -1 {
                 let changed: bool = redis::cmd("EXPIRE")
@@ -74,17 +74,18 @@ pub fn run_redis_maintenance(
 
 fn scan_keys(
     connection: &mut redis::Connection,
-    pattern: Option<&str>,
+    pattern: &str,
 ) -> Result<Vec<String>, redis::RedisError> {
     let mut cursor = 0_u64;
     let mut keys = Vec::new();
     loop {
         let mut command = redis::cmd("SCAN");
-        command.arg(cursor);
-        if let Some(pattern) = pattern {
-            command.arg("MATCH").arg(pattern);
-        }
-        command.arg("COUNT").arg(100);
+        command
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(pattern)
+            .arg("COUNT")
+            .arg(100);
         let (next_cursor, page): (u64, Vec<String>) = command.query(connection)?;
         keys.extend(page);
         cursor = next_cursor;

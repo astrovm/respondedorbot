@@ -517,9 +517,8 @@ mod tests {
         assert_eq!(
             transport
                 .api_url("synthetic-token", "getMe")
-                .map_err(|error| format!("{error:?}"))?
-                .as_str(),
-            "https://api.telegram.org/botsynthetic-token/getMe"
+                .map(|url| url.to_string()),
+            Ok("https://api.telegram.org/botsynthetic-token/getMe".to_owned())
         );
         Ok(())
     }
@@ -953,6 +952,66 @@ mod tests {
                 message_id: Some(45)
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn raw_transport_rejects_invalid_base_paths_mime_types_and_truncated_bodies() -> TestResult {
+        let unusual_base = ReqwestTelegramTransport::with_api_base("mailto:bot@example.test")
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            unusual_base.api_url("synthetic", "getMe"),
+            Err(TransportFailureKind::Request)
+        );
+
+        let transport = ReqwestTelegramTransport::new().map_err(|error| format!("{error:?}"))?;
+        let upload = TelegramMultipartRequest {
+            token: "synthetic".to_owned(),
+            endpoint: "sendPhoto".to_owned(),
+            fields: Vec::new(),
+            file_field: "photo".to_owned(),
+            file_name: "fake.png".to_owned(),
+            file_bytes: Arc::from([]),
+            content_type: "invalid type".to_owned(),
+            timeout: Duration::from_secs(1),
+        };
+        assert_eq!(
+            transport.send_action_multipart(&upload),
+            Err(TransportFailureKind::Request)
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_complete_http_request(&mut stream);
+            let text = String::from_utf8_lossy(&request);
+            assert!(
+                text.starts_with("GET /botsynthetic/getMe HTTP/1.1"),
+                "{text}"
+            );
+            assert!(
+                !text.to_ascii_lowercase().contains("content-type:"),
+                "{text}"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{")?;
+            Ok(())
+        });
+        let transport = ReqwestTelegramTransport::with_api_base(&format!("http://{address}"))
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            transport.send(&TelegramRequest {
+                token: "synthetic".to_owned(),
+                endpoint: "getMe".to_owned(),
+                method: Method::GET,
+                params: None,
+                json_payload: None,
+                timeout: Duration::from_secs(5),
+            }),
+            Err(TransportFailureKind::Request)
+        );
+        assert!(matches!(server.join(), Ok(Ok(()))));
         Ok(())
     }
 

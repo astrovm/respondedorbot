@@ -134,9 +134,10 @@ mod tests {
     }
 
     fn cleanup(database_url: &str, chat_id: i64) {
-        if let Ok(mut client) = fault_injection::connect(database_url) {
-            let _result = client.execute("DELETE FROM chat_bans WHERE chat_id = $1", &[&chat_id]);
-        }
+        let result = fault_injection::connect(database_url).and_then(|mut client| {
+            Ok(client.execute("DELETE FROM chat_bans WHERE chat_id = $1", &[&chat_id])?)
+        });
+        assert!(result.is_ok(), "could not reset chat {chat_id}: {result:?}");
     }
 
     #[test]

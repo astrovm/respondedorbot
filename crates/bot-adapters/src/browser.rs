@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
@@ -252,7 +252,8 @@ impl PageRenderer for ChromiumRenderer {
         let _running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
         let profile = Profile::create().map_err(|error| RenderError::Start(error.to_string()))?;
         // `timeout` signals Chromium's whole process group, helpers included.
-        let mut child = Command::new("timeout")
+        let mut command = Command::new("timeout");
+        command
             .arg("--kill-after=2")
             .arg(format!("{}s", self.time_limit.as_secs().max(1)))
             .args(&self.command)
@@ -264,26 +265,32 @@ impl PageRenderer for ChromiumRenderer {
                 "--disk-cache-dir={}",
                 profile.0.join("cache").display()
             ))
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| RenderError::Start(error.to_string()))?;
-        let mut html = Vec::new();
-        if let Some(mut stdout) = child.stdout.take() {
-            let limit = u64::try_from(FETCH_MAX_BYTES).unwrap_or(u64::MAX);
-            let _ = (&mut stdout).take(limit).read_to_end(&mut html);
-            let _ = io::copy(&mut stdout, &mut io::sink());
-        }
-        let status = child
-            .wait()
-            .map_err(|error| RenderError::Failed(error.to_string()))?;
-        if !status.success() {
-            return Err(RenderError::Failed(status.to_string()));
-        }
-        Ok(String::from_utf8_lossy(&html).into_owned())
+            .arg(url);
+        read_rendered_page(&mut command, Child::wait)
     }
+}
+
+fn read_rendered_page(
+    command: &mut Command,
+    wait: impl FnOnce(&mut Child) -> io::Result<ExitStatus>,
+) -> Result<String, RenderError> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| RenderError::Start(error.to_string()))?;
+    let mut html = Vec::new();
+    child.stdout.take().into_iter().for_each(|mut stdout| {
+        let limit = u64::try_from(FETCH_MAX_BYTES).unwrap_or(u64::MAX);
+        let _ = (&mut stdout).take(limit).read_to_end(&mut html);
+        let _ = io::copy(&mut stdout, &mut io::sink());
+    });
+    let status = wait(&mut child).map_err(|error| RenderError::Failed(error.to_string()))?;
+    if !status.success() {
+        return Err(RenderError::Failed(status.to_string()));
+    }
+    Ok(String::from_utf8_lossy(&html).into_owned())
 }
 
 /// A fresh Chromium profile directory, deleted when the render ends.
@@ -537,6 +544,24 @@ mod tests {
         assert!(html.ends_with("<p>https://site.example/app</p>"), "{html}");
         assert!(profile.is_some_and(|profile| !profile.exists()));
         Ok(())
+    }
+
+    #[test]
+    fn reports_process_start_and_wait_failures() {
+        let mut missing = Command::new("/nonexistent/respondedorbot-renderer");
+        assert!(matches!(
+            read_rendered_page(&mut missing, Child::wait),
+            Err(RenderError::Start(_))
+        ));
+
+        let mut command = Command::new("true");
+        assert_eq!(
+            read_rendered_page(&mut command, |child| {
+                child.wait()?;
+                Err(io::Error::other("synthetic wait failure"))
+            }),
+            Err(RenderError::Failed("synthetic wait failure".to_owned()))
+        );
     }
 
     #[test]
