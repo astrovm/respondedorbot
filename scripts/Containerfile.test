@@ -1,4 +1,4 @@
-FROM docker.io/library/rust:1.99.1-slim-trixie
+FROM docker.io/library/rust:1.100.0-slim-trixie
 ARG CHECK_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CHECK_BUILD_JOBS} CARGO_INCREMENTAL=0
 RUN apt-get update && apt-get install -y --no-install-recommends libssl-dev pkg-config ffmpeg redis-server postgresql postgresql-contrib mold && rm -rf /var/lib/apt/lists/*
