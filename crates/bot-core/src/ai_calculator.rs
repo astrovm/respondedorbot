@@ -503,10 +503,13 @@ mod tests {
             calculate_expression(&"1+".repeat(201), Locale::En),
             "expression is too long"
         );
-        assert_eq!(
-            calculate_expression("2 ** 100001", Locale::En),
-            "expression is too long"
-        );
+        for expression in ["2 ** 100001", "2 ** 4294967296"] {
+            assert_eq!(
+                calculate_expression(expression, Locale::En),
+                "expression is too long",
+                "{expression}"
+            );
+        }
     }
 
     #[test]

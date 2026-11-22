@@ -2341,6 +2341,35 @@ mod tests {
     }
 
     #[test]
+    fn known_crypto_aliases_use_the_canonical_coin_id_and_chart_symbol() {
+        for (symbol, alias, id) in [
+            ("BTC", "Bitcoin", "1"),
+            ("LTC", "Litecoin", "2"),
+            ("XRP", "xrp", "52"),
+            ("DOGE", "Dogecoin", "74"),
+            ("XMR", "Monero", "328"),
+            ("ETH", "Ethereum", "1027"),
+            ("BNB", "bnb", "1839"),
+            ("SOL", "Solana", "5426"),
+            ("ADA", "Cardano", "2010"),
+            ("TRX", "Tron", "1958"),
+            ("BCH", "bch", "1831"),
+            ("LINK", "Chainlink", "1975"),
+            ("MATIC", "Polygon", "3890"),
+            ("DOT", "Polkadot", "6636"),
+            ("UNI", "Uniswap", "7083"),
+            ("AVAX", "Avalanche", "5805"),
+            ("SHIB", "ShibaInu", "5994"),
+        ] {
+            assert_eq!(canonical_id_for_token(alias), Some(id), "{alias}");
+            assert_eq!(canonical_id_for_token(symbol), Some(id), "{symbol}");
+            let mut asset = coin(symbol, 1.0);
+            asset.id = id.to_owned();
+            assert_eq!(verified_yahoo_symbol(&asset), Some(format!("{symbol}-USD")));
+        }
+    }
+
+    #[test]
     fn unknown_crypto_symbols_do_not_become_guessed_yahoo_targets() {
         let mut asset = coin("TRUMP", 2.2);
         asset.id = "99999".to_owned();
@@ -2430,6 +2459,14 @@ mod tests {
             &mut Stocks::default(),
         );
         assert_eq!(result.text, "BTC: 50000 USD (N/A 2h)");
+        let monthly = execute_market_price_command(
+            "btc 30d",
+            MarketPriceCommand::CryptoOnly,
+            Locale::En,
+            &mut Scripted::ok(vec![vec![coin("BTC", 50_000.0)]], Vec::new()),
+            &mut Stocks::default(),
+        );
+        assert_eq!(monthly.text, "BTC: 50000 USD (+30% 30d)");
         assert_eq!(
             result
                 .chart
@@ -2740,7 +2777,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_lookups_put_the_most_likely_asset_first() -> Result<(), String> {
+    fn mixed_lookups_put_the_most_likely_asset_first() {
         let ids = |query: &str, coins: Vec<CryptoAsset>, quotes: Vec<StockQuote>| {
             let rows = quotes
                 .into_iter()
@@ -2754,17 +2791,13 @@ mod tests {
                 &mut stocks(rows),
             )
             .selection
-            .map(|selection| {
-                selection
-                    .candidates
-                    .into_iter()
-                    .map(|candidate| candidate.id)
-                    .collect::<Vec<_>>()
-            })
-            .ok_or_else(|| format!("{query} should offer a choice"))
+            .into_iter()
+            .flat_map(|selection| selection.candidates)
+            .map(|candidate| candidate.id)
+            .collect::<Vec<_>>()
         };
         let with_market_cap = |mut asset: CryptoAsset, market_cap: f64| {
-            if let Some(quote) = asset.quotes.get_mut("USD") {
+            for quote in asset.quotes.values_mut() {
                 quote.market_cap = Some(market_cap);
             }
             asset
@@ -2781,7 +2814,7 @@ mod tests {
                     listed_stock("ANTX", "Antex", "NASDAQ", "USD"),
                     listed_stock("ANT", "Anthropic, PBC", "NASDAQ", "USD"),
                 ],
-            )?,
+            ),
             [
                 "stock:ANT",
                 "ANT",
@@ -2796,7 +2829,7 @@ mod tests {
                 "ondo",
                 vec![with_market_cap(coin("ONDO", 1.5), 4e9)],
                 vec![listed_stock("ONDO", "Ondo Holdings", "NASDAQ", "USD")],
-            )?,
+            ),
             ["ONDO", "stock:ONDO"]
         );
         // A company name beats a small token's exact ticker.
@@ -2808,7 +2841,7 @@ mod tests {
                     listed_stock("AAPL.MX", "Apple Inc.", "Mexico", "MXN"),
                     listed_stock("AAPL", "Apple Inc.", "NASDAQ", "USD"),
                 ],
-            )?,
+            ),
             ["stock:AAPL", "APPLE", "stock:AAPL.MX"]
         );
         // A coin named by its full name is a name match too.
@@ -2819,7 +2852,7 @@ mod tests {
                 "zephyr",
                 vec![zephyr],
                 vec![listed_stock("ZPHR", "Zephyr Mining", "NASDAQ", "USD")],
-            )?,
+            ),
             ["ZEPH", "stock:ZPHR"]
         );
         // A slug is a name too.
@@ -2831,7 +2864,7 @@ mod tests {
                 "zephyr",
                 vec![by_slug],
                 vec![listed_stock("ZPHR", "Zephyr Mining", "NASDAQ", "USD")],
-            )?,
+            ),
             ["ZPR", "stock:ZPHR"]
         );
         // A coin that matches one word of a company name comes after the
@@ -2844,10 +2877,9 @@ mod tests {
                     listed_stock("SKYH", "Sky Harbour Inc.", "NYSE", "USD"),
                     listed_stock("SKYH.MX", "Sky Harbour Inc.", "Mexico", "MXN"),
                 ],
-            )?,
+            ),
             ["stock:SKYH", "stock:SKYH.MX", "SKY"]
         );
-        Ok(())
     }
 
     #[test]
@@ -4222,7 +4254,7 @@ mod tests {
         let mut existing = coin("ABC", 0.0);
         existing.contracts = vec![contract("mint")];
         let mut incoming = coin("ABC", 0.0);
-        if let Some(quote) = incoming.quotes.get_mut("USD") {
+        for quote in incoming.quotes.values_mut() {
             quote.percent_change_1h = None;
             quote.percent_change_7d = None;
             quote.percent_change_30d = None;

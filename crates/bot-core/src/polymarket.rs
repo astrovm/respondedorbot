@@ -764,6 +764,29 @@ mod tests {
         assert!(classify_election_command("/eleccion"));
         assert!(classify_election_command("/elections"));
         assert!(!classify_election_command("/electionary"));
+        for (name, flag) in [
+            ("Bosnia-Herzegovina", "🇧🇦"),
+            ("Cabo Verde", "🇨🇻"),
+            ("Cape Verde", "🇨🇻"),
+            ("Congo DR", "🇨🇩"),
+            ("DR Congo", "🇨🇩"),
+            ("Cote d'Ivoire", "🇨🇮"),
+            ("Ivory Coast", "🇨🇮"),
+            ("IR Iran", "🇮🇷"),
+            ("Korea Republic", "🇰🇷"),
+            ("Turkey", "🇹🇷"),
+            ("Turkiye", "🇹🇷"),
+            (
+                "Scotland",
+                "🏴\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}",
+            ),
+            (
+                "Wales",
+                "🏴\u{e0067}\u{e0062}\u{e0077}\u{e006c}\u{e0073}\u{e007f}",
+            ),
+        ] {
+            assert_eq!(country_flag_from_name(name), flag, "{name}");
+        }
         assert_eq!(country_flag_from_name("armenia"), "🇦🇲");
         assert_eq!(country_flag_from_name("uk"), "🇬🇧");
         assert_eq!(country_flag_from_name("england"), "🏴󠁧󠁢󠁥󠁮󠁧󠁿");

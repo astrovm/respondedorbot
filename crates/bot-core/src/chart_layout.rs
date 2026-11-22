@@ -143,7 +143,7 @@ pub fn time_ticks(times: &[f64], utc_offset_hours: i64, max_labels: usize) -> Ve
                 })
             })
             .find(|ticks| ticks.len() < max_labels)
-            .unwrap_or_else(|| day_starts.clone());
+            .unwrap_or_else(|| day_starts.iter().copied().take(max_labels - 1).collect());
         (labeled, |time, day_start| {
             if day_start {
                 format!("{:02}/{:02}", time.day(), time.month())
@@ -317,6 +317,20 @@ mod tests {
             ticks
                 .iter()
                 .any(|tick| tick.label.as_deref() == Some("20:00"))
+        );
+    }
+
+    #[test]
+    fn short_charts_keep_day_lines_when_the_label_budget_is_one() {
+        let ticks = time_ticks(&series(FRIDAY, 3_600.0, 49), 0, 1);
+        assert_eq!(labels(&ticks), ["06/11"]);
+        assert_eq!(
+            ticks
+                .iter()
+                .filter(|tick| tick.day_start)
+                .map(|tick| tick.index)
+                .collect::<Vec<_>>(),
+            [24, 48]
         );
     }
 

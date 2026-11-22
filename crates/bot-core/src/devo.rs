@@ -415,12 +415,17 @@ mod tests {
             card in 1.0_f64..5_000.0,
         ) {
             let quotes = DevoQuotes { official, usdt_ask: usdt, usdt_bid: usdt, card };
-            let profit = |fee: u32| -> Result<f64, TestCaseError> {
-                let result = calculate_devo(f64::from(fee) / 100.0, 0.0, quotes)
-                    .map_err(|_| TestCaseError::fail("valid quotes"))?;
-                result.profit.parse::<f64>().map_err(|_| TestCaseError::fail("numeric profit"))
+            let profit = |fee: u32| {
+                calculate_devo(f64::from(fee) / 100.0, 0.0, quotes)
+                    .ok()
+                    .and_then(|result| result.profit.parse::<f64>().ok())
             };
-            prop_assert!(profit(low.saturating_add(extra).min(100))? <= profit(low)?);
+            let low_profit = profit(low);
+            let high_profit = profit(low.saturating_add(extra).min(100));
+            prop_assert!(
+                low_profit.zip(high_profit).is_some_and(|(low, high)| high <= low),
+                "expected numeric profits in descending order, got {low_profit:?} and {high_profit:?}"
+            );
         }
     }
 

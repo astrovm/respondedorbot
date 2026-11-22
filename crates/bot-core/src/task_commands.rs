@@ -419,6 +419,12 @@ mod tests {
         })
     }
 
+    fn one_shot_tasks(prefix: &str, count: usize) -> Result<Vec<ScheduledTask>, TaskStateError> {
+        (0..count)
+            .map(|i| task(&format!("{prefix}{i:04}"), TaskSchedule::Once, NEXT))
+            .collect()
+    }
+
     #[test]
     fn renders_one_shot_and_recurring_summaries_without_mentions() -> Result<(), TaskStateError> {
         let one_shot = task("once0001", TaskSchedule::Once, NEXT)?;
@@ -497,9 +503,7 @@ mod tests {
     #[test]
     fn task_pages_keep_ids_in_callbacks_and_require_explicit_cancel() -> Result<(), TaskStateError>
     {
-        let tasks = (0..7)
-            .map(|i| task(&format!("task{i:04}"), TaskSchedule::Once, NEXT))
-            .collect::<Result<Vec<_>, _>>()?;
+        let tasks = one_shot_tasks("task", 7)?;
         let page = super::render_task_page(&tasks, Locale::En, 1);
         let rows = page.keyboard.map_or(Vec::new(), |k| k.inline_keyboard);
         assert_eq!(
@@ -723,9 +727,7 @@ mod tests {
 
     #[test]
     fn last_page_links_back_only() -> Result<(), TaskStateError> {
-        let tasks = (0..7)
-            .map(|i| task(&format!("last{i:04}"), TaskSchedule::Once, NEXT))
-            .collect::<Result<Vec<_>, _>>()?;
+        let tasks = one_shot_tasks("last", 7)?;
         let rows = super::render_task_page(&tasks, Locale::En, 1)
             .keyboard
             .map_or(Vec::new(), |keyboard| keyboard.inline_keyboard);
@@ -742,9 +744,7 @@ mod tests {
 
     #[test]
     fn first_page_links_forward_and_details_describe_recurrence() -> Result<(), TaskStateError> {
-        let tasks = (0..6)
-            .map(|i| task(&format!("page{i:04}"), TaskSchedule::Once, NEXT))
-            .collect::<Result<Vec<_>, _>>()?;
+        let tasks = one_shot_tasks("page", 6)?;
         let rows = render_task_list(&tasks, Locale::Es)
             .keyboard
             .map_or(Vec::new(), |keyboard| keyboard.inline_keyboard);
