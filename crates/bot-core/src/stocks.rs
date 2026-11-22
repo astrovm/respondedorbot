@@ -977,6 +977,12 @@ mod tests {
     #[test]
     fn quote_parser_rejects_missing_results_and_zero_previous_close() {
         assert_eq!(parse_yahoo_quote(&json!({}), "EXM"), None);
+        for result in [json!({}), json!([])] {
+            assert_eq!(
+                parse_yahoo_quote(&json!({"data": {"chart": {"result": result}}}), "EXM"),
+                None
+            );
+        }
         assert_eq!(
             parse_yahoo_quote(
                 &json!({"data":{"chart":{"result":[{"meta":{"regularMarketPrice":10,"chartPreviousClose":0}}]}}}),
@@ -997,6 +1003,27 @@ mod tests {
                 "EXM",
             ),
             None
+        );
+    }
+
+    #[test]
+    fn yahoo_candidates_identify_funds_indices_and_futures() {
+        let response = json!({"data": {"quotes": [
+            {"symbol": "VTSAX", "quoteType": "MUTUALFUND"},
+            {"symbol": "^GSPC", "quoteType": "INDEX"},
+            {"symbol": "BZ=F", "quoteType": "FUTURE"}
+        ]}});
+        let candidates = select_yahoo_candidates(&response);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (candidate.symbol.as_str(), candidate.asset_type.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("VTSAX", "Mutual fund"),
+                ("^GSPC", "Index"),
+                ("BZ=F", "Future")
+            ]
         );
     }
 
@@ -1357,16 +1384,14 @@ mod tests {
         extra_meta: serde_json::Value,
         closes: [f64; 5],
     ) -> serde_json::Value {
-        let mut meta = json!({
-            "symbol": "EXM",
-            "regularMarketPrice": 20.0,
-            "regularMarketTime": FRIDAY_CLOSE,
-            "chartPreviousClose": 15.0,
-            "gmtoffset": OFFSET
-        });
-        if let (Some(meta), Some(extra)) = (meta.as_object_mut(), extra_meta.as_object()) {
-            meta.extend(extra.clone());
-        }
+        let mut meta = serde_json::Map::from_iter([
+            ("symbol".to_owned(), json!("EXM")),
+            ("regularMarketPrice".to_owned(), json!(20.0)),
+            ("regularMarketTime".to_owned(), json!(FRIDAY_CLOSE)),
+            ("chartPreviousClose".to_owned(), json!(15.0)),
+            ("gmtoffset".to_owned(), json!(OFFSET)),
+        ]);
+        meta.extend(extra_meta.as_object().cloned().unwrap_or_default());
         let opens = [0, 1, 2, 3, 4].map(|day| day * DAY + 13 * 3_600 + 1_800);
         chart(json!({
             "meta": meta,
@@ -1413,14 +1438,12 @@ mod tests {
         timestamps: &[i64],
         closes: serde_json::Value,
     ) -> serde_json::Value {
-        let mut meta = json!({
-            "symbol": "EXM",
-            "regularMarketPrice": 20.0,
-            "regularMarketTime": FRIDAY_CLOSE,
-        });
-        if let (Some(meta), Some(extra)) = (meta.as_object_mut(), extra_meta.as_object()) {
-            meta.extend(extra.clone());
-        }
+        let mut meta = serde_json::Map::from_iter([
+            ("symbol".to_owned(), json!("EXM")),
+            ("regularMarketPrice".to_owned(), json!(20.0)),
+            ("regularMarketTime".to_owned(), json!(FRIDAY_CLOSE)),
+        ]);
+        meta.extend(extra_meta.as_object().cloned().unwrap_or_default());
         json!({"chart": {"result": [{
             "meta": meta,
             "timestamp": timestamps,
@@ -1616,9 +1639,12 @@ mod tests {
         let empty = intraday_chart(json!({}), &[], json!([]));
         assert_eq!(yahoo_24h_change(&empty), None);
         let mut untimed = intraday_chart(json!({}), &[FRIDAY_CLOSE - DAY], json!([16.0]));
-        if let Some(result) = untimed["chart"]["result"][0].as_object_mut() {
-            result.remove("timestamp");
-        }
+        assert!(
+            untimed["chart"]["result"][0]
+                .as_object_mut()
+                .and_then(|result| result.remove("timestamp"))
+                .is_some()
+        );
         assert_eq!(yahoo_24h_change(&untimed), None);
         assert_eq!(yahoo_24h_change(&json!({})), None);
         assert_eq!(yahoo_24h_change(&chart(json!({"meta": []}))), None);

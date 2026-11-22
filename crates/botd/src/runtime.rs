@@ -1136,10 +1136,10 @@ mod tests {
 
     impl Script {
         fn released(&self) {
-            if let Some((released, wake)) = &self.release {
+            self.release.iter().for_each(|(released, wake)| {
                 *released.lock().unwrap_or_else(PoisonError::into_inner) = true;
                 wake.notify_all();
-            }
+            });
         }
     }
 
@@ -1708,6 +1708,76 @@ mod tests {
             Err(ParallelHandlerBuildError::WorkerStartup { error, .. })
                 if error == "worker factory panicked"
         ));
+    }
+
+    #[test]
+    fn disconnected_parallel_queue_and_unknown_completions_keep_updates_pending() -> TestResult {
+        let (updates, receiver) = mpsc::sync_channel(1);
+        let (sender, completions) = mpsc::channel();
+        let mut handler = ParallelUpdateHandler::<Worker> {
+            updates: Some(updates),
+            workers: Vec::new(),
+            completions,
+            pending: vec![1, 2],
+            handler: std::marker::PhantomData,
+        };
+        drop(receiver);
+        assert_eq!(
+            handler.handle(update(3)),
+            Err(ParallelHandlerError::QueueUnavailable)
+        );
+        sender.send(super::UpdateCompletion {
+            update_id: 99,
+            error: None,
+        })?;
+        sender.send(super::UpdateCompletion {
+            update_id: 1,
+            error: None,
+        })?;
+        assert_eq!(
+            handler.finish_batch(),
+            [UpdateFailure {
+                update_id: 2,
+                error: "parallel update worker stopped before completing its batch".to_owned(),
+            }]
+        );
+        assert!(handler.pending.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn disconnected_durable_queue_keeps_saved_updates_for_future_recovery() -> TestResult {
+        let queue = MemoryDurableQueue::default();
+        let mut handler = durable(1, 1, &queue, &Arc::new(Script::default()))?;
+        handler.stop();
+        let (updates, receiver) = mpsc::sync_channel(1);
+        *handler
+            .updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(updates);
+        drop(receiver);
+
+        assert_eq!(
+            handler.handle(update(31)),
+            Err(DurableParallelHandlerError::QueueUnavailable)
+        );
+        assert!(queue.record(31).is_some_and(|record| !record.completed));
+        assert!(handler.active.is_empty());
+        handler.recovered = false;
+        assert_eq!(
+            handler.prepare(),
+            Err(DurableParallelHandlerError::QueueUnavailable)
+        );
+        assert!(queue.record(31).is_some_and(|record| !record.completed));
+        assert!(handler.active.is_empty());
+
+        handler.set_fatal("first failure".to_owned());
+        handler.set_fatal("later failure".to_owned());
+        assert_eq!(
+            handler.take_background_failures().fatal.as_deref(),
+            Some("first failure")
+        );
+        Ok(())
     }
 
     #[test]

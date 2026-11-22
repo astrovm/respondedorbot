@@ -375,6 +375,28 @@ mod tests {
     }
 
     #[test]
+    fn admin_lookups_use_the_group_limit_on_stored_member_overrides() -> crate::test_env::TestResult
+    {
+        use super::{ChatTaskPayerPolicy, TaskPayerPolicy};
+        crate::test_env::database_url().map_or(Ok(()), |url| {
+            bot_adapters::billing_schema::BillingSchemaRepository::new(&url).ensure_schema()?;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+            let chat = -i64::try_from(now.as_nanos() % 1_000_000_000_000)? - 8_000_000_000_000;
+            let limits = bot_adapters::chat_limits::ChatLimitRepository::new(&url);
+            limits.set(chat, 200, "Synthetic Administrator", 1, 200)?;
+            let mut policy = ChatTaskPayerPolicy::new(&url).with_admin_check(Box::new(Admins {
+                is_admin: true,
+                asked: Vec::new(),
+            }));
+            let group_limit = ChatConfig::default().creditless_user_hourly_limit;
+            let result = policy.payer(&chat.to_string(), 200);
+            limits.clear(chat, 200)?;
+            assert_eq!(result?.hourly_limit, group_limit);
+            Ok(())
+        })
+    }
+
+    #[test]
     fn only_negative_chat_ids_are_groups() {
         assert_eq!(group_chat_id("-1001"), Some(-1001));
         assert_eq!(group_chat_id("42"), None);

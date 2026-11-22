@@ -493,6 +493,7 @@ mod tests {
             json!({"poll_id": "p1", "user": {"first_name": "Ana"}, "option_ids": []}),
             json!({"poll_id": "p1", "voter_chat": {"title": "x"}, "option_ids": []}),
             json!({"poll_id": "p1", "user": {"id": 7}}),
+            json!({"poll_id": "p1", "user": {"id": 7}, "option_ids": "1"}),
         ] {
             assert_eq!(
                 parse_poll_answer(malformed.as_object().unwrap_or(&Map::new())),

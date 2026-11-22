@@ -1,5 +1,5 @@
 # Same Debian release as the runtime image: botd links against its glibc and OpenSSL.
-FROM mirror.gcr.io/library/rust:1.99.1-slim-trixie AS chef
+FROM mirror.gcr.io/library/rust:1.100.0-slim-trixie AS chef
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

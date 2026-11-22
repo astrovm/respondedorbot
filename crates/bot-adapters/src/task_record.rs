@@ -529,6 +529,41 @@ mod tests {
     }
 
     #[test]
+    fn invalid_cron_components_are_rejected_on_decode() {
+        let cases = [
+            (json!({"type": "cron", "hour": -1, "minute": 0}), false),
+            (json!({"type": "cron", "hour": 0, "minute": -1}), false),
+            (
+                json!({"type": "cron", "hour": 0, "minute": 0, "day_of_week": "mon,funday"}),
+                true,
+            ),
+        ];
+        for (trigger, invalid_weekday) in cases {
+            let record = json!({
+                "schema_version": 1,
+                "id": "abc12345",
+                "chat_id": "1",
+                "text": "reminder",
+                "trigger_config": trigger
+            });
+            let outcome = decode_task_record(&record.to_string());
+            assert!(
+                matches!(
+                    (outcome, invalid_weekday),
+                    (Err(TaskRecordError::InvalidTrigger), false)
+                        | (
+                            Err(TaskRecordError::State(
+                                bot_core::scheduled_tasks::TaskStateError::InvalidCron
+                            )),
+                            true
+                        )
+                ),
+                "{trigger}"
+            );
+        }
+    }
+
+    #[test]
     fn unknown_numeric_fields_do_not_drift_across_rewrites() -> Result<(), TaskRecordError> {
         // Found by fuzzing: an integer too large for u64 is stored as a float,
         // and inexact float parsing changed it on every rewrite.

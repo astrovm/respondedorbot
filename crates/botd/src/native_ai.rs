@@ -1047,10 +1047,24 @@ mod tests {
         )
         .with_web_search(Box::new(Search));
         let reply = provider.complete(
-            &[TaskPromptMessage {
-                role: "user",
-                content: "do it".to_owned(),
-            }],
+            &[
+                TaskPromptMessage {
+                    role: "system",
+                    content: "synthetic rule".to_owned(),
+                },
+                TaskPromptMessage {
+                    role: "assistant",
+                    content: "synthetic draft".to_owned(),
+                },
+                TaskPromptMessage {
+                    role: "tool",
+                    content: "synthetic result".to_owned(),
+                },
+                TaskPromptMessage {
+                    role: "user",
+                    content: "do it".to_owned(),
+                },
+            ],
             &task("en"),
             "task123:1000",
         );
@@ -1083,7 +1097,18 @@ mod tests {
                 .as_str()
                 .is_some_and(|content| content.contains("synthetic persona"))
         );
-        assert_eq!(body["messages"][1]["content"], "do it");
+        for (index, (role, content)) in [
+            ("system", "synthetic rule"),
+            ("assistant", "synthetic draft"),
+            ("tool", "synthetic result"),
+            ("user", "do it"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(body["messages"][index + 1]["role"], role);
+            assert_eq!(body["messages"][index + 1]["content"], content);
+        }
     }
 
     #[test]
@@ -1092,6 +1117,16 @@ mod tests {
         let Ok(pricing) = pricing else { panic!() };
         let result = reservation_pricing_for_model("synthetic/model", Some(&pricing));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn older_task_pricing_only_copies_fields_that_exist() {
+        let mut metadata = serde_json::Map::from_iter([("source".to_owned(), json!("task"))]);
+        super::copy_task_pricing_metadata(&mut metadata, &json!({ "raw_usd_micros": 15 }));
+        assert_eq!(
+            Value::Object(metadata),
+            json!({"source": "task", "raw_usd_micros": 15})
+        );
     }
 
     #[test]

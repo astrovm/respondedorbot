@@ -663,9 +663,12 @@ mod tests {
                 return Err(error);
             }
             self.jobs.insert(chat_id.to_owned(), payload.to_owned());
-            if let Ok(job) = serde_json::from_str(payload) {
-                self.replaced.push(job);
-            }
+            let job = serde_json::from_str(payload);
+            assert!(
+                job.is_ok(),
+                "queue replacement must be a valid job: {job:?}"
+            );
+            self.replaced.extend(job);
             Ok(())
         }
         fn delete_job(&mut self, chat_id: &str) -> Result<bool, Self::Error> {

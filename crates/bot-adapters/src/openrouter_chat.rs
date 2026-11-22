@@ -1408,9 +1408,7 @@ impl SseDecoder {
                 on_event(event)?;
             }
         }
-        if self.pending.iter().all(u8::is_ascii_whitespace) {
-            self.pending.clear();
-        }
+        self.pending.clear();
         if self.saw_done {
             Ok(())
         } else {
@@ -2234,19 +2232,15 @@ mod tests {
         let catalog = synthetic_catalog(OPENROUTER_MAX_RESPONSE_BYTES as usize);
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
-        let server = thread::spawn(move || -> Result<String, String> {
-            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+        let server = thread::spawn(move || -> std::io::Result<String> {
+            let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 8_192];
-            let read = stream
-                .read(&mut request)
-                .map_err(|error| error.to_string())?;
+            let read = stream.read(&mut request)?;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{catalog}",
                 catalog.len()
             );
-            stream
-                .write_all(response.as_bytes())
-                .map_err(|error| error.to_string())?;
+            stream.write_all(response.as_bytes())?;
             Ok(String::from_utf8_lossy(&request[..read]).to_ascii_lowercase())
         });
         let cache = OpenRouterPricingCache::new("synthetic-key", &format!("http://{address}"))?;
@@ -3158,7 +3152,8 @@ mod tests {
             parse_catalog_model(&text_only)
                 .is_some_and(|(_, _, transcription)| transcription.is_none())
         );
-        for invalid in ["1.2.3", "abc", ".", "1a.5"] {
+        let overflow = format!("{}.0", i128::MAX);
+        for invalid in ["1.2.3", "abc", ".", "1a.5", &overflow] {
             assert_eq!(
                 super::decimal_rate_to_usd_micros_per_million(invalid),
                 None,

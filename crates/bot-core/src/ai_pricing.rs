@@ -452,8 +452,11 @@ pub fn calculate_billing_for_segments(segments: &Value) -> Result<Value, AiPrici
         let (search_cost, tool_cost) = firecrawl_cost(metadata, &kind)?;
 
         if kind == "youtube_transcript" {
-            let usd_micros = i64::try_from(YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS)
-                .map_err(|_| AiPricingError::Overflow)?;
+            let usd_micros = const {
+                let amount = YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS;
+                assert!(amount >= i64::MIN as i128 && amount <= i64::MAX as i128);
+                amount as i64
+            };
             total = total.add(ExactDecimal::from_integer(usd_micros))?;
             tool_breakdown.push(json!({
                 "tool": "youtube_transcript",
@@ -651,23 +654,37 @@ mod tests {
             ExactDecimal::parse(&json!("1e-7"))
                 .ok_or(AiPricingError::InvalidValue)?
                 .multiply_integer(1_000_000)?
-                .fixed_string()?,
-            "0.1000000"
+                .fixed_string(),
+            Ok("0.1000000".to_owned())
         );
         assert_eq!(
             ExactDecimal::parse(&json!("1e2"))
                 .ok_or(AiPricingError::InvalidValue)?
-                .fixed_string()?,
-            "100"
+                .fixed_string(),
+            Ok("100".to_owned())
         );
         assert_eq!(
             ExactDecimal::parse(&json!("-1.2"))
                 .ok_or(AiPricingError::InvalidValue)?
-                .floor_i64()?,
-            -2
+                .floor_i64(),
+            Ok(-2)
         );
         assert_eq!(ExactDecimal::parse(&json!("invalid")), None);
         Ok(())
+    }
+
+    #[test]
+    fn rejects_provider_costs_that_overflow_when_converted_to_micros() {
+        let segments = json!([{
+            "kind": "chat",
+            "model": "unknown/model",
+            "usage": {"cost": i128::MAX.to_string()},
+            "metadata": {"provider": "openrouter"}
+        }]);
+        assert_eq!(
+            calculate_billing_for_segments(&segments),
+            Err(AiPricingError::Overflow)
+        );
     }
 
     #[test]

@@ -648,10 +648,18 @@ mod tests {
         assert!(!topic.replied_sender_is_bot);
         // Messages queued by an older version have neither field.
         let mut legacy = serde_json::to_value(&person)?;
-        if let Some(object) = legacy.as_object_mut() {
-            object.remove("replied_sender_id");
-            object.remove("replied_sender_is_bot");
-        }
+        assert!(
+            legacy
+                .as_object_mut()
+                .and_then(|object| object.remove("replied_sender_id"))
+                .is_some()
+        );
+        assert!(
+            legacy
+                .as_object_mut()
+                .and_then(|object| object.remove("replied_sender_is_bot"))
+                .is_some()
+        );
         let legacy: IncomingMessage = serde_json::from_value(legacy)?;
         assert_eq!(legacy.replied_sender_id, None);
         assert!(!legacy.replied_sender_is_bot);
@@ -682,10 +690,18 @@ mod tests {
         assert!(person.text_mentions.is_empty());
         // Messages queued by an older version have neither field.
         let mut legacy = serde_json::to_value(&message)?;
-        if let Some(object) = legacy.as_object_mut() {
-            object.remove("sender_is_bot");
-            object.remove("text_mentions");
-        }
+        assert!(
+            legacy
+                .as_object_mut()
+                .and_then(|object| object.remove("sender_is_bot"))
+                .is_some()
+        );
+        assert!(
+            legacy
+                .as_object_mut()
+                .and_then(|object| object.remove("text_mentions"))
+                .is_some()
+        );
         let legacy: IncomingMessage = serde_json::from_value(legacy)?;
         assert!(!legacy.sender_is_bot);
         assert!(legacy.text_mentions.is_empty());
@@ -721,9 +737,12 @@ mod tests {
         assert_eq!(dice.attachment, None);
         // Messages queued by an older version have no attachment field.
         let mut legacy = serde_json::to_value(&sticker)?;
-        if let Some(object) = legacy.as_object_mut() {
-            object.remove("attachment");
-        }
+        assert!(
+            legacy
+                .as_object_mut()
+                .and_then(|object| object.remove("attachment"))
+                .is_some()
+        );
         let legacy: IncomingMessage = serde_json::from_value(legacy)?;
         assert_eq!(legacy.attachment, None);
         Ok(())

@@ -2586,6 +2586,7 @@ mod tests {
         CaptionFailure,
         Unavailable,
         RuntimeError,
+        EstimateError,
     }
 
     struct Youtube {
@@ -2601,6 +2602,9 @@ mod tests {
         ) -> Result<Option<i64>, String> {
             let has_youtube = message_text.contains("youtu")
                 || reply_context.is_some_and(|context| context.contains("youtu"));
+            if self.outcome == YoutubeOutcome::EstimateError {
+                return Err("synthetic YouTube estimate failure".to_owned());
+            }
             Ok(has_youtube.then_some(if self.cached { 0 } else { 60 }))
         }
 
@@ -2613,7 +2617,9 @@ mod tests {
                 || reply_context.is_some_and(|context| context.contains("youtu"));
             let fail = self.outcome == YoutubeOutcome::CaptionFailure;
             match self.outcome {
-                YoutubeOutcome::RuntimeError => Err("synthetic YouTube runtime failure".to_owned()),
+                YoutubeOutcome::RuntimeError | YoutubeOutcome::EstimateError => {
+                    Err("synthetic YouTube runtime failure".to_owned())
+                }
                 YoutubeOutcome::Unavailable => Ok(None),
                 YoutubeOutcome::Transcript
                 | YoutubeOutcome::CacheHit
@@ -4961,6 +4967,27 @@ mod tests {
     }
 
     #[test]
+    fn summary_preparation_preserves_a_null_usage_segment() {
+        let mut provider_round = round("synthetic summary", None);
+        provider_round.billing_segment = Some(Value::Null);
+        let mut service = conversation(vec![Ok(provider_round)], Billing::default());
+        let mut request = input();
+        request.command = "/summary".to_owned();
+        request.message_text = "25 focus on decisions".to_owned();
+        let (text, completion_id, _) = pending(command_reply(
+            service.prepare_summary_command_streaming(request, &mut |_| Ok(())),
+        ));
+        assert_eq!(text, "synthetic summary");
+        assert_eq!(
+            service
+                .pending
+                .get(&completion_id)
+                .map(|pending| pending.segments.as_slice()),
+            Some([Value::Null].as_slice())
+        );
+    }
+
+    #[test]
     fn summary_command_returns_cached_or_empty_text_without_provider_io() {
         let mut cached = conversation(Vec::new(), Billing::default());
         cached.state.memory.history.clear();
@@ -6197,6 +6224,15 @@ mod tests {
             Err("synthetic settlement failure".to_owned())
         );
         assert_eq!(unsettled.billing.released_operations, ["ai:42:7:88"]);
+    }
+
+    #[test]
+    fn youtube_estimate_errors_reach_the_preparation_without_authorizing_usage() {
+        let mut service = youtube_conversation(YoutubeOutcome::EstimateError, Billing::default());
+        let request = youtube_request("what");
+        let result = service.prepare_youtube(&request, "youtube-estimate-error");
+        assert!(matches!(result, Err(error) if error == "synthetic YouTube estimate failure"));
+        assert!(service.billing.reserves.is_empty());
     }
 
     #[test]

@@ -261,12 +261,17 @@ fn resolve_location<T: WeatherTransport, C: RequestCache>(
     };
     let mut results = search_locations(transport, cache, search_name, now_unix, diagnostics);
     if results.is_empty() && qualifiers.is_empty() && query.contains(' ') {
-        let words = query.split_whitespace().collect::<Vec<_>>();
-        if let Some((qualifier, name)) = words.split_last() {
-            let shorter_name = name.join(" ");
-            results = search_locations(transport, cache, &shorter_name, now_unix, diagnostics);
-            qualifiers.push(qualifier);
-        }
+        let mut parts = query.rsplitn(2, char::is_whitespace);
+        // The trimmed query contains a space, so it has a name and a final word.
+        let qualifier = parts.next().unwrap_or_default();
+        let shorter_name = parts
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        results = search_locations(transport, cache, &shorter_name, now_unix, diagnostics);
+        qualifiers.push(qualifier);
     }
     if results.is_empty() {
         return None;

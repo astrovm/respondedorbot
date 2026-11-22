@@ -759,6 +759,54 @@ mod tests {
     }
 
     #[test]
+    fn billing_repository_port_reports_whether_it_applied_the_settlement()
+    -> crate::test_env::TestResult {
+        crate::test_env::database_url().map_or(Ok(()), |url| {
+            bot_adapters::billing_schema::BillingSchemaRepository::new(&url).ensure_schema()?;
+            let mut repository = BillingRepository::new(&url);
+            let mut operation =
+                operation(&crate::test_env::fresh_op(), "2026-09-02T00:00:00Z", None);
+            operation.chat_id = None;
+            let mut ids = crate::test_env::unique("synthetic-user");
+            ids.retain(|character| character.is_ascii_digit());
+            operation.user_id = ids
+                .chars()
+                .rev()
+                .take(12)
+                .collect::<String>()
+                .parse::<i64>()?
+                + 8_000_000_000_000;
+            let applied = |repository: &mut BillingRepository| {
+                ReconciliationStore::settle_operation(repository, &operation, 0, &Map::new())
+            };
+            assert!(applied(&mut repository)?);
+            assert!(!applied(&mut repository)?);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_poisoned_active_registry_does_not_record_an_operation() {
+        let registry = ActiveOperationRegistry::default();
+        let poisoned = std::panic::catch_unwind(|| {
+            let _held = registry
+                .counts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("synthetic registry failure"));
+        });
+        assert!(poisoned.is_err());
+        registry.mark_active("synthetic-operation");
+        assert!(
+            registry
+                .counts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn billing_repository_port_propagates_database_failures() {
         std::env::var("TEST_DATABASE_URL")
             .into_iter()

@@ -1478,6 +1478,26 @@ mod tests {
     }
 
     #[test]
+    fn invalid_cached_itcrm_series_falls_back_to_the_provider() {
+        let now = 1_788_321_600;
+        let mut cache = Cache::default();
+        cache.values.insert(
+            super::ITCRM_FULL_HISTORY_KEY.to_owned(),
+            json!({"timestamp": now, "data": {"unexpected": 1250}}).to_string(),
+        );
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([Err(TransportFailureKind::Connection)])),
+        };
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            super::full_itcrm_series(&transport, &mut cache, now, &mut diagnostics),
+            None
+        );
+        assert!(transport.responses.borrow().is_empty());
+        assert!(diagnostics.iter().any(|entry| entry.contains("Connection")));
+    }
+
+    #[test]
     fn itcrm_provider_failures_are_diagnostic_and_cached_values_avoid_io() {
         for provider_result in [
             Ok(HttpResponse {

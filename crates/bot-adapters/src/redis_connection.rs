@@ -252,6 +252,31 @@ mod tests {
     }
 
     #[test]
+    fn a_full_pool_closes_excess_connections() -> TestResult {
+        use std::io::Read;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let client = client(&endpoint(listener.local_addr()?.port(), None))?;
+        let pool = super::RedisPool {
+            inner: Arc::new(super::RedisPoolInner {
+                client,
+                idle: super::Mutex::new(super::IdleList::new()),
+                max_idle_connections: 1,
+            }),
+        };
+        let first = pool.get_connection()?;
+        let (_kept_stream, _) = listener.accept()?;
+        let excess = pool.get_connection()?;
+        let (mut excess_stream, _) = listener.accept()?;
+        excess_stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        drop(first);
+        drop(excess);
+        assert_eq!(pool.inner.idle.lock().map_or(0, |idle| idle.len()), 1);
+        assert_eq!(excess_stream.read(&mut [0_u8; 1])?, 0);
+        Ok(())
+    }
+
+    #[test]
     fn raw_connections_authenticate_and_speak_setex_and_get() -> TestResult {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();

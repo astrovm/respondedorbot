@@ -543,6 +543,7 @@ mod tests {
     use std::thread;
 
     use bot_core::stocks::ChangeWindow;
+    use serde_json::json;
 
     use crate::request_cache::RequestCache;
 
@@ -623,15 +624,13 @@ mod tests {
 
     // A synthetic listing whose last regular trade, at 20, was at `DAY + 500`.
     fn session_chart(extra_meta: serde_json::Value, timestamps: &[i64], closes: &[f64]) -> String {
-        let mut meta = serde_json::json!({
-            "symbol": "EXM",
-            "regularMarketPrice": 20.0,
-            "regularMarketTime": DAY + 500,
-            "regularMarketChangePercent": 2.5
-        });
-        if let (Some(meta), Some(extra)) = (meta.as_object_mut(), extra_meta.as_object()) {
-            meta.extend(extra.clone());
-        }
+        let mut meta = serde_json::Map::from_iter([
+            ("symbol".to_owned(), json!("EXM")),
+            ("regularMarketPrice".to_owned(), json!(20.0)),
+            ("regularMarketTime".to_owned(), json!(DAY + 500)),
+            ("regularMarketChangePercent".to_owned(), json!(2.5)),
+        ]);
+        meta.extend(extra_meta.as_object().cloned().unwrap_or_default());
         serde_json::json!({"chart": {"result": [{
             "meta": meta,
             "timestamp": timestamps,
@@ -796,12 +795,13 @@ mod tests {
                 response(chart()),
                 response(chart()),
                 response(chart()),
+                response(chart()),
             ])),
             requests: RefCell::default(),
             searches: RefCell::default(),
         };
         let mut cache = Cache::default();
-        for period in ["1m", "7d", "5y"] {
+        for period in ["1m", "7d", "5y", "90d"] {
             assert!(
                 super::load_chart(
                     &transport,
@@ -827,12 +827,16 @@ mod tests {
             requests[2].window.as_ref().map(|w| w.2.as_str()),
             Some("1wk")
         );
+        assert_eq!(
+            requests[3].window,
+            Some((1_792_195_200, 1_800_000_000, "1d".into()))
+        );
         assert_ne!(cache.writes[0].0, cache.writes[1].0);
         assert_ne!(cache.writes[1].0, cache.writes[2].0);
         // Intraday bars refresh every minute; weekly bars keep five minutes.
         assert_eq!(
             cache.writes.iter().map(|write| write.2).collect::<Vec<_>>(),
-            vec![60, 60, 300]
+            vec![60, 60, 300, 300]
         );
     }
 
@@ -954,6 +958,32 @@ mod tests {
         assert_eq!(load.candidates.len(), 6);
         assert_eq!(load.diagnostics.len(), 1);
         assert!(load.diagnostics[0].contains("Yahoo expanded search request"));
+    }
+
+    #[test]
+    fn failed_expanded_search_keeps_the_initial_page() {
+        let transport = fake_transport([
+            response(
+                r#"{"quotes":[
+                {"quoteType":"EQUITY","symbol":"EXM"},
+                {"quoteType":"EQUITY","symbol":"EXM.L"},
+                {"quoteType":"EQUITY","symbol":"EXM.AX"},
+                {"quoteType":"EQUITY","symbol":"EXM.TO"},
+                {"quoteType":"EQUITY","symbol":"EXM.MX"}
+            ]}"#,
+            ),
+            Err(TransportFailureKind::Connection),
+            Err(TransportFailureKind::Timeout),
+        ]);
+        let load = load_symbol(&transport, &mut Cache::default(), "EXM", 100);
+        assert_eq!(load.symbol.as_deref(), Some("EXM"));
+        assert_eq!(load.candidates.len(), 5);
+        assert_eq!(transport.searches.borrow().len(), 3);
+        assert!(
+            load.diagnostics
+                .iter()
+                .any(|message| message.contains("Yahoo expanded search request"))
+        );
     }
 
     #[test]

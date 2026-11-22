@@ -631,11 +631,7 @@ pub fn execute_with<T: TelegramTransport>(
             let mut fields = vec![
                 ("chat_id".to_owned(), chat_id.0.to_string()),
                 ("message_id".to_owned(), message_id.0.to_string()),
-                (
-                    "media".to_owned(),
-                    serde_json::to_string(&Value::Object(media))
-                        .map_err(|_| ActionError::InvalidAction)?,
-                ),
+                ("media".to_owned(), Value::Object(media).to_string()),
             ];
             if let Some(reply_markup) = reply_markup {
                 fields.push((

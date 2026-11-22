@@ -1003,6 +1003,46 @@ mod tests {
     }
 
     #[test]
+    fn an_unavailable_daily_history_leaves_existing_changes_and_missing_changes_intact() {
+        let now = 1_725_000_000;
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::new()),
+            calls: RefCell::new(0),
+        };
+        let mut cache = Cache::default();
+        cache
+            .values
+            .insert("dollar_daily_history:attempt".to_owned(), "1".to_owned());
+        let mut rates = [
+            bot_core::dollar::DollarRate {
+                name: "Oficial",
+                price: 1_500.0,
+                change: None,
+            },
+            bot_core::dollar::DollarRate {
+                name: "Blue",
+                price: 1_600.0,
+                change: Some(5.0),
+            },
+        ];
+        let mut diagnostics = Vec::new();
+        super::fill_daily_changes(
+            &transport,
+            &mut cache,
+            &mut rates,
+            168,
+            now,
+            None,
+            &mut diagnostics,
+        );
+        assert_eq!(rates.map(|rate| rate.change), [None, Some(5.0)]);
+        assert_eq!(
+            diagnostics,
+            ["ArgentinaDatos dollar history was requested in the last 10 minutes"]
+        );
+    }
+
+    #[test]
     fn daily_bcra_history_recovers_the_change_after_an_empty_hourly_cache() {
         struct OfflineBcra;
         impl crate::bcra::BcraTransport for OfflineBcra {
@@ -1504,6 +1544,29 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("Connection"))
         );
+    }
+
+    #[test]
+    fn refresh_preserves_the_first_snapshot_in_an_hour() {
+        let now = 1_725_000_000;
+        let key = bot_core::cache_policy::request_cache_history_key(&hour_key(now), request_hash());
+        let first_snapshot = serde_json::json!({
+            "timestamp": now - 300,
+            "data": {"oficial": {"price": 1_300}}
+        })
+        .to_string();
+        let mut cache = Cache::default();
+        cache.values.insert(key.clone(), first_snapshot.clone());
+        let transport = Transport {
+            responses: RefCell::new(VecDeque::from([Ok(HttpResponse {
+                status_code: 200,
+                body: body(),
+            })])),
+            calls: RefCell::new(0),
+        };
+        assert!(refresh_dollar_snapshot(&transport, &mut cache, now).is_empty());
+        assert_eq!(*transport.calls.borrow(), 1);
+        assert_eq!(cache.values.get(&key), Some(&first_snapshot));
     }
 
     #[test]

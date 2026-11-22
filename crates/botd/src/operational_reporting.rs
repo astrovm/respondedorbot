@@ -146,11 +146,11 @@ mod tests {
         fn send(&self, request: &TelegramRequest) -> Result<HttpResponse, TransportFailureKind> {
             self.requests
                 .lock()
-                .map_err(|_| TransportFailureKind::Request)?
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(request.clone());
             self.response
                 .lock()
-                .map_err(|_| TransportFailureKind::Request)?
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take()
                 .unwrap_or(Err(TransportFailureKind::Request))
         }

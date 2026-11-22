@@ -1261,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn calls_that_change_something_are_kept_as_bounded_notes() {
+    fn calls_that_change_something_are_kept_as_bounded_notes() -> Result<(), ChatToolLoopError> {
         let with_id = |name: &str, arguments: &str, id: &str| StreamToolCall {
             id: id.to_owned(),
             ..call(name, arguments)
@@ -1301,8 +1301,7 @@ mod tests {
             false,
             DEFAULT_MAX_TOOL_ROUNDS,
             ignore_text,
-        )
-        .unwrap_or_else(|error| *error.partial);
+        )?;
 
         // A rejected call never reaches the tool.
         assert!(!executed_ids(&tools).contains(&"call-2"));
@@ -1325,10 +1324,12 @@ mod tests {
         assert_eq!(output, "record call-5");
         assert_eq!(notes[7], "record {} → record call-9");
         assert!(!notes.iter().any(|note| note.starts_with("calculate")));
+        Ok(())
     }
 
     #[test]
-    fn executes_known_calls_and_supplies_typed_results_to_the_next_round() {
+    fn executes_known_calls_and_supplies_typed_results_to_the_next_round()
+    -> Result<(), ChatToolLoopError> {
         let provider = Provider::new(vec![
             Ok(round(
                 "checking",
@@ -1350,8 +1351,8 @@ mod tests {
                 streamed.push_str(text);
                 Ok(())
             },
-        )
-        .unwrap_or_else(|error| *error.partial);
+        );
+        let result = result?;
 
         assert_eq!(result.text, "checkinganswer");
         assert_eq!(streamed, result.text);
@@ -1365,10 +1366,12 @@ mod tests {
         assert_eq!(observed[1][2].role, PromptRole::Tool);
         assert_eq!(observed[1][2].tool_call_id.as_deref(), Some("call-1"));
         assert_eq!(observed[1][2].content, PromptContent::Text("4".to_owned()));
+        Ok(())
     }
 
     #[test]
-    fn event_loop_resets_provisional_text_when_tool_calls_arrive() {
+    fn event_loop_resets_provisional_text_when_tool_calls_arrive() -> Result<(), ChatToolLoopError>
+    {
         let provider = Provider::new(vec![
             Ok(round(
                 "checking",
@@ -1390,8 +1393,8 @@ mod tests {
                 events.push(event);
                 Ok(())
             },
-        )
-        .unwrap_or_else(|error| *error.partial);
+        );
+        let result = result?;
 
         assert_eq!(
             events,
@@ -1412,10 +1415,11 @@ mod tests {
             ]
         );
         assert_eq!(result.text, "answer");
+        Ok(())
     }
 
     #[test]
-    fn event_loop_emits_text_before_provider_round_returns() {
+    fn event_loop_emits_text_before_provider_round_returns() -> Result<(), ChatToolLoopError> {
         struct StreamingProvider {
             order: Rc<RefCell<Vec<&'static str>>>,
         }
@@ -1450,13 +1454,13 @@ mod tests {
             false,
             1,
             |event| {
-                if matches!(event, ChatToolLoopEvent::FinalText(_)) {
-                    order.borrow_mut().push("final_text");
-                }
+                let calls =
+                    matches!(event, ChatToolLoopEvent::FinalText(_)).then_some("final_text");
+                order.borrow_mut().extend(calls);
                 Ok(())
             },
-        )
-        .unwrap_or_else(|error| *error.partial);
+        );
+        let result = result?;
 
         assert_eq!(&*order.borrow(), &["final_text", "provider_returned"]);
         assert_eq!(result.text, "streamed");
@@ -1480,6 +1484,7 @@ mod tests {
         );
         assert_eq!(error.failed_round.text, "streamed");
         assert!(order.borrow().is_empty());
+        Ok(())
     }
 
     fn call_with_id(id: &str, name: &str, arguments: &str) -> StreamToolCall {
@@ -1501,7 +1506,7 @@ mod tests {
     fn run_rounds(
         rounds: Vec<ChatRoundResult>,
         tools: &mut Tools,
-    ) -> (Provider, ChatToolLoopResult) {
+    ) -> Result<(Provider, ChatToolLoopResult), ChatToolLoopError> {
         let provider = Provider::new(rounds.into_iter().map(Ok).collect());
         let result = run_chat_tool_loop(
             "test-operation",
@@ -1511,13 +1516,12 @@ mod tests {
             false,
             5,
             ignore_text,
-        )
-        .unwrap_or_else(|error| *error.partial);
-        (provider, result)
+        )?;
+        Ok((provider, result))
     }
 
     #[test]
-    fn unavailable_calls_are_answered_so_the_model_can_recover() {
+    fn unavailable_calls_are_answered_so_the_model_can_recover() -> Result<(), ChatToolLoopError> {
         let mut tools = Tools::default();
         let (provider, result) = run_rounds(
             vec![
@@ -1529,7 +1533,7 @@ mod tests {
                 round("recovered", Vec::new(), json!({"round": 2})),
             ],
             &mut tools,
-        );
+        )?;
         assert!(tools.calls.is_empty());
         assert_eq!(result.tool_calls_executed, 0);
         assert_eq!(result.text, "recovered");
@@ -1542,10 +1546,12 @@ mod tests {
         );
         let assistant = &provider.observed.borrow()[1][0];
         assert_eq!(assistant.tool_calls[0].name, "missing");
+        Ok(())
     }
 
     #[test]
-    fn malformed_arguments_are_reported_instead_of_running_with_nothing() {
+    fn malformed_arguments_are_reported_instead_of_running_with_nothing()
+    -> Result<(), ChatToolLoopError> {
         let mut tools = Tools::default();
         let (provider, result) = run_rounds(
             vec![
@@ -1562,7 +1568,7 @@ mod tests {
                 round("done", Vec::new(), json!({"round": 2})),
             ],
             &mut tools,
-        );
+        )?;
         assert_eq!(executed_ids(&tools), ["empty", "null"]);
         assert!(tools.calls.iter().all(|call| call.1 == json!({})));
         assert_eq!(result.tool_calls_executed, 2);
@@ -1583,10 +1589,11 @@ mod tests {
                 PromptMessage::tool_result("null", "record null"),
             ]
         );
+        Ok(())
     }
 
     #[test]
-    fn repeated_reads_reuse_results_until_a_side_effect_runs() {
+    fn repeated_reads_reuse_results_until_a_side_effect_runs() -> Result<(), ChatToolLoopError> {
         let mut tools = Tools::default();
         let fetch = |id: &str| call_with_id(id, "fetch", r#"{"url":"https://example.com"}"#);
         let (provider, result) = run_rounds(
@@ -1602,7 +1609,7 @@ mod tests {
                 round("done", Vec::new(), json!({"round": 5})),
             ],
             &mut tools,
-        );
+        )?;
         assert_eq!(executed_ids(&tools), ["first", "write", "after-write"]);
         assert_eq!(result.tool_calls_executed, 3);
         assert_eq!(
@@ -1613,10 +1620,11 @@ mod tests {
             )
         );
         assert_eq!(result.text, "done");
+        Ok(())
     }
 
     #[test]
-    fn results_with_diagnostics_are_not_reused() {
+    fn results_with_diagnostics_are_not_reused() -> Result<(), ChatToolLoopError> {
         let mut tools = Tools::default();
         let calculate = |id: &str| call_with_id(id, "calculate", r#"{"expression":"2+2"}"#);
         let (_, result) = run_rounds(
@@ -1626,9 +1634,10 @@ mod tests {
                 round("done", Vec::new(), json!({"round": 3})),
             ],
             &mut tools,
-        );
+        )?;
         assert_eq!(executed_ids(&tools), ["first", "retry"]);
         assert_eq!(result.tool_calls_executed, 2);
+        Ok(())
     }
 
     #[test]
@@ -1692,7 +1701,8 @@ mod tests {
     }
 
     #[test]
-    fn retries_an_empty_transient_round_without_repeating_completed_tools() {
+    fn retries_an_empty_transient_round_without_repeating_completed_tools()
+    -> Result<(), ChatToolLoopError> {
         let provider = Provider::new(vec![
             Ok(round(
                 "",
@@ -1718,8 +1728,8 @@ mod tests {
             false,
             5,
             ignore_text,
-        )
-        .unwrap_or_else(|error| *error.partial);
+        );
+        let result = result?;
 
         assert_eq!(result.text, "synthetic answer");
         assert_eq!(result.provider_rounds, 3);
@@ -1734,6 +1744,7 @@ mod tests {
                 .count(),
             1
         );
+        Ok(())
     }
 
     fn system_text(message: Option<&PromptMessage>) -> Option<&PromptContent> {
@@ -1743,7 +1754,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_limit_runs_one_answer_round_without_tools() {
+    fn tool_limit_runs_one_answer_round_without_tools() -> Result<(), ChatToolLoopError> {
         let provider = Provider::new(vec![
             Ok(round(
                 "",
@@ -1765,8 +1776,8 @@ mod tests {
                 events.push(event);
                 Ok(())
             },
-        )
-        .unwrap_or_else(|error| *error.partial);
+        );
+        let result = result?;
 
         assert_eq!(result.text, "it is 4");
         assert!(result.stopped_at_limit);
@@ -1793,10 +1804,11 @@ mod tests {
                 .iter()
                 .all(|message| message.role != PromptRole::System)
         );
+        Ok(())
     }
 
     #[test]
-    fn empty_replies_get_one_answer_round() {
+    fn empty_replies_get_one_answer_round() -> Result<(), ChatToolLoopError> {
         for empty in ["", " \n\t"] {
             let provider = Provider::new(vec![
                 Ok(round(empty, Vec::new(), json!({"round": 1}))),
@@ -1810,8 +1822,7 @@ mod tests {
                 false,
                 DEFAULT_MAX_TOOL_ROUNDS,
                 ignore_text,
-            )
-            .unwrap_or_else(|error| *error.partial);
+            )?;
 
             assert_eq!(result.text, "now an answer");
             assert!(!result.stopped_at_limit);
@@ -1836,15 +1847,15 @@ mod tests {
             false,
             DEFAULT_MAX_TOOL_ROUNDS,
             ignore_text,
-        )
-        .unwrap_or_else(|error| *error.partial);
+        )?;
         assert_eq!(result.text, "hi");
         assert_eq!(result.provider_rounds, 1);
         assert_eq!(*provider.tools_offered.borrow(), [1]);
+        Ok(())
     }
 
     #[test]
-    fn a_round_that_thinks_too_long_is_answered_briefly_instead() {
+    fn a_round_that_thinks_too_long_is_answered_briefly_instead() -> Result<(), ChatToolLoopError> {
         let mut slow = round("", Vec::new(), json!({"slow": true}));
         slow.reasoning = "still thinking".to_owned();
         let provider = Provider::new(vec![
@@ -1866,8 +1877,7 @@ mod tests {
             false,
             DEFAULT_MAX_TOOL_ROUNDS,
             ignore_text,
-        )
-        .unwrap_or_else(|error| *error.partial);
+        )?;
         assert_eq!(result.text, "quick answer");
         assert_eq!(result.provider_rounds, 3);
         // The answer is the turn's second round, retried once.
@@ -1883,10 +1893,11 @@ mod tests {
             observed[2].last().map(|message| &message.content),
             Some(&PromptContent::Text(SLOW_THINKING_ANSWER_PROMPT.to_owned()))
         );
+        Ok(())
     }
 
     #[test]
-    fn an_empty_answer_round_is_not_retried_again() {
+    fn an_empty_answer_round_is_not_retried_again() -> Result<(), ChatToolLoopError> {
         let provider = Provider::new(vec![
             Ok(round("", Vec::new(), json!({"round": 1}))),
             Ok(round("", Vec::new(), json!({"round": 2}))),
@@ -1899,15 +1910,16 @@ mod tests {
             false,
             DEFAULT_MAX_TOOL_ROUNDS,
             ignore_text,
-        )
-        .unwrap_or_else(|error| *error.partial);
+        )?;
         assert_eq!(result.text, "");
         assert_eq!(result.provider_rounds, 2);
         assert_eq!(provider.observed.borrow().len(), 2);
+        Ok(())
     }
 
     #[test]
-    fn answer_round_retries_transient_failures_and_reports_permanent_ones() {
+    fn answer_round_retries_transient_failures_and_reports_permanent_ones()
+    -> Result<(), ChatToolLoopError> {
         let tool_round = || {
             Ok(round(
                 "",
@@ -1934,8 +1946,7 @@ mod tests {
             false,
             1,
             ignore_text,
-        )
-        .unwrap_or_else(|error| *error.partial);
+        )?;
         assert_eq!(result.text, "recovered");
         assert_eq!(*provider.tools_offered.borrow(), [1, 0, 0]);
         assert!(
@@ -1965,6 +1976,7 @@ mod tests {
         assert!(error.partial.stopped_at_limit);
         assert_eq!(error.partial.tool_calls_executed, 1);
         assert_eq!(provider.observed.borrow().len(), 2);
+        Ok(())
     }
 
     #[test]
@@ -2161,7 +2173,8 @@ mod tests {
     }
 
     #[test]
-    fn runs_read_only_calls_concurrently_and_keeps_results_in_call_order() {
+    fn runs_read_only_calls_concurrently_and_keeps_results_in_call_order()
+    -> Result<(), ChatToolLoopError> {
         let provider = Provider::new(vec![
             Ok(round(
                 "",
@@ -2194,8 +2207,8 @@ mod tests {
                 }
                 Ok(())
             },
-        )
-        .unwrap_or_else(|error| *error.partial);
+        );
+        let result = result?;
 
         assert_eq!(result.text, "done");
         assert_eq!(result.tool_calls_executed, 5);
@@ -2223,10 +2236,12 @@ mod tests {
             .filter_map(|message| message.tool_call_id.clone())
             .collect::<Vec<_>>();
         assert_eq!(tool_ids, ["call-0", "call-1", "call-2", "call-3", "call-4"]);
+        Ok(())
     }
 
     #[test]
-    fn a_single_read_only_call_runs_inline_and_event_failures_stop_the_round() {
+    fn a_single_read_only_call_runs_inline_and_event_failures_stop_the_round()
+    -> Result<(), ChatToolLoopError> {
         let provider = Provider::new(vec![Ok(round(
             "",
             vec![
@@ -2249,8 +2264,7 @@ mod tests {
             false,
             1,
             ignore_text,
-        )
-        .unwrap_or_else(|error| *error.partial);
+        )?;
         assert_eq!(executed_ids(&tools), ["call-0", "call-1"]);
         assert!(result.stopped_at_limit);
 
@@ -2285,6 +2299,7 @@ mod tests {
         // The running fetches are joined before the error is returned.
         assert_eq!(error.partial.tool_calls_executed, 1);
         assert!(tools.calls.is_empty());
+        Ok(())
     }
 
     struct SseTransport {
@@ -2326,7 +2341,8 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_streamer_surfaces_reasoning_and_text_through_the_tool_loop() {
+    fn openrouter_streamer_surfaces_reasoning_and_text_through_the_tool_loop()
+    -> Result<(), Box<dyn std::error::Error>> {
         let requests = Rc::new(RefCell::new(0));
         let streamer = reasoning_streamer(&requests);
         let mut tools = Tools::default();
@@ -2342,8 +2358,8 @@ mod tests {
                 events.push(event);
                 Ok(())
             },
-        )
-        .unwrap_or_else(|error| *error.partial);
+        );
+        let result = result?;
         assert_eq!(
             events,
             [
@@ -2366,11 +2382,12 @@ mod tests {
                 texts.push(text.to_owned());
                 Ok(())
             },
-        )
-        .unwrap_or_else(|error| *error.partial);
+        );
+        let round = round?;
         assert_eq!(texts, ["answer"]);
         assert_eq!(round.reasoning, "thinking ");
         assert_eq!(*requests.borrow(), 2);
+        Ok(())
     }
 
     #[test]

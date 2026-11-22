@@ -626,6 +626,7 @@ mod tests {
     /// Transcribes audio unless told the provider returns nothing.
     struct Transcription {
         replies: bool,
+        empty: bool,
     }
 
     impl TranscriptionProvider for Transcription {
@@ -635,7 +636,11 @@ mod tests {
             _file_id: &str,
         ) -> Result<Option<MediaProviderResult>, String> {
             Ok(self.replies.then(|| MediaProviderResult {
-                text: "synthetic transcript".to_owned(),
+                text: if self.empty {
+                    String::new()
+                } else {
+                    "synthetic transcript".to_owned()
+                },
                 billing_segment: json!({"kind": "transcribe"}),
             }))
         }
@@ -652,7 +657,10 @@ mod tests {
                 measures_audio: true,
             },
             Vision,
-            Transcription { replies: true },
+            Transcription {
+                replies: true,
+                empty: false,
+            },
             model,
         )
     }
@@ -735,6 +743,21 @@ mod tests {
                 .map(String::as_str),
             Some("synthetic transcript")
         );
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_transcript_preserves_usage_without_polluting_the_cache() -> TestResult {
+        let (pricing, server) = pricing_cache()?;
+        let mut media = media(Cache::default()).with_openrouter_pricing(pricing);
+        media.transcription.empty = true;
+        let result = media
+            .prepare(MediaKind::Audio, "silent", Some(4.5))
+            .and_then(|prepared| media.execute(prepared, "ignored"))?;
+        assert_eq!(result.text, "");
+        assert_eq!(result.billing_segment, Some(json!({"kind": "transcribe"})));
+        assert!(media.cache.values.is_empty());
         assert!(matches!(server.join(), Ok(Ok(()))));
         Ok(())
     }

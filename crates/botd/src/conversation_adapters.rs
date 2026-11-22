@@ -1381,6 +1381,96 @@ mod tests {
     }
 
     #[test]
+    fn redis_search_adds_older_results_to_conversation_memory() -> crate::test_env::TestResult {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut exchange = |args: &[&str], reply: &[u8]| -> std::io::Result<()> {
+                let mut expected = format!("*{}\r\n", args.len());
+                for arg in args {
+                    expected.push('$');
+                    expected.push_str(&format!("{}\r\n{arg}\r\n", arg.len()));
+                }
+                let mut request = vec![0; expected.len()];
+                stream.read_exact(&mut request)?;
+                assert_eq!(String::from_utf8_lossy(&request), expected);
+                stream.write_all(reply)
+            };
+            exchange(&["LRANGE", "chat_history:1", "0", "199"], b"*0\r\n")?;
+            exchange(&["GET", &super::chat_summary_key("1")], b"$-1\r\n")?;
+            exchange(&["GET", &super::chat_compacted_until_key("1")], b"$-1\r\n")?;
+            let index = exchange(
+                &[
+                    "FT.CREATE",
+                    "idx:chat_messages",
+                    "ON",
+                    "HASH",
+                    "PREFIX",
+                    "1",
+                    "chatmsg:",
+                    "SCHEMA",
+                    "chat_id",
+                    "TAG",
+                    "role",
+                    "TAG",
+                    "user_id",
+                    "TAG",
+                    "reply_to_message_id",
+                    "TAG",
+                    "mentions_bot",
+                    "TAG",
+                    "username",
+                    "TEXT",
+                    "text",
+                    "TEXT",
+                    "timestamp",
+                    "NUMERIC",
+                    "SORTABLE",
+                ],
+                b"+OK\r\n",
+            );
+            index?;
+            let rows = b"*3\r\n:1\r\n$11\r\nchatmsg:1:1\r\n*6\r\n$10\r\nmessage_id\r\n$1\r\n1\r\n$4\r\ntext\r\n$6\r\nwallet\r\n$9\r\ntimestamp\r\n$2\r\n10\r\n";
+            exchange(
+                &[
+                    "FT.SEARCH",
+                    "idx:chat_messages",
+                    "@chat_id:{1} wallet",
+                    "DIALECT",
+                    "2",
+                    "SORTBY",
+                    "timestamp",
+                    "DESC",
+                    "LIMIT",
+                    "0",
+                    "5",
+                ],
+                rows,
+            )
+        });
+        let redis = RedisConversationState::new(&RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: None,
+        });
+        let mut conversation = redis?;
+        let memory = conversation.load_memory("1", "wallet", None, Some("2"), 20)?;
+        assert!(memory.history.is_empty());
+        assert_eq!(memory.retrieved.len(), 1);
+        assert_eq!(memory.retrieved[0].text, "wallet");
+        assert_eq!(memory.retrieved[0].timestamp, 10);
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
     fn retrieved_rows_and_user_identity_normalize_optional_fields() {
         use std::collections::{BTreeMap, HashSet};
 
@@ -1834,6 +1924,51 @@ mod tests {
         assert!(
             matches!(&recorded, Err(error) if !error.is_empty()),
             "{recorded:?}"
+        );
+    }
+
+    #[test]
+    fn fallback_payer_switch_rejects_oversized_holds_and_totals_before_database_io() {
+        let mut billing = unreachable_billing();
+        let request = user_request("ai:88:overflow", 1);
+        let refused = bot_adapters::billing_read::AiChargeResult {
+            ok: false,
+            applied: false,
+            reason: Some("insufficient balance".to_owned()),
+            source: None,
+            amount: 1,
+            user_balance: i64::MAX,
+            chat_balance: 0,
+        };
+        for held in [i64::from(i32::MAX), i64::from(i32::MAX) + 1] {
+            billing.held_by_operation.insert(
+                request.operation_id.clone(),
+                std::collections::HashMap::from([("initial".to_owned(), held)]),
+            );
+            assert_eq!(
+                billing.move_operation_to_fallback(&request, 1, refused.clone(), PayerSource::User),
+                Err("AI reservation exceeds the database range".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn stored_system_messages_keep_their_role() {
+        assert_eq!(
+            super::role("system", "system:12"),
+            bot_core::ai_prompt::PromptRole::System
+        );
+    }
+
+    #[test]
+    fn older_pricing_copies_present_fields_without_clearing_metadata() {
+        let mut metadata = serde_json::Map::from_iter([("reason".to_owned(), json!("delivered"))]);
+        super::copy_pricing_metadata(&mut metadata, &json!({"pricing_complete": true}));
+        assert_eq!(
+            serde_json::Value::Object(metadata),
+            json!({
+                "reason": "delivered", "pricing_complete": true
+            })
         );
     }
 
