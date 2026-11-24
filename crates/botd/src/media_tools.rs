@@ -742,6 +742,14 @@ mod tests {
                 "no se pudo obtener la URL: file is over the upload limit",
             ),
             (
+                Fetcher(Err(PublicFetchError::Unresolved {
+                    url: "https://new-site.test/a.gif".to_owned(),
+                    detail: "failed to lookup address information".to_owned(),
+                })),
+                Locale::En,
+                "the domain did not resolve from the bot's server (DNS lookup failed); this does not prove the site does not exist",
+            ),
+            (
                 file("https://example.com/", "text/html", b"<html>"),
                 Locale::Es,
                 "ese link es una página sin imagen principal; usá page_screenshot para mostrarla o buscá el link directo al archivo",
