@@ -202,6 +202,9 @@ fn error_result(url: &str, error: PublicFetchError, locale: Locale) -> ToolExecu
         PublicFetchError::Request { url, detail } => {
             format!("web_fetch request failed for {url}: {detail}")
         }
+        PublicFetchError::Unresolved { url, detail } => {
+            format!("web_fetch could not resolve {url}: {detail}")
+        }
     };
     ToolExecutionResult::with_diagnostics(output, vec![diagnostic])
 }
@@ -293,6 +296,31 @@ mod tests {
             url: url.to_owned(),
             render: false,
         }
+    }
+
+    #[test]
+    fn a_domain_that_does_not_resolve_tells_the_model_the_site_may_still_exist() {
+        let error = || PublicFetchError::Unresolved {
+            url: "https://new-site.test/".to_owned(),
+            detail: "failed to lookup address information".to_owned(),
+        };
+        let result = error_result("https://new-site.test/", error(), Locale::En);
+        assert_eq!(
+            result.output,
+            "error fetching https://new-site.test/: the domain did not resolve from the bot's server (DNS lookup failed); this does not prove the site does not exist"
+        );
+        assert_eq!(
+            result.diagnostics,
+            [
+                "web_fetch could not resolve https://new-site.test/: failed to lookup address information"
+            ]
+        );
+        let result = error_result("https://new-site.test/", error(), Locale::Es);
+        assert!(
+            result
+                .output
+                .starts_with("error obteniendo https://new-site.test/: el dominio no resolvió")
+        );
     }
 
     #[test]

@@ -223,13 +223,17 @@ pub enum PublicFetchError {
     Blocked { url: String },
     #[error("no se pudo obtener la url")]
     Request { url: String, detail: String },
+    /// The host's name did not resolve. The site can still exist: the
+    /// server's DNS may filter or not yet know a new domain.
+    #[error("el dominio no resolvió")]
+    Unresolved { url: String, detail: String },
 }
 
 impl PublicFetchError {
     #[must_use]
     pub fn url(&self) -> &str {
         match self {
-            Self::Blocked { url } | Self::Request { url, .. } => url,
+            Self::Blocked { url } | Self::Request { url, .. } | Self::Unresolved { url, .. } => url,
         }
     }
 
@@ -240,6 +244,12 @@ impl PublicFetchError {
             (Self::Blocked { .. }, Locale::En) => "URL is not allowed",
             (Self::Request { .. }, Locale::Es) => "no se pudo obtener la URL",
             (Self::Request { .. }, Locale::En) => "could not fetch the URL",
+            (Self::Unresolved { .. }, Locale::Es) => {
+                "el dominio no resolvió desde el servidor del bot (falló el DNS); eso no prueba que el sitio no exista"
+            }
+            (Self::Unresolved { .. }, Locale::En) => {
+                "the domain did not resolve from the bot's server (DNS lookup failed); this does not prove the site does not exist"
+            }
         }
     }
 }
@@ -919,12 +929,14 @@ fn ensure_public<R: HostResolver>(url: &Url, resolver: &R) -> Result<(), PublicF
         return Ok(());
     }
     let port = url.port_or_known_default().unwrap_or(443);
-    if resolver
-        .addresses(hostname, port)
-        .unwrap_or_default()
-        .into_iter()
-        .any(|address| !is_public_ip(address))
-    {
+    let addresses =
+        resolver
+            .addresses(hostname, port)
+            .map_err(|detail| PublicFetchError::Unresolved {
+                url: url.to_string(),
+                detail,
+            })?;
+    if addresses.into_iter().any(|address| !is_public_ip(address)) {
         return Err(PublicFetchError::Blocked {
             url: url.to_string(),
         });
@@ -1298,6 +1310,42 @@ mod tests {
             ));
             assert!(transport.urls.borrow().is_empty());
         }
+    }
+
+    #[test]
+    fn a_host_that_does_not_resolve_is_reported_as_unresolved_without_a_request() {
+        struct FilteredDns;
+        impl HostResolver for FilteredDns {
+            fn addresses(&self, _hostname: &str, _port: u16) -> Result<Vec<IpAddr>, String> {
+                Err("failed to lookup address information".to_owned())
+            }
+        }
+
+        let transport = Transport {
+            responses: RefCell::new(Vec::new()),
+            urls: RefCell::new(Vec::new()),
+        };
+        let error = fetch_public_url(&transport, &FilteredDns, "https://new-site.test/page");
+        assert!(matches!(
+            &error,
+            Err(PublicFetchError::Unresolved { url, detail })
+                if url == "https://new-site.test/page"
+                    && detail == "failed to lookup address information"
+        ));
+        assert!(transport.urls.borrow().is_empty());
+        assert!(!is_public_http_url("https://new-site.test/", &FilteredDns));
+        let Err(error) = error else { return };
+        assert_eq!(error.url(), "https://new-site.test/page");
+        assert!(
+            error
+                .public_message(Locale::En)
+                .contains("does not prove the site does not exist")
+        );
+        assert!(
+            error
+                .public_message(Locale::Es)
+                .contains("no prueba que el sitio no exista")
+        );
     }
 
     #[test]

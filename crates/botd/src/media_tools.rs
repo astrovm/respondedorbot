@@ -168,7 +168,7 @@ impl<Fetcher: MediaFetcher, Sender: MediaSender> MediaTool<Fetcher, Sender> {
             Ok(file) => file,
             Err(error) => {
                 let detail = match &error {
-                    PublicFetchError::Blocked { .. } => None,
+                    PublicFetchError::Blocked { .. } | PublicFetchError::Unresolved { .. } => None,
                     PublicFetchError::Request { detail, .. } => Some(detail.as_str()),
                 };
                 return ToolExecutionResult::with_diagnostics(
@@ -740,6 +740,14 @@ mod tests {
                 })),
                 Locale::Es,
                 "no se pudo obtener la URL: file is over the upload limit",
+            ),
+            (
+                Fetcher(Err(PublicFetchError::Unresolved {
+                    url: "https://new-site.test/a.gif".to_owned(),
+                    detail: "failed to lookup address information".to_owned(),
+                })),
+                Locale::En,
+                "the domain did not resolve from the bot's server (DNS lookup failed); this does not prove the site does not exist",
             ),
             (
                 file("https://example.com/", "text/html", b"<html>"),
