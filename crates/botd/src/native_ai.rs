@@ -1,6 +1,7 @@
 //! Concrete native AI and billing adapters for scheduled task execution.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bot_adapters::openrouter_chat::{
@@ -27,6 +28,7 @@ use chrono::{DateTime, FixedOffset, Offset, Utc};
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
+use crate::conversation::{CreditHold, ReserveDecision};
 use crate::dispatcher::ActionSink;
 use crate::firecrawl_tool::ScheduledWebSearch;
 use crate::native_tools::{NativeTool, tool_schema};
@@ -49,13 +51,24 @@ const TASK_WEB_SEARCH_MAX_USES: usize = 3;
 /// Lets a recurring task end itself once its stop condition is met.
 pub const FINISH_TASK_TOOL: &str = "finish_task";
 
-/// Builds the read-only chat tools (prices, Polymarket, web fetch, ...) for
-/// one scheduled-task run, so tasks read live data the same way chat does.
+/// Builds the tools of one scheduled-task run. They are the tools a message
+/// reply gets, except `web_search` and `create_poll`: the task runs those
+/// itself, so it can bill the searches and deliver the poll after billing.
 pub trait TaskToolFactory: Send {
     fn create(
         &mut self,
         task: &ScheduledTask,
+        execution_id: &str,
     ) -> Result<Box<dyn crate::chat_tool_loop::NativeToolRuntime>, String>;
+
+    /// Whether an earlier attempt of this run already used a tool that acts
+    /// (see [`NativeTool::acts`]). A retried run must not post or charge
+    /// twice.
+    fn acted(&mut self, execution_id: &str) -> Result<bool, String>;
+
+    /// Records that this run acts. It runs before the first such tool, so a
+    /// crash during the tool still counts.
+    fn mark_acted(&mut self, execution_id: &str) -> Result<(), String>;
 }
 
 pub fn reservation_pricing_for_model(
@@ -180,6 +193,7 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
         messages: &[TaskPromptMessage],
         task: &ScheduledTask,
         tools: Option<&dyn crate::chat_tool_loop::NativeToolRuntime>,
+        replay: bool,
     ) -> Result<ChatCompletionRequest, OpenRouterChatError> {
         let mut request_messages = Vec::with_capacity(messages.len() + 1);
         request_messages.push(ChatMessage::text(
@@ -189,6 +203,9 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
         request_messages.extend(messages.iter().map(|message| {
             ChatMessage::text(task_message_role(message.role), message.content.clone())
         }));
+        if replay {
+            request_messages.push(ChatMessage::text(ChatRole::System, replay_note(task)));
+        }
         let mut request = ChatCompletionRequest::new(&self.model, request_messages);
         if let Some(pricing) = self.pricing.as_ref() {
             pricing.apply_to_request(&mut request)?;
@@ -203,12 +220,35 @@ impl<Transport> OpenRouterTaskProvider<Transport> {
         );
         request.tools.push(poll_schema);
         if let Some(tools) = tools {
-            request.tools.extend(tools.schemas(true));
+            // A retried run that already acted only gets the tools that read.
+            request
+                .tools
+                .extend(tools.schemas().into_iter().filter(|schema| {
+                    !replay
+                        || !schema
+                            .pointer("/function/name")
+                            .and_then(Value::as_str)
+                            .is_some_and(acts)
+                }));
         }
         if task.schedule != TaskSchedule::Once {
             request.tools.push(finish_task_schema());
         }
         Ok(request)
+    }
+}
+
+/// Tools that post, change tasks or spend credits. See [`NativeTool::acts`].
+fn acts(name: &str) -> bool {
+    NativeTool::from_name(name).is_some_and(NativeTool::acts)
+}
+
+/// Tells a retried run that its earlier attempt already acted.
+fn replay_note(task: &ScheduledTask) -> &'static str {
+    if task.locale == "en" {
+        "An earlier attempt of this run already sent its files or changed tasks, and that is in the chat. Do not repeat it: write only the text."
+    } else {
+        "Un intento anterior de esta tarea ya mandó sus archivos o cambió tareas, y eso ya está en el chat. No lo repitas: escribí solo el texto."
     }
 }
 
@@ -242,21 +282,32 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
         execution_id: &str,
     ) -> Result<TaskProviderReply, TaskProviderFailure<Self::Error>> {
         let trace_id = operation_id(execution_id);
-        let mut tools = self.tools.as_mut().and_then(|factory| {
-            factory
-                .create(task)
+        let (mut tools, replay) = self.tools.as_mut().map_or((None, false), |factory| {
+            // A failed check counts as a retry: the run may then skip a
+            // picture, but it never posts one twice.
+            let replay = factory.acted(execution_id).unwrap_or_else(|error| {
+                eprintln!(
+                    "scheduled task {} acted check failed: {error}",
+                    task.id.as_str()
+                );
+                true
+            });
+            let tools = factory
+                .create(task, execution_id)
                 .map_err(|error| {
                     eprintln!(
                         "scheduled task {} tools unavailable: {error}",
                         task.id.as_str()
                     );
                 })
-                .ok()
+                .ok();
+            (tools, replay)
         });
         let mut request = self
-            .request(messages, task, tools.as_deref())
+            .request(messages, task, tools.as_deref(), replay)
             .map_err(|source| TaskProviderFailure::new(source, Vec::new()))?;
         let mut finish = false;
+        let mut acted = false;
         let mut billing_segments = Vec::new();
         let mut search_uses = 0_usize;
         let locale = if task.locale == "en" {
@@ -283,6 +334,7 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                     poll: None,
                     fallback: false,
                     finish,
+                    acted,
                     billing_segments,
                 });
             }
@@ -305,7 +357,7 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                 );
                 let shared = tools
                     .as_ref()
-                    .filter(|tools| !own && tools.contains(name, true));
+                    .filter(|tools| !own && tools.contains(name) && !(replay && acts(name)));
                 if !own && shared.is_none() {
                     let output = crate::chat_tool_loop::unavailable_tool_output(name);
                     request
@@ -326,6 +378,24 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                         }
                     };
                 if let Some(tools) = tools.as_mut().filter(|_| !own) {
+                    if acts(name) && !acted {
+                        if let Err(error) = self
+                            .tools
+                            .as_mut()
+                            .map_or(Ok(()), |factory| factory.mark_acted(execution_id))
+                        {
+                            eprintln!(
+                                "scheduled task {} could not record a tool that acts: {error}",
+                                task.id.as_str()
+                            );
+                            request.messages.push(ChatMessage::tool_result(
+                                call.id,
+                                crate::tool_output::failed(locale, name),
+                            ));
+                            continue;
+                        }
+                        acted = true;
+                    }
                     let result = tools.execute(name, &arguments, &call.id);
                     crate::chat_tool_loop::trace(
                         &trace_id,
@@ -353,6 +423,7 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                                 poll: Some(poll),
                                 fallback: false,
                                 finish,
+                                acted,
                                 billing_segments,
                             });
                         }
@@ -423,6 +494,7 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
             poll: None,
             fallback: false,
             finish,
+            acted,
             billing_segments,
         })
     }
@@ -553,6 +625,17 @@ pub trait TaskCreditStore {
         ids: (&str, &str),
     ) -> Result<TaskCharge, Self::Error>;
 
+    /// Holds more credits for a tool under a run that `charge` already
+    /// authorized, with the same payer. A refusal keeps the run's own hold.
+    fn extend(
+        &mut self,
+        user_id: i64,
+        payer: &TaskPayer,
+        amount: i64,
+        metadata: &Map<String, Value>,
+        ids: (&str, &str),
+    ) -> Result<ReserveDecision, Self::Error>;
+
     fn record_segment(
         &mut self,
         user_id: i64,
@@ -588,6 +671,10 @@ pub enum NativeTaskBillingError {
     Pricing(String),
     #[error("scheduled task has no billable user")]
     MissingUser,
+    #[error("scheduled-task run holds no credits")]
+    NoReservation,
+    #[error("scheduled-task billing lock is poisoned")]
+    Lock,
 }
 
 impl NativeTaskBillingError {
@@ -607,6 +694,9 @@ pub struct PostgresTaskBilling<Store> {
     web_search_enabled: bool,
     /// Without it every run is paid from the creator's personal credits.
     payer_policy: Option<Box<dyn TaskPayerPolicy>>,
+    /// The payer of each authorized run until it settles, so a tool's hold
+    /// goes to the same payer.
+    payers: HashMap<String, TaskPayer>,
 }
 
 impl<Store> PostgresTaskBilling<Store> {
@@ -618,6 +708,7 @@ impl<Store> PostgresTaskBilling<Store> {
             pricing: None,
             web_search_enabled: false,
             payer_policy: None,
+            payers: HashMap::new(),
         }
     }
 
@@ -678,6 +769,46 @@ impl<Store> PostgresTaskBilling<Store> {
         Ok(())
     }
 
+    /// Holds `amount` credit units for a tool of the run `execution_id`,
+    /// under the run's operation and payer.
+    pub fn hold(
+        &mut self,
+        task: &ScheduledTask,
+        execution_id: &str,
+        (kind, number): (&str, usize),
+        amount: i64,
+    ) -> Result<ReserveDecision, NativeTaskBillingError>
+    where
+        Store: TaskCreditStore,
+    {
+        let user_id = task.user_id.ok_or(NativeTaskBillingError::MissingUser)?;
+        let payer = *self
+            .payers
+            .get(execution_id)
+            .ok_or(NativeTaskBillingError::NoReservation)?;
+        let operation_id = operation_id(execution_id);
+        let reservation_id = format!("{operation_id}:{kind}:{number}");
+        let metadata = Map::from_iter([
+            ("command".to_owned(), json!("task")),
+            ("usage_tag".to_owned(), json!(kind)),
+            ("settlement_id".to_owned(), json!(reservation_id)),
+            ("operation_id".to_owned(), json!(operation_id)),
+            ("task_id".to_owned(), json!(task.id.as_str())),
+            ("execution_id".to_owned(), json!(execution_id)),
+            ("chat_id".to_owned(), json!(task.chat_id)),
+            ("reserved_credit_units".to_owned(), json!(amount)),
+        ]);
+        self.store
+            .extend(
+                user_id,
+                &payer,
+                amount,
+                &metadata,
+                (&reservation_id, &operation_id),
+            )
+            .map_err(NativeTaskBillingError::store)
+    }
+
     fn finalize(
         &mut self,
         task: &ScheduledTask,
@@ -688,6 +819,8 @@ impl<Store> PostgresTaskBilling<Store> {
     where
         Store: TaskCreditStore,
     {
+        // The run is over, so no tool holds more credits for it.
+        self.payers.remove(execution_id);
         let user_id = task.user_id.ok_or(NativeTaskBillingError::MissingUser)?;
         let operation_id = operation_id(execution_id);
         for segment in new_segments {
@@ -811,6 +944,7 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
             )
             .map_err(NativeTaskBillingError::store)?;
         if result.ok {
+            self.payers.insert(execution_id.to_owned(), payer);
             return Ok(TaskReserveOutcome::Authorized);
         }
         if already_settled(result.reason.as_deref()) {
@@ -843,6 +977,86 @@ impl<Store: TaskCreditStore> TaskBilling for PostgresTaskBilling<Store> {
 
 fn operation_id(execution_id: &str) -> String {
     format!("task:{execution_id}")
+}
+
+/// Task billing that the executor and a run's tools share, so a tool's
+/// hold joins the run's charge.
+pub type SharedTaskBilling<Store> = Arc<Mutex<PostgresTaskBilling<Store>>>;
+
+impl<Store: TaskCreditStore> TaskBilling for SharedTaskBilling<Store> {
+    type Error = NativeTaskBillingError;
+
+    fn reserve(
+        &mut self,
+        task: &ScheduledTask,
+        execution_id: &str,
+        prompt: &[TaskPromptMessage],
+    ) -> Result<TaskReserveOutcome, Self::Error> {
+        self.lock()
+            .map_err(|_poisoned| NativeTaskBillingError::Lock)?
+            .reserve(task, execution_id, prompt)
+    }
+
+    fn settle(
+        &mut self,
+        task: &ScheduledTask,
+        execution_id: &str,
+        segments: &[Value],
+        reason: &'static str,
+    ) -> Result<(), Self::Error> {
+        self.lock()
+            .map_err(|_poisoned| NativeTaskBillingError::Lock)?
+            .settle(task, execution_id, segments, reason)
+    }
+
+    fn refund(
+        &mut self,
+        task: &ScheduledTask,
+        execution_id: &str,
+        reason: &'static str,
+    ) -> Result<(), Self::Error> {
+        self.lock()
+            .map_err(|_poisoned| NativeTaskBillingError::Lock)?
+            .refund(task, execution_id, reason)
+    }
+}
+
+/// Holds credits for a tool's cost under one task run, like
+/// [`crate::conversation::ReplyCredits`] does under a reply.
+pub struct TaskCredits<Store> {
+    billing: SharedTaskBilling<Store>,
+    task: ScheduledTask,
+    execution_id: String,
+    holds: usize,
+}
+
+impl<Store> TaskCredits<Store> {
+    #[must_use]
+    pub fn new(
+        billing: SharedTaskBilling<Store>,
+        task: &ScheduledTask,
+        execution_id: &str,
+    ) -> Self {
+        Self {
+            billing,
+            task: task.clone(),
+            execution_id: execution_id.to_owned(),
+            holds: 0,
+        }
+    }
+}
+
+impl<Store: TaskCreditStore> CreditHold for TaskCredits<Store> {
+    fn hold(&mut self, kind: &str, amount: i64) -> Result<ReserveDecision, String> {
+        self.holds += 1;
+        self.billing
+            .lock()
+            .map_err(|_poisoned| NativeTaskBillingError::Lock)
+            .and_then(|mut billing| {
+                billing.hold(&self.task, &self.execution_id, (kind, self.holds), amount)
+            })
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// A run the group would pay for names whose credits fell short, like task
@@ -970,6 +1184,7 @@ mod tests {
         TaskReserveOutcome, reservation_pricing_for_model,
     };
     use crate::chat_tool_loop::{NativeToolRuntime, ToolExecutionResult};
+    use crate::conversation::{CreditHold, ReserveDecision};
     use crate::dispatcher::{ActionReceipt, ActionSink};
     use crate::firecrawl_tool::ScheduledWebSearch;
     use crate::tool_requests::ExternalToolRequest;
@@ -1329,6 +1544,7 @@ mod tests {
 
     type CapturedCharge = (i64, i32, String, String, Map<String, Value>);
     type CapturedSettlement = (i64, String, i64, Map<String, Value>);
+    type CapturedExtension = (i64, TaskPayer, i64, String, String, Map<String, Value>);
 
     #[derive(Default)]
     struct Store {
@@ -1338,6 +1554,7 @@ mod tests {
         charges: RefCell<Vec<CapturedCharge>>,
         segments: RefCell<Vec<Value>>,
         settlements: RefCell<Vec<CapturedSettlement>>,
+        extensions: RefCell<Vec<CapturedExtension>>,
     }
 
     impl TaskCreditStore for Store {
@@ -1372,6 +1589,34 @@ mod tests {
                     chat_balance: 0,
                     hourly_limit: None,
                 }))
+        }
+
+        fn extend(
+            &mut self,
+            user_id: i64,
+            payer: &TaskPayer,
+            amount: i64,
+            metadata: &Map<String, Value>,
+            (reservation_id, operation_id): (&str, &str),
+        ) -> Result<ReserveDecision, Self::Error> {
+            if self.fail_on == Some("extend") {
+                return Err("synthetic extend failure");
+            }
+            self.extensions.borrow_mut().push((
+                user_id,
+                *payer,
+                amount,
+                reservation_id.to_owned(),
+                operation_id.to_owned(),
+                metadata.clone(),
+            ));
+            Ok(ReserveDecision {
+                authorized: true,
+                user_balance: 900,
+                chat_balance: 0,
+                source: None,
+                denial: None,
+            })
         }
 
         fn record_segment(
@@ -1912,18 +2157,19 @@ mod tests {
         assert!(followup["messages"].get(9).is_none());
     }
 
-    /// The chat tools a task gets, reduced to one read-only tool.
+    /// The chat tools a task gets, reduced to one tool that reads and one
+    /// that posts.
     struct SharedTools;
 
     impl crate::chat_tool_loop::NativeToolRuntime for SharedTools {
-        fn schemas(&self, task_mode: bool) -> Vec<Value> {
-            vec![
-                json!({"type": "function", "function": {"name": "polymarket", "task_mode": task_mode}}),
-            ]
+        fn schemas(&self) -> Vec<Value> {
+            ["polymarket", "send_media"]
+                .map(|name| json!({"type": "function", "function": {"name": name}}))
+                .to_vec()
         }
 
-        fn contains(&self, name: &str, task_mode: bool) -> bool {
-            task_mode && name == "polymarket"
+        fn contains(&self, name: &str) -> bool {
+            matches!(name, "polymarket" | "send_media")
         }
 
         fn execute(
@@ -1941,15 +2187,45 @@ mod tests {
         }
     }
 
-    struct Factory(Result<(), String>);
+    struct Factory {
+        tools: Result<(), String>,
+        acted: Result<bool, String>,
+        mark: Result<(), String>,
+        marks: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Factory {
+        fn new(tools: Result<(), String>) -> Self {
+            Self {
+                tools,
+                acted: Ok(false),
+                mark: Ok(()),
+                marks: Arc::default(),
+            }
+        }
+    }
 
     impl super::TaskToolFactory for Factory {
         fn create(
             &mut self,
             _task: &ScheduledTask,
+            _execution_id: &str,
         ) -> Result<Box<dyn crate::chat_tool_loop::NativeToolRuntime>, String> {
-            self.0.clone()?;
+            self.tools.clone()?;
             Ok(Box::new(SharedTools))
+        }
+
+        fn acted(&mut self, _execution_id: &str) -> Result<bool, String> {
+            self.acted.clone()
+        }
+
+        fn mark_acted(&mut self, execution_id: &str) -> Result<(), String> {
+            self.mark.clone()?;
+            let _pushed = self
+                .marks
+                .lock()
+                .map(|mut marks| marks.push(execution_id.to_owned()));
+            Ok(())
         }
     }
 
@@ -2028,7 +2304,7 @@ mod tests {
             "deepseek/deepseek-v4.1-flash-1017",
             "synthetic persona",
         )
-        .with_tools(Box::new(Factory(Ok(()))));
+        .with_tools(Box::new(Factory::new(Ok(()))));
         let mut recurring = task("es");
         recurring.schedule = TaskSchedule::IntervalSeconds { seconds: 300 };
         let prompt = [TaskPromptMessage {
@@ -2047,9 +2323,9 @@ mod tests {
         let first = serde_json::from_str::<Value>(&requests[0].body).unwrap_or_default();
         assert_eq!(
             tool_names(&first),
-            ["create_poll", "polymarket", "finish_task"]
+            ["create_poll", "polymarket", "send_media", "finish_task"]
         );
-        assert_eq!(first["tools"][1]["function"]["task_mode"], true);
+        assert!(!reply.acted);
         let second = serde_json::from_str::<Value>(&requests[1].body).unwrap_or_default();
         assert_eq!(
             tool_results(&second),
@@ -2083,7 +2359,7 @@ mod tests {
             "deepseek/deepseek-v4.1-flash-1017",
             "synthetic persona",
         )
-        .with_tools(Box::new(Factory(Err("redis down".to_owned()))));
+        .with_tools(Box::new(Factory::new(Err("redis down".to_owned()))));
         let prompt = [TaskPromptMessage {
             role: "user",
             content: "do it".to_owned(),
@@ -2112,11 +2388,221 @@ mod tests {
             super::finish_task_output(Locale::En),
             "Done: this is the task's last run. Write the final message now"
         );
+        assert!(!SharedTools.contains("task_set"));
+    }
+
+    fn acting_provider(factory: Factory) -> OpenRouterTaskProvider<Transport> {
+        OpenRouterTaskProvider::new(
+            tool_round_transport(&[
+                ("call-media", "send_media"),
+                ("call-market", "polymarket"),
+                ("call-again", "send_media"),
+            ]),
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "deepseek/deepseek-v4.1-flash-1017",
+            "synthetic persona",
+        )
+        .with_tools(Box::new(factory))
+    }
+
+    fn prompt() -> [TaskPromptMessage; 1] {
+        [TaskPromptMessage {
+            role: "user",
+            content: "mandá una foto".to_owned(),
+        }]
+    }
+
+    #[test]
+    fn a_run_records_that_it_acts_once_before_its_first_tool_that_acts() {
+        let factory = Factory::new(Ok(()));
+        let marks = Arc::clone(&factory.marks);
+        let mut provider = acting_provider(factory);
+        let reply = provider.complete(&prompt(), &task("es"), "task123:1000");
+        let Ok(reply) = reply else { panic!() };
+        assert!(reply.acted);
         assert_eq!(
-            SharedTools.schemas(false)[0]["function"]["task_mode"],
-            false
+            marks.lock().map(|marks| marks.clone()).unwrap_or_default(),
+            ["task123:1000"]
         );
-        assert!(!SharedTools.contains("polymarket", false));
+        let requests = provider.transport.requests.borrow();
+        let second = serde_json::from_str::<Value>(&requests[1].body).unwrap_or_default();
+        assert_eq!(
+            tool_results(&second)
+                .into_iter()
+                .map(|(id, _output)| id)
+                .collect::<Vec<_>>(),
+            ["call-media", "call-market", "call-again"]
+        );
+        assert_eq!(
+            tool_results(&second)[2].1,
+            "send_media {\"query\":\"brasil\"} call-again"
+        );
+    }
+
+    #[test]
+    fn a_retried_run_that_already_acted_only_reads() {
+        for (acted, locale, note) in [
+            (
+                Ok(true),
+                "en",
+                "An earlier attempt of this run already sent its files or changed tasks, and that is in the chat. Do not repeat it: write only the text.",
+            ),
+            // A failed check counts as a retry.
+            (
+                Err("redis down".to_owned()),
+                "es",
+                "Un intento anterior de esta tarea ya mandó sus archivos o cambió tareas, y eso ya está en el chat. No lo repitas: escribí solo el texto.",
+            ),
+        ] {
+            let factory = Factory {
+                acted,
+                ..Factory::new(Ok(()))
+            };
+            let marks = Arc::clone(&factory.marks);
+            let mut provider = acting_provider(factory);
+            let reply = provider.complete(&prompt(), &task(locale), "task123:1000");
+            let Ok(reply) = reply else { panic!() };
+            assert!(!reply.acted);
+            assert!(marks.lock().is_ok_and(|marks| marks.is_empty()));
+            let requests = provider.transport.requests.borrow();
+            let first = serde_json::from_str::<Value>(&requests[0].body).unwrap_or_default();
+            assert_eq!(tool_names(&first), ["create_poll", "polymarket"]);
+            assert_eq!(first["messages"][2]["role"], "system");
+            assert_eq!(first["messages"][2]["content"], note);
+            let second = serde_json::from_str::<Value>(&requests[1].body).unwrap_or_default();
+            assert_eq!(
+                tool_results(&second)[0].1,
+                crate::chat_tool_loop::unavailable_tool_output("send_media")
+            );
+        }
+    }
+
+    #[test]
+    fn a_tool_that_acts_does_not_run_when_the_run_cannot_record_it() {
+        let factory = Factory {
+            mark: Err("redis down".to_owned()),
+            ..Factory::new(Ok(()))
+        };
+        let mut provider = acting_provider(factory);
+        let reply = provider.complete(&prompt(), &task("en"), "task123:1000");
+        let Ok(reply) = reply else { panic!() };
+        assert!(!reply.acted);
+        let requests = provider.transport.requests.borrow();
+        let second = serde_json::from_str::<Value>(&requests[1].body).unwrap_or_default();
+        let failed = crate::tool_output::failed(Locale::En, "send_media");
+        assert_eq!(
+            tool_results(&second),
+            [
+                ("call-media".to_owned(), failed.clone()),
+                (
+                    "call-market".to_owned(),
+                    "polymarket {\"query\":\"brasil\"} call-market".to_owned()
+                ),
+                ("call-again".to_owned(), failed),
+            ]
+        );
+    }
+
+    #[test]
+    fn task_tools_hold_credits_under_the_run_and_its_payer() {
+        let billing: super::SharedTaskBilling<Store> = Arc::new(std::sync::Mutex::new(
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash-1017"),
+        ));
+        let task = task("es");
+        let mut shared = Arc::clone(&billing);
+        assert_eq!(
+            shared.reserve(&task, "task123:1000", &[]),
+            Ok(TaskReserveOutcome::Authorized)
+        );
+        let mut credits = super::TaskCredits::new(Arc::clone(&billing), &task, "task123:1000");
+        assert!(
+            credits
+                .hold("image_generation", 1_000)
+                .is_ok_and(|decision| decision.authorized)
+        );
+        assert!(credits.hold("image_generation", 8_000).is_ok());
+        let extensions = billing
+            .lock()
+            .map(|billing| billing.store.extensions.borrow().clone())
+            .unwrap_or_default();
+        assert_eq!(extensions.len(), 2);
+        let (user_id, payer, amount, reservation, operation, metadata) = &extensions[0];
+        assert_eq!(
+            (*user_id, *payer, *amount),
+            (42, TaskPayer::PERSONAL, 1_000)
+        );
+        assert_eq!(reservation, "task:task123:1000:image_generation:1");
+        assert_eq!(operation, "task:task123:1000");
+        assert_eq!(metadata["usage_tag"], "image_generation");
+        assert_eq!(metadata["task_id"], "task123");
+        assert_eq!(extensions[1].3, "task:task123:1000:image_generation:2");
+
+        // Once the run settles, nothing more is held for it.
+        assert_eq!(
+            shared.settle(&task, "task123:1000", &[], "task_success"),
+            Ok(())
+        );
+        assert_eq!(
+            credits.hold("image_generation", 1_000),
+            Err("scheduled-task run holds no credits".to_owned())
+        );
+        assert_eq!(shared.refund(&task, "task123:1000", "task_error"), Ok(()));
+
+        let mut orphan = task.clone();
+        orphan.user_id = None;
+        assert_eq!(
+            super::TaskCredits::new(Arc::clone(&billing), &orphan, "task123:1000")
+                .hold("image_generation", 1),
+            Err("scheduled task has no billable user".to_owned())
+        );
+
+        let failing: super::SharedTaskBilling<Store> =
+            Arc::new(std::sync::Mutex::new(PostgresTaskBilling::new(
+                Store {
+                    fail_on: Some("extend"),
+                    ..Store::default()
+                },
+                "deepseek/deepseek-v4.1-flash-1017",
+            )));
+        let mut shared = Arc::clone(&failing);
+        assert!(shared.reserve(&task, "task123:2000", &[]).is_ok());
+        assert_eq!(
+            super::TaskCredits::new(failing, &task, "task123:2000").hold("image_generation", 1),
+            Err("scheduled-task credit storage failed: synthetic extend failure".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_poisoned_task_billing_lock_fails_every_call() {
+        let billing: super::SharedTaskBilling<Store> = Arc::new(std::sync::Mutex::new(
+            PostgresTaskBilling::new(Store::default(), "deepseek/deepseek-v4.1-flash-1017"),
+        ));
+        let holder = Arc::clone(&billing);
+        let poisoned = std::thread::spawn(move || {
+            let _guard = holder.lock();
+            panic!("synthetic panic while holding the billing lock");
+        })
+        .join();
+        assert!(poisoned.is_err());
+        let task = task("en");
+        let mut shared = Arc::clone(&billing);
+        assert_eq!(
+            shared.reserve(&task, "task123:1000", &[]),
+            Err(NativeTaskBillingError::Lock)
+        );
+        assert_eq!(
+            shared.settle(&task, "task123:1000", &[], "task_success"),
+            Err(NativeTaskBillingError::Lock)
+        );
+        assert_eq!(
+            shared.refund(&task, "task123:1000", "task_error"),
+            Err(NativeTaskBillingError::Lock)
+        );
+        assert_eq!(
+            super::TaskCredits::new(billing, &task, "task123:1000").hold("image_generation", 1),
+            Err("scheduled-task billing lock is poisoned".to_owned())
+        );
     }
 
     #[test]

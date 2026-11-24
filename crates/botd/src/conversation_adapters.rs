@@ -955,6 +955,26 @@ impl ConversationBilling for PostgresConversationBilling {
 
 /// Scheduled tasks reserve and settle through the same code as messages, so
 /// the hourly allowance and who-pays-first rules can't drift apart.
+/// A task run's reservation, paid by the run's payer.
+fn task_reservation(
+    user_id: i64,
+    payer: &TaskPayer,
+    amount: i64,
+    metadata: &Map<String, Value>,
+    (reservation_id, operation_id): (&str, &str),
+) -> ReserveRequest {
+    ReserveRequest {
+        user_id,
+        chat_id: payer.paying_chat(),
+        operation_id: operation_id.to_owned(),
+        reservation_id: reservation_id.to_owned(),
+        amount,
+        creditless_user_hourly_limit: payer.hourly_limit,
+        group_pays_first: payer.group_pays_first,
+        metadata: metadata.clone(),
+    }
+}
+
 impl TaskCreditStore for PostgresConversationBilling {
     type Error = String;
 
@@ -964,18 +984,15 @@ impl TaskCreditStore for PostgresConversationBilling {
         payer: &TaskPayer,
         amount: i32,
         metadata: &Map<String, Value>,
-        (idempotency_key, operation_id): (&str, &str),
+        ids @ (_, operation_id): (&str, &str),
     ) -> Result<TaskCharge, Self::Error> {
-        let (decision, reason) = self.reserve_detailed(ReserveRequest {
+        let (decision, reason) = self.reserve_detailed(task_reservation(
             user_id,
-            chat_id: payer.paying_chat(),
-            operation_id: operation_id.to_owned(),
-            reservation_id: idempotency_key.to_owned(),
-            amount: i64::from(amount),
-            creditless_user_hourly_limit: payer.hourly_limit,
-            group_pays_first: payer.group_pays_first,
-            metadata: metadata.clone(),
-        })?;
+            payer,
+            i64::from(amount),
+            metadata,
+            ids,
+        ))?;
         if !decision.authorized {
             self.release_operation_state(operation_id);
         }
@@ -986,6 +1003,18 @@ impl TaskCreditStore for PostgresConversationBilling {
             chat_balance: decision.chat_balance,
             hourly_limit: decision.denial.and_then(ReserveDenial::hourly_limit),
         })
+    }
+
+    fn extend(
+        &mut self,
+        user_id: i64,
+        payer: &TaskPayer,
+        amount: i64,
+        metadata: &Map<String, Value>,
+        ids: (&str, &str),
+    ) -> Result<ReserveDecision, Self::Error> {
+        self.reserve_detailed(task_reservation(user_id, payer, amount, metadata, ids))
+            .map(|(decision, _reason)| decision)
     }
 
     fn record_segment(

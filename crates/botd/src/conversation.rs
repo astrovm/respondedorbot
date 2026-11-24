@@ -1600,7 +1600,6 @@ where
             &self.provider,
             &mut tools,
             &messages,
-            false,
             self.max_tool_rounds,
             |event| {
                 let event = match event {
@@ -2603,13 +2602,13 @@ mod tests {
     }
 
     impl NativeToolRuntime for FakeTools {
-        fn schemas(&self, _task_mode: bool) -> Vec<Value> {
+        fn schemas(&self) -> Vec<Value> {
             self.name
                 .map(|name| vec![json!({"type": "function", "function": {"name": name}})])
                 .unwrap_or_default()
         }
 
-        fn contains(&self, name: &str, _task_mode: bool) -> bool {
+        fn contains(&self, name: &str) -> bool {
             self.name == Some(name)
         }
 

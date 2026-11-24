@@ -58,29 +58,26 @@ native_tools! {
 
 impl NativeTool {
     #[must_use]
-    pub const fn task_allowed(self) -> bool {
-        // A task run can be retried, which would post its files twice.
-        !matches!(
+    pub const fn acts(self) -> bool {
+        // Tools that post to the chat, change tasks or spend credits. A run
+        // that already used one must not use it again when it is retried.
+        matches!(
             self,
-            Self::TaskSet | Self::SendMedia | Self::PageScreenshot | Self::GenerateImage
-        )
-    }
-
-    /// Reads whose result cannot change within one message, so a repeated
-    /// call with the same arguments reuses it. Random picks and anything
-    /// that writes state always run again.
-    #[must_use]
-    pub const fn reusable(self) -> bool {
-        !matches!(
-            self,
-            Self::RandomChoice
-                | Self::TaskSet
+            Self::TaskSet
                 | Self::TaskCancel
                 | Self::CreatePoll
                 | Self::SendMedia
                 | Self::PageScreenshot
                 | Self::GenerateImage
         )
+    }
+
+    /// Reads whose result cannot change within one message, so a repeated
+    /// call with the same arguments reuses it. Random picks and anything
+    /// that acts always run again.
+    #[must_use]
+    pub const fn reusable(self) -> bool {
+        !self.acts() && !matches!(self, Self::RandomChoice)
     }
 
     #[must_use]
@@ -202,20 +199,17 @@ impl<Backend> NativeToolRegistry<Backend> {
 }
 
 impl<Backend: NativeToolBackend> NativeToolRuntime for NativeToolRegistry<Backend> {
-    fn schemas(&self, task_mode: bool) -> Vec<Value> {
+    fn schemas(&self) -> Vec<Value> {
         ALL_TOOLS
             .iter()
             .copied()
             .filter(|tool| self.backend.is_available(*tool))
-            .filter(|tool| !task_mode || tool.task_allowed())
             .map(tool_schema)
             .collect()
     }
 
-    fn contains(&self, name: &str, task_mode: bool) -> bool {
-        NativeTool::from_name(name).is_some_and(|tool| {
-            self.backend.is_available(tool) && (!task_mode || tool.task_allowed())
-        })
+    fn contains(&self, name: &str) -> bool {
+        NativeTool::from_name(name).is_some_and(|tool| self.backend.is_available(tool))
     }
 
     fn execute(
@@ -570,9 +564,9 @@ mod tests {
     }
 
     #[test]
-    fn catalog_preserves_all_python_names_schemas_and_task_restriction() {
+    fn catalog_preserves_all_python_names_schemas_and_which_tools_act() {
         let registry = registry(None);
-        let normal = registry.schemas(false);
+        let normal = registry.schemas();
         let names = normal
             .iter()
             .filter_map(|schema| schema["function"]["name"].as_str())
@@ -607,7 +601,6 @@ mod tests {
             normal[3]["function"]["parameters"]["additionalProperties"],
             false
         );
-        assert_eq!(registry.schemas(true).len(), normal.len() - 4);
         let single_use = ALL_TOOLS
             .iter()
             .filter(|tool| !registry.reusable(tool.name()))
@@ -627,19 +620,31 @@ mod tests {
         );
         assert!(!registry.reusable("unknown"));
         assert_eq!(catalog_schemas(), normal);
-        assert!(!registry.contains("task_set", true));
-        assert!(registry.contains("task_set", false));
-        assert!(!registry.contains("send_media", true));
-        assert!(!registry.contains("page_screenshot", true));
-        assert!(!registry.contains("generate_image", true));
+        assert!(registry.contains("task_set"));
+        let acting = ALL_TOOLS
+            .iter()
+            .filter(|tool| tool.acts())
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            acting,
+            [
+                "task_set",
+                "task_cancel",
+                "create_poll",
+                "send_media",
+                "page_screenshot",
+                "generate_image"
+            ]
+        );
     }
 
     #[test]
     fn availability_and_dispatch_have_one_typed_owner() {
         let mut registry = registry(Some(NativeTool::Weather));
-        assert!(!registry.contains("weather", false));
-        assert!(!registry.contains("unknown", false));
-        assert_eq!(registry.schemas(false).len(), ALL_TOOLS.len() - 1);
+        assert!(!registry.contains("weather"));
+        assert!(!registry.contains("unknown"));
+        assert_eq!(registry.schemas().len(), ALL_TOOLS.len() - 1);
         let result = registry.execute("calculate", &json!({"expression": "2+2"}), "call-1");
         assert_eq!(result.output, "calculate");
         assert_eq!(registry.backend().calls[0].0, NativeTool::Calculate);
@@ -674,12 +679,12 @@ mod tests {
     fn standard_backend_keeps_calculation_pure_and_other_io_behind_ports() {
         let backend = StandardNativeToolBackend::new(Ports { calls: Vec::new() }, Locale::En);
         let mut registry = NativeToolRegistry::new(backend, Locale::En);
-        let schemas = registry.schemas(false);
+        let schemas = registry.schemas();
         assert_eq!(schemas.len(), 3);
-        assert!(registry.contains("calculate", false));
-        assert!(registry.contains("weather", false));
-        assert!(registry.contains("bot_capabilities", false));
-        assert!(!registry.contains("web_fetch", false));
+        assert!(registry.contains("calculate"));
+        assert!(registry.contains("weather"));
+        assert!(registry.contains("bot_capabilities"));
+        assert!(!registry.contains("web_fetch"));
 
         assert_eq!(
             registry
