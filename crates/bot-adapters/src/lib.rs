@@ -25,6 +25,7 @@ pub mod media_provider;
 pub mod opennode;
 pub mod openrouter_chat;
 pub mod openrouter_generation;
+pub mod openrouter_image;
 pub mod polymarket;
 pub mod postgres_connection;
 pub mod postgres_pool;

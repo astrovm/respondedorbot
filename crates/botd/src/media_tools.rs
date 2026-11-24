@@ -44,6 +44,24 @@ impl MediaBudget {
     fn refund(&self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
+
+    /// True when the reply has no sends left, so a tool can stop before it
+    /// pays for a file it could not send.
+    pub(crate) fn spent(&self) -> bool {
+        self.0.load(Ordering::Relaxed) >= MAX_MEDIA_PER_REPLY
+    }
+}
+
+/// What a media tool says when the reply has sent all the files it may.
+pub(crate) fn budget_spent_message(locale: Locale) -> String {
+    match locale {
+        Locale::Es => {
+            format!("ya mandé {MAX_MEDIA_PER_REPLY} archivos en esta respuesta, no mando más")
+        }
+        Locale::En => {
+            format!("already sent {MAX_MEDIA_PER_REPLY} files in this reply; no more can be sent")
+        }
+    }
 }
 
 pub trait MediaFetcher {
@@ -169,7 +187,17 @@ impl<Fetcher: MediaFetcher, Sender: MediaSender> MediaTool<Fetcher, Sender> {
             .map(|url| url.path().to_owned())
             .unwrap_or_default();
         match classify_media(&file.content_type, &file.body, &path) {
-            Ok(media) => self.deliver(file.body.into(), media, caption),
+            Ok(media) => deliver(
+                &mut self.sender,
+                self.context,
+                &self.budget,
+                Delivery {
+                    tool: "send_media",
+                    file: file.body.into(),
+                    media,
+                    caption,
+                },
+            ),
             Err(rejection) => ToolExecutionResult::output(rejection_message(locale, rejection)),
         }
     }
@@ -191,7 +219,17 @@ impl<Fetcher: MediaFetcher, Sender: MediaSender> MediaTool<Fetcher, Sender> {
             Ok(image) => {
                 let media = classify_media("image/jpeg", &image, "/screenshot.jpg");
                 match media {
-                    Ok(media) => self.deliver(image.into(), media, caption),
+                    Ok(media) => deliver(
+                        &mut self.sender,
+                        self.context,
+                        &self.budget,
+                        Delivery {
+                            tool: "page_screenshot",
+                            file: image.into(),
+                            media,
+                            caption,
+                        },
+                    ),
                     Err(rejection) => {
                         ToolExecutionResult::output(rejection_message(locale, rejection))
                     }
@@ -206,114 +244,124 @@ impl<Fetcher: MediaFetcher, Sender: MediaSender> MediaTool<Fetcher, Sender> {
             ),
         }
     }
+}
 
-    /// Sends the file as its kind. Telegram refuses some photos and videos
-    /// (odd sizes or encodings) that it takes as plain documents, so a
-    /// refused media file is sent again as a document.
-    fn deliver(&mut self, file: Arc<[u8]>, media: MediaFile, caption: &str) -> ToolExecutionResult {
-        let locale = self.context.locale;
-        if !self.budget.take() {
-            return ToolExecutionResult::output(match locale {
-                Locale::Es => format!(
-                    "ya mandé {MAX_MEDIA_PER_REPLY} archivos en esta respuesta, no mando más"
-                ),
-                Locale::En => format!(
-                    "already sent {MAX_MEDIA_PER_REPLY} files in this reply; no more can be sent"
-                ),
-            });
-        }
-        let mut kind = media.kind;
-        let mut diagnostics = Vec::new();
-        loop {
-            let action = TelegramAction::SendMedia {
-                chat_id: ChatId(self.context.chat_id),
-                kind,
-                file: Arc::clone(&file),
-                file_name: media.file_name.clone(),
-                content_type: media.content_type.clone(),
-                reply_to_message_id: self.context.reply_to_message_id.map(MessageId),
-                caption: caption.to_owned(),
-            };
-            match self.sender.send(action) {
-                Ok(ActionOutcome::Completed { .. }) => {
-                    let mut result = ToolExecutionResult::with_diagnostics(
-                        sent_message(locale, kind),
-                        diagnostics,
-                    );
-                    result.failure_fallback = Some(sent_fallback(locale, kind).to_owned());
-                    return result;
-                }
-                Ok(ActionOutcome::Failed {
-                    status_code: Some(400),
-                    description,
-                }) if kind != MediaKind::Document => {
-                    diagnostics.push(format!(
-                        "{} refused, sending as a document: {description}",
-                        kind.method()
-                    ));
-                    kind = MediaKind::Document;
-                }
-                // Telegram may have posted the file before the reply went
-                // wrong, so the slot stays used and the model must not retry.
-                reply @ (Ok(
-                    ActionOutcome::TransportFailed(_)
-                    | ActionOutcome::Failed {
-                        status_code: Some(500..=599),
-                        ..
+/// One file for [`deliver`], and the tool that sends it.
+pub(crate) struct Delivery<'a> {
+    pub tool: &'a str,
+    pub file: Arc<[u8]>,
+    pub media: MediaFile,
+    pub caption: &'a str,
+}
+
+/// Sends the file as its kind. Telegram refuses some photos and videos
+/// (odd sizes or encodings) that it takes as plain documents, so a
+/// refused media file is sent again as a document.
+pub(crate) fn deliver<Sender: MediaSender>(
+    sender: &mut Sender,
+    context: MediaToolContext,
+    budget: &MediaBudget,
+    delivery: Delivery<'_>,
+) -> ToolExecutionResult {
+    let Delivery {
+        tool,
+        file,
+        media,
+        caption,
+    } = delivery;
+    let locale = context.locale;
+    if !budget.take() {
+        return ToolExecutionResult::output(budget_spent_message(locale));
+    }
+    let mut kind = media.kind;
+    let mut diagnostics = Vec::new();
+    loop {
+        let action = TelegramAction::SendMedia {
+            chat_id: ChatId(context.chat_id),
+            kind,
+            file: Arc::clone(&file),
+            file_name: media.file_name.clone(),
+            content_type: media.content_type.clone(),
+            reply_to_message_id: context.reply_to_message_id.map(MessageId),
+            caption: caption.to_owned(),
+        };
+        match sender.send(action) {
+            Ok(ActionOutcome::Completed { .. }) => {
+                let mut result =
+                    ToolExecutionResult::with_diagnostics(sent_message(locale, kind), diagnostics);
+                result.failure_fallback = Some(sent_fallback(locale, kind).to_owned());
+                return result;
+            }
+            Ok(ActionOutcome::Failed {
+                status_code: Some(400),
+                description,
+            }) if kind != MediaKind::Document => {
+                diagnostics.push(format!(
+                    "{} refused, sending as a document: {description}",
+                    kind.method()
+                ));
+                kind = MediaKind::Document;
+            }
+            // Telegram may have posted the file before the reply went
+            // wrong, so the slot stays used and the model must not retry.
+            reply @ (Ok(
+                ActionOutcome::TransportFailed(_)
+                | ActionOutcome::Failed {
+                    status_code: Some(500..=599),
+                    ..
+                },
+            )
+            | Err(ActionError::InvalidResponse)) => {
+                diagnostics.push(format!("{} result unknown: {reply:?}", kind.method()));
+                return ToolExecutionResult::with_diagnostics(
+                    match locale {
+                        Locale::Es => {
+                            "no sé si el archivo llegó al chat; no lo mandes de nuevo sin preguntar"
+                        }
+                        Locale::En => {
+                            "I do not know if the file reached the chat; do not send it again without asking"
+                        }
                     },
-                )
-                | Err(ActionError::InvalidResponse)) => {
-                    diagnostics.push(format!("{} result unknown: {reply:?}", kind.method()));
-                    return ToolExecutionResult::with_diagnostics(
-                        match locale {
-                            Locale::Es => {
-                                "no sé si el archivo llegó al chat; no lo mandes de nuevo sin preguntar"
-                            }
-                            Locale::En => {
-                                "I do not know if the file reached the chat; do not send it again without asking"
-                            }
-                        },
-                        diagnostics,
-                    );
-                }
-                Ok(ActionOutcome::Failed { description, .. }) => {
-                    self.budget.refund();
-                    return ToolExecutionResult::with_diagnostics(
-                        match locale {
-                            Locale::Es => format!("Telegram no aceptó el archivo: {description}"),
-                            Locale::En => {
-                                format!("Telegram did not accept the file: {description}")
-                            }
-                        },
-                        diagnostics,
-                    );
-                }
-                Ok(ActionOutcome::RateLimited {
-                    retry_after_seconds,
-                }) => {
-                    self.budget.refund();
-                    diagnostics.push(format!(
-                        "{} rate limited; retry after {retry_after_seconds:?} seconds",
-                        kind.method()
-                    ));
-                    return ToolExecutionResult::with_diagnostics(
-                        match locale {
-                            Locale::Es => {
-                                "Telegram está limitando los envíos; no mandes más archivos ahora"
-                            }
-                            Locale::En => "Telegram is limiting sends; do not send more files now",
-                        },
-                        diagnostics,
-                    );
-                }
-                Err(error) => {
-                    self.budget.refund();
-                    diagnostics.push(format!("{} failed: {error}", kind.method()));
-                    return ToolExecutionResult::with_diagnostics(
-                        tool_output::failed(locale, "send_media"),
-                        diagnostics,
-                    );
-                }
+                    diagnostics,
+                );
+            }
+            Ok(ActionOutcome::Failed { description, .. }) => {
+                budget.refund();
+                return ToolExecutionResult::with_diagnostics(
+                    match locale {
+                        Locale::Es => format!("Telegram no aceptó el archivo: {description}"),
+                        Locale::En => {
+                            format!("Telegram did not accept the file: {description}")
+                        }
+                    },
+                    diagnostics,
+                );
+            }
+            Ok(ActionOutcome::RateLimited {
+                retry_after_seconds,
+            }) => {
+                budget.refund();
+                diagnostics.push(format!(
+                    "{} rate limited; retry after {retry_after_seconds:?} seconds",
+                    kind.method()
+                ));
+                return ToolExecutionResult::with_diagnostics(
+                    match locale {
+                        Locale::Es => {
+                            "Telegram está limitando los envíos; no mandes más archivos ahora"
+                        }
+                        Locale::En => "Telegram is limiting sends; do not send more files now",
+                    },
+                    diagnostics,
+                );
+            }
+            Err(error) => {
+                budget.refund();
+                diagnostics.push(format!("{} failed: {error}", kind.method()));
+                return ToolExecutionResult::with_diagnostics(
+                    tool_output::failed(locale, tool),
+                    diagnostics,
+                );
             }
         }
     }
@@ -362,7 +410,7 @@ const fn sent_fallback(locale: Locale, kind: MediaKind) -> &'static str {
     }
 }
 
-const fn rejection_message(locale: Locale, rejection: MediaRejection) -> &'static str {
+pub(crate) const fn rejection_message(locale: Locale, rejection: MediaRejection) -> &'static str {
     match (locale, rejection) {
         (Locale::Es, MediaRejection::WebPage) => {
             "ese link es una página sin imagen principal; usá page_screenshot para mostrarla o buscá el link directo al archivo"
@@ -798,7 +846,7 @@ mod tests {
             Some(capturer),
             Sender::default(),
             context,
-            budget,
+            budget.clone(),
         );
         // A failed send does not use up the budget.
         links
@@ -807,6 +855,7 @@ mod tests {
             .push_back(Err(ActionError::InvalidAction));
         links.execute(send_media("https://cdn.example/a.jpg", ""), "call");
         for _ in 0..5 {
+            assert!(!budget.spent());
             links.execute(send_media("https://cdn.example/a.jpg", ""), "call");
             screenshots.execute(
                 ExternalToolRequest::PageScreenshot {
@@ -817,6 +866,7 @@ mod tests {
                 "call",
             );
         }
+        assert!(budget.spent());
         let refused = links.execute(send_media("https://cdn.example/a.jpg", ""), "call");
         assert_eq!(
             refused.output,

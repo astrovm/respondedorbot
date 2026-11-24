@@ -52,6 +52,7 @@ native_tools! {
     GetPolls => "get_polls",
     SendMedia => "send_media",
     PageScreenshot => "page_screenshot",
+    GenerateImage => "generate_image",
     BotCapabilities => "bot_capabilities",
 }
 
@@ -59,7 +60,10 @@ impl NativeTool {
     #[must_use]
     pub const fn task_allowed(self) -> bool {
         // A task run can be retried, which would post its files twice.
-        !matches!(self, Self::TaskSet | Self::SendMedia | Self::PageScreenshot)
+        !matches!(
+            self,
+            Self::TaskSet | Self::SendMedia | Self::PageScreenshot | Self::GenerateImage
+        )
     }
 
     /// Reads whose result cannot change within one message, so a repeated
@@ -75,6 +79,7 @@ impl NativeTool {
                 | Self::CreatePoll
                 | Self::SendMedia
                 | Self::PageScreenshot
+                | Self::GenerateImage
         )
     }
 
@@ -412,6 +417,21 @@ pub(crate) fn tool_schema(tool: NativeTool) -> Value {
                 "additionalProperties": false
             }),
         ),
+        NativeTool::GenerateImage => (
+            "Make a new picture from a text description and send it to the current chat, or change the photo in the user's message or the message they replied to. Use it only when someone asks you to draw, create, generate or edit an image; to show something that exists, find it with web_search and send it with send_media. Each picture costs the user credits: fast about 7 credits (3.5 Stars), best up to about 80 credits (40 Stars). Use best only when they ask for top quality or fast did not do the job. Write the prompt in English with the subject, style, setting and any text to show. It takes from a few seconds to a minute. After sending, reply briefly.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "maxLength": 4000, "description": "What the picture shows, or what to change in the photo."},
+                    "quality": {"type": "string", "enum": ["fast", "best"], "default": "fast", "description": "fast: Seedream 5.5, good and cheap. best: GPT Image 2.6, top quality and text, costs up to 20 times more."},
+                    "aspect_ratio": {"type": "string", "enum": ["1:1", "4:3", "3:4", "16:9", "9:16"], "default": "1:1"},
+                    "edit_photo": {"type": "boolean", "default": false, "description": "Start from the photo in the user's message or the message they replied to."},
+                    "caption": {"type": "string", "maxLength": 1024, "description": "Optional short text shown under the picture."}
+                },
+                "required": ["prompt"],
+                "additionalProperties": false
+            }),
+        ),
         NativeTool::BotCapabilities => (
             "Get the authoritative list of bot features and commands. Use when a user asks what the bot can do or which command to use.",
             empty_parameters(),
@@ -578,6 +598,7 @@ mod tests {
                 "get_polls",
                 "send_media",
                 "page_screenshot",
+                "generate_image",
                 "bot_capabilities"
             ]
         );
@@ -586,7 +607,7 @@ mod tests {
             normal[3]["function"]["parameters"]["additionalProperties"],
             false
         );
-        assert_eq!(registry.schemas(true).len(), normal.len() - 3);
+        assert_eq!(registry.schemas(true).len(), normal.len() - 4);
         let single_use = ALL_TOOLS
             .iter()
             .filter(|tool| !registry.reusable(tool.name()))
@@ -600,7 +621,8 @@ mod tests {
                 "random_choice",
                 "create_poll",
                 "send_media",
-                "page_screenshot"
+                "page_screenshot",
+                "generate_image"
             ]
         );
         assert!(!registry.reusable("unknown"));
@@ -609,6 +631,7 @@ mod tests {
         assert!(registry.contains("task_set", false));
         assert!(!registry.contains("send_media", true));
         assert!(!registry.contains("page_screenshot", true));
+        assert!(!registry.contains("generate_image", true));
     }
 
     #[test]

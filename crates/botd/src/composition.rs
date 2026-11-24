@@ -116,6 +116,7 @@ use crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
 use crate::compaction_scheduler::production_compaction_scheduler;
 use crate::conversation::ConversationToolFactory;
 use crate::conversation::NativeConversation;
+use crate::conversation::ReplyCredits;
 use crate::conversation_adapters::{PostgresConversationBilling, RedisConversationState};
 use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BcraLoad, BcraSource,
@@ -132,6 +133,7 @@ use crate::dispatcher::{
 use crate::error_text;
 use crate::firecrawl_tool::FirecrawlTool;
 use crate::hacker_news_tool::HackerNewsTool;
+use crate::image_tool::{ImageTool, OpenRouterImageGenerator};
 use crate::lightning_payments::{OpenNodeOptions, ProviderCheckout, opennode_provider};
 use crate::market_tools::{CryptoPricesTool, DollarRatesTool, StockPricesTool, WeatherTool};
 use crate::media::NativeMedia;
@@ -3375,6 +3377,18 @@ pub struct ProductionToolFactory {
     firecrawl_key: Option<String>,
     openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
     telegram_token: Option<String>,
+    images: Option<ImageGeneration>,
+}
+
+/// The billing a reply and its tools share, so a tool's credit hold joins
+/// the reply's operation and payer.
+pub type SharedBilling = Arc<std::sync::Mutex<PostgresConversationBilling>>;
+
+/// What `generate_image` needs besides the Telegram token.
+pub struct ImageGeneration {
+    pub api_key: String,
+    pub base_url: String,
+    pub billing: SharedBilling,
 }
 
 impl ProductionToolFactory {
@@ -3392,7 +3406,16 @@ impl ProductionToolFactory {
             firecrawl_key,
             openrouter_pricing: None,
             telegram_token: None,
+            images: None,
         }
+    }
+
+    /// Enables `generate_image`. It also needs the Telegram token, to send
+    /// the picture and to download a photo to edit.
+    #[must_use]
+    pub fn with_image_generation(mut self, images: ImageGeneration) -> Self {
+        self.images = Some(images);
+        self
     }
 
     /// Enables `create_poll`, which posts through the Bot API directly.
@@ -3611,16 +3634,44 @@ impl ConversationToolFactory for ProductionToolFactory {
                     )),
                 );
             }
+            let context = MediaToolContext {
+                chat_id: input.chat_id.0,
+                reply_to_message_id: Some(input.message_id.0),
+                locale,
+            };
+            let budget = MediaBudget::default();
             toolbox = media_executors(
                 toolbox,
                 token,
-                MediaToolContext {
-                    chat_id: input.chat_id.0,
-                    reply_to_message_id: Some(input.message_id.0),
-                    locale,
-                },
+                (context, &budget),
                 bot_adapters::browser::shared_renderer(),
             )?;
+            if let Some(images) = &self.images {
+                toolbox = toolbox.with_executor(
+                    NativeTool::GenerateImage,
+                    Box::new(ImageTool::new(
+                        OpenRouterImageGenerator::new(
+                            tool_transport(
+                                "OpenRouter image",
+                                ReqwestOpenRouterTransport::for_images(),
+                            )?,
+                            &images.api_key,
+                            &images.base_url,
+                        ),
+                        (
+                            TelegramMediaFiles::new(
+                                tool_transport("Telegram file", ReqwestTelegramTransport::new())?,
+                                token,
+                            ),
+                            input.photo_file_id.clone(),
+                        ),
+                        ReplyCredits::new(Arc::clone(&images.billing), input),
+                        tool_transport("Telegram media", TelegramMediaSender::new(token))?,
+                        context,
+                        budget,
+                    )),
+                );
+            }
         }
 
         if let Some(api_key) = self.firecrawl_key.clone().filter(|key| !key.is_empty()) {
@@ -3663,14 +3714,14 @@ impl crate::native_ai::TaskToolFactory for ProductionToolFactory {
 }
 
 /// Registers `send_media`, and `page_screenshot` when a browser is
-/// available. Both send to the chat in `context`.
+/// available. Both send to the chat in `context` and count against the
+/// reply's `budget`.
 fn media_executors(
     toolbox: ExternalToolbox,
     token: &str,
-    context: MediaToolContext,
+    (context, budget): (MediaToolContext, &MediaBudget),
     capturer: Option<Arc<bot_adapters::browser::ChromiumRenderer>>,
 ) -> Result<ExternalToolbox, String> {
-    let budget = MediaBudget::default();
     let tool = |capturer: Option<SharedCapturer>| -> Result<Box<dyn ExternalToolExecutor>, String> {
         Ok(Box::new(MediaTool::new(
             PublicMediaFetcher::new(
@@ -3970,6 +4021,11 @@ fn build_native_dispatcher_with_stream_delivery(
             let creditless_cap = RedisCreditlessCap::new(options.redis_endpoint)
                 .map_err(error_text)
                 .map_err(CompositionError::ConversationBillingPolicy)?;
+            let billing: SharedBilling = Arc::new(std::sync::Mutex::new(
+                PostgresConversationBilling::new(options.database_url)
+                    .with_creditless_cap(creditless_cap)
+                    .with_active_operations(options.active_operations.clone()),
+            ));
             let mut conversation = NativeConversation::new(
                 provider,
                 ProductionToolFactory::new(
@@ -3979,11 +4035,14 @@ fn build_native_dispatcher_with_stream_delivery(
                     conversation_firecrawl_key,
                 )
                 .with_openrouter_pricing(Arc::clone(&openrouter_pricing))
-                .with_telegram_token(options.token),
+                .with_telegram_token(options.token)
+                .with_image_generation(ImageGeneration {
+                    api_key: api_key.clone(),
+                    base_url: openrouter_base_url.clone(),
+                    billing: Arc::clone(&billing),
+                }),
                 conversation_state,
-                PostgresConversationBilling::new(options.database_url)
-                    .with_creditless_cap(creditless_cap)
-                    .with_active_operations(options.active_operations.clone()),
+                billing,
                 &system_prompt,
                 crate::native_ai::PRIMARY_CHAT_MODEL,
                 DEFAULT_MAX_TOOL_ROUNDS,
@@ -7891,7 +7950,14 @@ mod tests {
             Some("synthetic-market-key".to_owned()),
             Some("synthetic-search-key".to_owned()),
         )
-        .with_telegram_token("synthetic-token");
+        .with_telegram_token("synthetic-token")
+        .with_image_generation(super::ImageGeneration {
+            api_key: "synthetic-openrouter-key".to_owned(),
+            base_url: "https://openrouter.test/api/v1".to_owned(),
+            billing: Arc::new(std::sync::Mutex::new(
+                crate::conversation_adapters::PostgresConversationBilling::new(&database_url),
+            )),
+        });
         let input = AiConversationInput {
             chat_id: ChatId(-42),
             message_id: MessageId(7),
@@ -7964,6 +8030,12 @@ mod tests {
             tools
                 .as_ref()
                 .is_ok_and(|tools| tools.contains("create_poll", false))
+        );
+        // Without the OpenRouter key and billing, no picture can be made.
+        assert!(
+            tools
+                .as_ref()
+                .is_ok_and(|tools| !tools.contains("generate_image", false))
         );
         assert!(tools.is_ok_and(|tools| tools.contains("get_polls", true)));
         let mut no_token = super::ProductionToolFactory::new(&endpoint, &database_url, None, None)
@@ -10615,10 +10687,11 @@ mod tests {
             reply_to_message_id: None,
             locale: Locale::En,
         };
+        let budget = super::MediaBudget::default();
         let without = super::media_executors(
             super::ExternalToolbox::new(Locale::En),
             "synthetic-token",
-            context,
+            (context, &budget),
             None,
         )?;
         assert!(without.is_available(super::NativeTool::SendMedia));
@@ -10626,7 +10699,7 @@ mod tests {
         let with = super::media_executors(
             super::ExternalToolbox::new(Locale::En),
             "synthetic-token",
-            context,
+            (context, &budget),
             bot_adapters::browser::shared_renderer(),
         )?;
         assert!(with.is_available(super::NativeTool::PageScreenshot));

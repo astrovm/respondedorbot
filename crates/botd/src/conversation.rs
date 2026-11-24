@@ -1,7 +1,7 @@
 //! Native foreground AI conversation transaction.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use bot_adapters::openrouter_chat::OpenRouterPricingCache;
 use bot_core::ai_pricing::calculate_billing_for_segments;
@@ -172,6 +172,97 @@ pub trait ConversationBilling {
 
     /// Returns `Ok(None)` when balances cannot be read.
     fn personal_balance(&mut self, user_id: i64) -> Result<Option<i64>, String>;
+}
+
+/// One billing shared by the reply and the tools it runs, so a tool holds
+/// credits under the reply's operation with the payer the reply chose.
+impl<Billing: ConversationBilling> ConversationBilling for Arc<Mutex<Billing>> {
+    fn reserve(&mut self, request: ReserveRequest) -> Result<ReserveDecision, String> {
+        self.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reserve(request)
+    }
+
+    fn record_segment(&mut self, request: ProviderSegmentRequest) -> Result<(), String> {
+        self.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .record_segment(request)
+    }
+
+    fn settle(&mut self, request: SettlementRequest) -> Result<(), String> {
+        self.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .settle(request)
+    }
+
+    fn abort_operation(&mut self, operation_id: &str) -> Result<(), String> {
+        self.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .abort_operation(operation_id)
+    }
+
+    fn release_operation(&mut self, operation_id: &str) {
+        self.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .release_operation(operation_id);
+    }
+
+    fn personal_balance(&mut self, user_id: i64) -> Result<Option<i64>, String> {
+        self.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .personal_balance(user_id)
+    }
+}
+
+/// Holds credits for a tool's cost under the reply's operation, like the
+/// reply's own context extension. The reply's settlement then charges what
+/// the tool really cost and gives back the rest.
+pub struct ReplyCredits<Billing> {
+    billing: Billing,
+    input: AiConversationInput,
+    holds: usize,
+}
+
+impl<Billing> ReplyCredits<Billing> {
+    #[must_use]
+    pub fn new(billing: Billing, input: &AiConversationInput) -> Self {
+        Self {
+            billing,
+            input: input.clone(),
+            holds: 0,
+        }
+    }
+}
+
+/// Holds credits for a tool's cost before the tool spends them.
+pub trait CreditHold {
+    /// Holds `amount` credit units for `kind`, or says why it could not.
+    fn hold(&mut self, kind: &str, amount: i64) -> Result<ReserveDecision, String>;
+}
+
+impl<Billing: ConversationBilling> CreditHold for ReplyCredits<Billing> {
+    fn hold(&mut self, kind: &str, amount: i64) -> Result<ReserveDecision, String> {
+        self.holds += 1;
+        let operation_id = operation_id(&self.input);
+        let metadata = Map::from_iter([
+            ("operation_id".to_owned(), json!(operation_id)),
+            ("message_id".to_owned(), json!(self.input.message_id.0)),
+            ("origin_chat_id".to_owned(), json!(self.input.chat_id.0)),
+            ("usage_tag".to_owned(), json!(kind)),
+            ("reserved_credit_units".to_owned(), json!(amount)),
+            ("credit_scale".to_owned(), json!(100)),
+        ]);
+        self.billing.reserve(ReserveRequest {
+            user_id: self.input.sender_id.0,
+            chat_id: group_chat_id(&self.input),
+            reservation_id: format!("{operation_id}:{kind}:{}", self.holds),
+            operation_id,
+            amount,
+            creditless_user_hourly_limit: self.input.creditless_limit.hourly(),
+            group_pays_first: self.input.group_pays_first,
+            metadata,
+        })
+    }
 }
 
 pub trait ConversationToolFactory {
@@ -2985,6 +3076,65 @@ mod tests {
             link_context: None,
             link_image: LinkImage::None,
         }
+    }
+
+    #[test]
+    fn tools_hold_credits_under_the_reply_through_a_shared_billing() -> Result<(), String> {
+        let shared = Arc::new(Mutex::new(Billing {
+            personal_balance: Some(5),
+            ..Billing::default()
+        }));
+        let mut group = input();
+        group.chat_id = ChatId(-100);
+        group.chat_type = "supergroup".to_owned();
+        group.group_pays_first = true;
+        let mut credits = ReplyCredits::new(Arc::clone(&shared), &group);
+        assert!(credits.hold("image_generation", 1_000)?.authorized);
+        credits.hold("image_generation", 20)?;
+
+        let mut handle = Arc::clone(&shared);
+        handle.record_segment(ProviderSegmentRequest {
+            user_id: 88,
+            chat_id: Some(-100),
+            operation_id: "op".to_owned(),
+            segment_id: "segment".to_owned(),
+            segment: json!({}),
+        })?;
+        handle.settle(SettlementRequest {
+            user_id: 88,
+            chat_id: Some(-100),
+            operation_id: "op".to_owned(),
+            actual_credit_units: 3,
+            delivered: true,
+            reason: "done".to_owned(),
+            billing_segments: Vec::new(),
+        })?;
+        handle.abort_operation("aborted")?;
+        handle.release_operation("released");
+        assert_eq!(handle.personal_balance(88)?, Some(5));
+
+        let billing = shared.lock().map_err(|error| error.to_string())?;
+        let first = &billing.reserves[0];
+        assert_eq!(first.user_id, 88);
+        assert_eq!(first.chat_id, Some(-100));
+        assert_eq!(first.operation_id, "ai:-100:7:88");
+        assert_eq!(first.reservation_id, "ai:-100:7:88:image_generation:1");
+        assert_eq!(first.amount, 1_000);
+        assert_eq!(first.creditless_user_hourly_limit, 5);
+        assert!(first.group_pays_first);
+        assert_eq!(first.metadata["usage_tag"], "image_generation");
+        assert_eq!(first.metadata["reserved_credit_units"], 1_000);
+        assert_eq!(first.metadata["origin_chat_id"], -100);
+        assert_eq!(first.metadata["message_id"], 7);
+        assert_eq!(first.metadata["credit_scale"], 100);
+        assert_eq!(
+            billing.reserves[1].reservation_id,
+            "ai:-100:7:88:image_generation:2"
+        );
+        assert_eq!(billing.segments.len(), 1);
+        assert_eq!(billing.settlements.len(), 1);
+        assert_eq!(billing.released_operations, ["aborted", "released"]);
+        Ok(())
     }
 
     #[test]
