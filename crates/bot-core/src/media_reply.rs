@@ -62,37 +62,21 @@ pub enum MediaRejection {
 
 /// A known format: its content type, its usual extensions (the first is the
 /// one added to a name without one) and how Telegram shows it.
-struct Format {
-    content_type: &'static str,
-    extensions: &'static [&'static str],
-    kind: MediaKind,
-}
+struct Format(&'static str, &'static [&'static str], MediaKind);
 
-const JPEG: Format = format("image/jpeg", &["jpg", "jpeg"], MediaKind::Photo);
-const PNG: Format = format("image/png", &["png"], MediaKind::Photo);
-const WEBP: Format = format("image/webp", &["webp"], MediaKind::Photo);
-const GIF: Format = format("image/gif", &["gif"], MediaKind::Animation);
-const MP4: Format = format("video/mp4", &["mp4", "m4v"], MediaKind::Video);
-const QUICKTIME: Format = format("video/quicktime", &["mov"], MediaKind::Document);
-const M4A: Format = format("audio/mp4", &["m4a"], MediaKind::Audio);
-const HEIC: Format = format("image/heic", &["heic"], MediaKind::Document);
-const AVIF: Format = format("image/avif", &["avif"], MediaKind::Document);
-const WEBM: Format = format("video/webm", &["webm", "mkv"], MediaKind::Document);
-const MP3: Format = format("audio/mpeg", &["mp3"], MediaKind::Audio);
-const OGG: Format = format("audio/ogg", &["ogg", "oga", "opus"], MediaKind::Document);
-const PDF: Format = format("application/pdf", &["pdf"], MediaKind::Document);
-
-const fn format(
-    content_type: &'static str,
-    extensions: &'static [&'static str],
-    kind: MediaKind,
-) -> Format {
-    Format {
-        content_type,
-        extensions,
-        kind,
-    }
-}
+const JPEG: Format = Format("image/jpeg", &["jpg", "jpeg"], MediaKind::Photo);
+const PNG: Format = Format("image/png", &["png"], MediaKind::Photo);
+const WEBP: Format = Format("image/webp", &["webp"], MediaKind::Photo);
+const GIF: Format = Format("image/gif", &["gif"], MediaKind::Animation);
+const MP4: Format = Format("video/mp4", &["mp4", "m4v"], MediaKind::Video);
+const QUICKTIME: Format = Format("video/quicktime", &["mov"], MediaKind::Document);
+const M4A: Format = Format("audio/mp4", &["m4a"], MediaKind::Audio);
+const HEIC: Format = Format("image/heic", &["heic"], MediaKind::Document);
+const AVIF: Format = Format("image/avif", &["avif"], MediaKind::Document);
+const WEBM: Format = Format("video/webm", &["webm", "mkv"], MediaKind::Document);
+const MP3: Format = Format("audio/mpeg", &["mp3"], MediaKind::Audio);
+const OGG: Format = Format("audio/ogg", &["ogg", "oga", "opus"], MediaKind::Document);
+const PDF: Format = Format("application/pdf", &["pdf"], MediaKind::Document);
 
 /// Decides how to send `body`, which was served as `content_type` from a URL
 /// whose path is `url_path`.
@@ -128,15 +112,15 @@ pub fn classify_media(
             file_name: file_name(url_path, &[]),
         });
     };
-    let kind = if format.kind == MediaKind::Photo && body.len() > PHOTO_MAX_BYTES {
+    let kind = if format.2 == MediaKind::Photo && body.len() > PHOTO_MAX_BYTES {
         MediaKind::Document
     } else {
-        format.kind
+        format.2
     };
     Ok(MediaFile {
         kind,
-        content_type: format.content_type.to_owned(),
-        file_name: file_name(url_path, format.extensions),
+        content_type: format.0.to_owned(),
+        file_name: file_name(url_path, format.1),
     })
 }
 

@@ -454,9 +454,10 @@ mod tests {
 
     impl PageCapturer for Capturer {
         fn screenshot(&self, url: &str, full_page: bool) -> Result<Vec<u8>, RenderError> {
-            if let Ok(mut calls) = self.calls.lock() {
-                calls.push((url.to_owned(), full_page));
-            }
+            let _ = self
+                .calls
+                .lock()
+                .map(|mut calls| calls.push((url.to_owned(), full_page)));
             self.reply.clone()
         }
     }
@@ -831,6 +832,10 @@ mod tests {
         };
         let result = tool.execute(request(true), "call");
         assert!(result.output.starts_with("Sent the image to the chat."));
+        // Only file sends are listed.
+        tool.sender
+            .sent
+            .push(TelegramAction::SendTyping { chat_id: ChatId(1) });
         assert_eq!(
             sent_kinds(&tool),
             [(
