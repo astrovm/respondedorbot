@@ -168,7 +168,7 @@ impl<Fetcher: MediaFetcher, Sender: MediaSender> MediaTool<Fetcher, Sender> {
             Ok(file) => file,
             Err(error) => {
                 let detail = match &error {
-                    PublicFetchError::Blocked { .. } => None,
+                    PublicFetchError::Blocked { .. } | PublicFetchError::Unresolved { .. } => None,
                     PublicFetchError::Request { detail, .. } => Some(detail.as_str()),
                 };
                 return ToolExecutionResult::with_diagnostics(

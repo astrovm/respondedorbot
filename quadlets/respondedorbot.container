@@ -13,6 +13,10 @@ EnvironmentFile=%h/secrets/app.env
 Environment=REDIS_HOST=respondedorbot-redis
 Environment=REDIS_PORT=6379
 Network=respondedorbot.network
+# Public DNS for the bot's own lookups. The host's resolver (Quad9 through
+# Tailscale) filters new domains, so the bot saw real sites as missing.
+DNS=1.1.1.1
+DNS=8.8.8.8
 Volume=%h/workspace:/app/workspace:ro
 StopTimeout=600
 
