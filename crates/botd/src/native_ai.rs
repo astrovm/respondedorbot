@@ -2469,6 +2469,34 @@ mod tests {
     }
 
     #[test]
+    fn tool_calls_in_the_answer_round_are_not_run() {
+        let rounds = crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
+        let mut provider = OpenRouterTaskProvider::new(
+            Transport {
+                requests: RefCell::new(Vec::new()),
+                responses: RefCell::new(VecDeque::from(vec![
+                    poll_completion(
+                        json!({"question": "Q", "options": ["same", "SAME"]}),
+                        json!(null),
+                    );
+                    rounds + 1
+                ])),
+            },
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "synthetic/model",
+            "persona",
+        );
+        let reply = provider
+            .complete(&[], &task("en"), "task123:1000")
+            .expect("the answer round ends the loop");
+        assert!(reply.text.is_empty());
+        assert!(reply.poll.is_none());
+        assert_eq!(reply.billing_segments.len(), rounds + 1);
+        assert_eq!(provider.transport.requests.borrow().len(), rounds + 1);
+    }
+
+    #[test]
     fn a_failed_answer_round_returns_every_incurred_usage() {
         let rounds = crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
         let mut provider = OpenRouterTaskProvider::new(
