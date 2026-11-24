@@ -51,13 +51,6 @@ pub enum TaskSchedule {
     },
 }
 
-impl TaskSchedule {
-    #[must_use]
-    pub const fn is_recurring(&self) -> bool {
-        !matches!(self, Self::Once)
-    }
-}
-
 /// Canonical task data after adapter validation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScheduledTask {
