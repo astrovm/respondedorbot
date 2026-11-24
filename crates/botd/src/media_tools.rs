@@ -253,6 +253,29 @@ impl<Fetcher: MediaFetcher, Sender: MediaSender> MediaTool<Fetcher, Sender> {
                     ));
                     kind = MediaKind::Document;
                 }
+                // Telegram may have posted the file before the reply went
+                // wrong, so the slot stays used and the model must not retry.
+                reply @ (Ok(
+                    ActionOutcome::TransportFailed(_)
+                    | ActionOutcome::Failed {
+                        status_code: Some(500..=599),
+                        ..
+                    },
+                )
+                | Err(ActionError::InvalidResponse)) => {
+                    diagnostics.push(format!("{} result unknown: {reply:?}", kind.method()));
+                    return ToolExecutionResult::with_diagnostics(
+                        match locale {
+                            Locale::Es => {
+                                "no sé si el archivo llegó al chat; no lo mandes de nuevo sin preguntar"
+                            }
+                            Locale::En => {
+                                "I do not know if the file reached the chat; do not send it again without asking"
+                            }
+                        },
+                        diagnostics,
+                    );
+                }
                 Ok(ActionOutcome::Failed { description, .. }) => {
                     self.budget.refund();
                     return ToolExecutionResult::with_diagnostics(
@@ -279,23 +302,6 @@ impl<Fetcher: MediaFetcher, Sender: MediaSender> MediaTool<Fetcher, Sender> {
                                 "Telegram está limitando los envíos; no mandes más archivos ahora"
                             }
                             Locale::En => "Telegram is limiting sends; do not send more files now",
-                        },
-                        diagnostics,
-                    );
-                }
-                Ok(ActionOutcome::TransportFailed(kind_of_failure)) => {
-                    diagnostics.push(format!(
-                        "{} transport failed: {kind_of_failure:?}",
-                        kind.method()
-                    ));
-                    return ToolExecutionResult::with_diagnostics(
-                        match locale {
-                            Locale::Es => {
-                                "no sé si el archivo llegó al chat; no lo mandes de nuevo sin preguntar"
-                            }
-                            Locale::En => {
-                                "I do not know if the file reached the chat; do not send it again without asking"
-                            }
                         },
                         diagnostics,
                     );
@@ -634,7 +640,20 @@ mod tests {
                 "I do not know if the file reached the chat; do not send it again without asking",
             ),
             (
+                Ok(ActionOutcome::Failed {
+                    status_code: Some(502),
+                    description: "Bad Gateway".to_owned(),
+                }),
+                Locale::En,
+                "I do not know if the file reached the chat; do not send it again without asking",
+            ),
+            (
                 Err(ActionError::InvalidResponse),
+                Locale::En,
+                "I do not know if the file reached the chat; do not send it again without asking",
+            ),
+            (
+                Err(ActionError::InvalidAction),
                 Locale::En,
                 "tool 'send_media' failed",
             ),
@@ -785,7 +804,7 @@ mod tests {
         links
             .sender
             .replies
-            .push_back(Err(ActionError::InvalidResponse));
+            .push_back(Err(ActionError::InvalidAction));
         links.execute(send_media("https://cdn.example/a.jpg", ""), "call");
         for _ in 0..5 {
             links.execute(send_media("https://cdn.example/a.jpg", ""), "call");

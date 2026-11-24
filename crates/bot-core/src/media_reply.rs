@@ -101,7 +101,8 @@ pub fn classify_media(
         if declared.contains("html") || looks_like_html(body) {
             return Err(MediaRejection::WebPage);
         }
-        let content_type = if declared.contains('/') {
+        // The type goes into the upload's headers, so it must parse there.
+        let content_type = if is_mime_type(&declared) {
             declared
         } else {
             "application/octet-stream".to_owned()
@@ -145,7 +146,7 @@ fn sniff(body: &[u8]) -> Option<Format> {
         })
     } else if starts(b"\x1A\x45\xDF\xA3") {
         Some(WEBM)
-    } else if starts(b"ID3") || matches!(at(0..2), [0xFF, 0xFB | 0xF3 | 0xF2]) {
+    } else if starts(b"ID3") || matches!(at(0..2), [0xFF, 0xFB | 0xFA | 0xF3 | 0xF2]) {
         Some(MP3)
     } else if starts(b"OggS") {
         Some(OGG)
@@ -154,6 +155,18 @@ fn sniff(body: &[u8]) -> Option<Format> {
     } else {
         None
     }
+}
+
+/// A bare `type/subtype` made only of the characters a MIME token allows.
+fn is_mime_type(value: &str) -> bool {
+    value.split_once('/').is_some_and(|(kind, subtype)| {
+        [kind, subtype].iter().all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(&byte))
+        })
+    })
 }
 
 fn looks_like_html(body: &[u8]) -> bool {
@@ -209,7 +222,7 @@ mod tests {
 
     #[test]
     fn the_file_bytes_pick_the_kind_whatever_the_server_says() {
-        let cases: [(&[u8], MediaKind, &str); 15] = [
+        let cases: [(&[u8], MediaKind, &str); 16] = [
             (b"\xFF\xD8\xFF\xE0jpeg", MediaKind::Photo, "image/jpeg"),
             (b"\x89PNG\r\n\x1A\nrest", MediaKind::Photo, "image/png"),
             (b"RIFF\0\0\0\0WEBPVP8 ", MediaKind::Photo, "image/webp"),
@@ -223,6 +236,7 @@ mod tests {
             (b"\x1A\x45\xDF\xA3webm", MediaKind::Document, "video/webm"),
             (b"ID3\x04tags", MediaKind::Audio, "audio/mpeg"),
             (b"\xFF\xFB\x90frame", MediaKind::Audio, "audio/mpeg"),
+            (b"\xFF\xFA\x90frame", MediaKind::Audio, "audio/mpeg"),
             (b"OggS\0rest", MediaKind::Document, "audio/ogg"),
             (b"%PDF-1.7", MediaKind::Document, "application/pdf"),
         ];
@@ -246,6 +260,17 @@ mod tests {
                 "report.csv".to_owned()
             ))
         );
+        for broken in ["application/x-foo bar", "a/b/c", "/plain", "text/", ""] {
+            assert_eq!(
+                classified(broken, b"\0\x01binary", "/"),
+                Ok((
+                    MediaKind::Document,
+                    "application/octet-stream".to_owned(),
+                    "file".to_owned()
+                )),
+                "{broken}"
+            );
+        }
         assert_eq!(
             classified("", b"\0\x01binary", "/"),
             Ok((

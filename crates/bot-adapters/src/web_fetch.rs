@@ -1,7 +1,8 @@
 //! Bounded public-web fetcher for AI tools with redirect-level SSRF checks.
 
 use std::io::Read;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bot_core::locale::Locale;
@@ -17,6 +18,7 @@ use bot_core::media_reply::UPLOAD_MAX_BYTES;
 
 use crate::browser::{PageRenderer, RenderError};
 use crate::http_client::{BROWSER_USER_AGENT, error_chain};
+use crate::public_dns::PublicOnlyDns;
 
 /// News pages often put most of a megabyte of inline scripts before the
 /// article, so the byte cap has to reach past them; `FETCH_MAX_CHARS` still
@@ -86,6 +88,7 @@ impl ReqwestWebFetchTransport {
             Client::builder()
                 .timeout(Duration::from_secs(8))
                 .redirect(Policy::none())
+                .dns_resolver(Arc::new(PublicOnlyDns))
                 .build()
         })
         .map(|client| Self {
@@ -101,6 +104,7 @@ impl ReqwestWebFetchTransport {
         Client::builder()
             .timeout(timeout)
             .redirect(Policy::none())
+            .dns_resolver(Arc::new(PublicOnlyDns))
             .build()
             .map(|client| Self {
                 client,
@@ -118,6 +122,7 @@ impl ReqwestWebFetchTransport {
                 .connect_timeout(Duration::from_secs(8))
                 .timeout(MEDIA_FETCH_TIMEOUT)
                 .redirect(Policy::none())
+                .dns_resolver(Arc::new(PublicOnlyDns))
                 .build()
         })
         .map(|client| Self {
@@ -148,18 +153,27 @@ impl WebFetchTransport for ReqwestWebFetchTransport {
             .get(LOCATION)
             .and_then(|value| value.to_str().ok())
             .map(ToOwned::to_owned);
+        // Only a successful file needs the large cap. Redirects, errors and
+        // pages are read like any page.
+        let max_bytes = if (200..300).contains(&status_code)
+            && !content_type.to_ascii_lowercase().contains("html")
+        {
+            self.max_bytes
+        } else {
+            self.max_bytes.min(FETCH_MAX_BYTES)
+        };
         let mut body = Vec::new();
         response
             .by_ref()
             .take(
-                u64::try_from(self.max_bytes)
+                u64::try_from(max_bytes)
                     .unwrap_or(u64::MAX)
                     .saturating_add(1),
             )
             .read_to_end(&mut body)
             .map_err(|error| WebFetchTransportError::Other(error_chain(&error)))?;
-        let truncated = body.len() > self.max_bytes;
-        body.truncate(self.max_bytes);
+        let truncated = body.len() > max_bytes;
+        body.truncate(max_bytes);
         Ok(WebFetchResponse {
             status_code,
             content_type,
@@ -330,7 +344,8 @@ pub fn fetch_public_media<T: WebFetchTransport, R: HostResolver>(
     let mut followed_page = false;
     loop {
         let response = fetch_public_response(transport, resolver, &mut url, &mut redirect_count)?;
-        if !followed_page && response.content_type.to_ascii_lowercase().contains("html") {
+        let page = response.content_type.to_ascii_lowercase().contains("html");
+        if !followed_page && page {
             let html = String::from_utf8_lossy(&response.body);
             if let Some(image) = PAGE_IMAGE_TAGS
                 .iter()
@@ -343,7 +358,8 @@ pub fn fetch_public_media<T: WebFetchTransport, R: HostResolver>(
                 continue;
             }
         }
-        if response.truncated {
+        // A page is never sent, so a cut-off one only needs to be recognized.
+        if response.truncated && !page {
             return Err(PublicFetchError::Request {
                 url: url.to_string(),
                 detail: "file is over the upload limit".to_owned(),
@@ -916,7 +932,7 @@ fn ensure_public<R: HostResolver>(url: &Url, resolver: &R) -> Result<(), PublicF
     Ok(())
 }
 
-fn is_public_ip(address: IpAddr) -> bool {
+pub(crate) fn is_public_ip(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {
             let [a, b, c, d] = address.octets();
@@ -943,11 +959,21 @@ fn is_public_ip(address: IpAddr) -> bool {
                 || (segments[0] & 0xfe00) == 0xfc00
                 || (segments[0] & 0xffc0) == 0xfe80
                 || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                // NAT64 (64:ff9b::/96, and the local-use 64:ff9b:1::/48) and
+                // 6to4 (2002::/16) reach the IPv4 address inside them.
+                || (segments[0] == 0x64
+                    && segments[1] == 0xff9b
+                    && (segments[2] != 0 || !is_public_ip(embedded_ipv4(segments[6], segments[7]))))
+                || (segments[0] == 0x2002 && !is_public_ip(embedded_ipv4(segments[1], segments[2])))
                 || address
                     .to_ipv4_mapped()
                     .is_some_and(|mapped| !is_public_ip(IpAddr::V4(mapped))))
         }
     }
+}
+
+fn embedded_ipv4(high: u16, low: u16) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::from((u32::from(high) << 16) | u32::from(low)))
 }
 
 pub fn extract_text_from_html(html: &str) -> (Option<String>, String) {
@@ -2088,6 +2114,19 @@ mod tests {
                 url: "ftp://x/a".to_owned(),
             })
         );
+        // A long page with no picture comes back cut, to be turned down as a page.
+        assert_eq!(
+            fetch_public_media(
+                &scripted(vec![Ok(image_response(b"<html>", true, "text/html"))]),
+                &public_resolver(),
+                "https://example.com/long"
+            ),
+            Ok(PublicFile {
+                url: "https://example.com/long".to_owned(),
+                content_type: "text/html".to_owned(),
+                body: b"<html>".to_vec(),
+            })
+        );
         let to_private = scripted(vec![Ok(image_response(
             br#"<meta property="og:image" content="http://127.0.0.1/secret.png">"#,
             false,
@@ -2099,6 +2138,38 @@ mod tests {
                 url: "http://127.0.0.1/secret.png".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn the_media_transport_reads_pages_and_errors_only_up_to_the_page_limit() -> TestResult {
+        for status in ["200 OK", "404 Not Found"] {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let address = listener.local_addr()?;
+            let content_type = if status.starts_with("200") {
+                "text/html"
+            } else {
+                "video/mp4"
+            };
+            let length = FETCH_MAX_BYTES + 32;
+            let server = thread::spawn(move || -> TestResult {
+                let (mut stream, _) = listener.accept()?;
+                let mut request = [0_u8; 4_096];
+                let _ = stream.read(&mut request);
+                let headers = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(headers.as_bytes())?;
+                // The client stops reading at the limit and may close first.
+                let _ = stream.write_all(&vec![b'p'; length]);
+                Ok(())
+            });
+            let response =
+                ReqwestWebFetchTransport::for_media()?.get(&format!("http://{address}/page"))?;
+            assert_eq!(response.body.len(), FETCH_MAX_BYTES, "{status}");
+            assert!(response.truncated);
+            assert!(matches!(server.join(), Ok(Ok(()))));
+        }
+        Ok(())
     }
 
     #[test]
@@ -2411,13 +2482,52 @@ mod tests {
     }
 
     #[test]
-    fn ipv4_mapped_ipv6_addresses_follow_the_ipv4_policy() {
+    fn ipv6_addresses_with_an_ipv4_inside_follow_the_ipv4_policy() -> TestResult {
         assert!(!is_public_ip(IpAddr::V6(
             Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped()
         )));
         assert!(is_public_ip(IpAddr::V6(
             Ipv4Addr::new(93, 184, 216, 34).to_ipv6_mapped()
         )));
+        let cases = [
+            ("64:ff9b::a00:1", false),
+            ("64:ff9b::7f00:1", false),
+            ("64:ff9b::5db8:d822", true),
+            ("64:ff9b:1::5db8:d822", false),
+            ("2002:a9fe:a9fe::1", false),
+            ("2002:5db8:d822::1", true),
+        ];
+        for (address, public) in cases {
+            assert_eq!(
+                is_public_ip(IpAddr::V6(address.parse()?)),
+                public,
+                "{address}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_clients_connect_only_to_public_addresses() -> TestResult {
+        // A name that resolves to a private address passes no check of its
+        // own here, so only the clients' resolver can stop the request.
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let url = format!("http://localhost:{}/", listener.local_addr()?.port());
+        let transports = [
+            ReqwestWebFetchTransport::new()?,
+            ReqwestWebFetchTransport::for_media()?,
+            ReqwestWebFetchTransport::with_timeout(Duration::from_secs(5))?,
+        ];
+        for transport in transports {
+            assert!(transport.get(&url).is_err());
+        }
+        assert!(
+            listener
+                .accept()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        Ok(())
     }
 
     #[test]

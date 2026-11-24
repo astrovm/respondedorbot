@@ -31,6 +31,10 @@ const SCRIPT_TIME_BUDGET: Duration = Duration::from_secs(8);
 const NETWORK_QUIET: Duration = Duration::from_millis(500);
 /// Time kept free before the hard limit to read the page and close Chromium.
 const READ_MARGIN: Duration = Duration::from_secs(3);
+/// Extra time a screenshot keeps free after the page settles, because
+/// encoding a tall page takes seconds (lanacion.com.ar at 1280x8000 used
+/// 17.5 of the 20 s without it).
+const CAPTURE_TIME: Duration = Duration::from_secs(4);
 /// How long a closed Chromium gets to exit before it is stopped.
 const EXIT_GRACE: Duration = Duration::from_secs(3);
 /// The largest DevTools message read. The page's HTML is cut to
@@ -443,13 +447,14 @@ impl<W: Write> DevTools<W> {
     }
 
     /// Loads `url` in a screen-sized tab, waits until it settles or
-    /// `read_by`, and returns a JPEG of it.
+    /// `CAPTURE_TIME` before `read_by`, and returns a JPEG of it.
     fn screenshot(
         &mut self,
         url: &str,
         read_by: Instant,
         full_page: bool,
     ) -> Result<Vec<u8>, DevToolsError> {
+        let read_by = read_by.checked_sub(CAPTURE_TIME).unwrap_or(read_by);
         let session = self.open(url, read_by, Some(screen(SCREENSHOT_HEIGHT)))?;
         let mut height = SCREENSHOT_HEIGHT;
         if full_page {
