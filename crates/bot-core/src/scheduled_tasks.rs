@@ -79,12 +79,13 @@ impl ScheduledTask {
 }
 
 /// Makes `task` due at `now` for a run asked for by hand. After that run the
-/// task goes back to its schedule, so a manual run never moves it.
+/// task goes back to its schedule, so a manual run never moves it. A run that
+/// is already due, or held after a failure, is replaced by this one.
 #[must_use]
 pub fn request_run_now(task: &ScheduledTask, now: i64) -> ScheduledTask {
     let mut task = task.clone();
     task.resume_at = task.scheduled_run_at();
-    task.next_run_at = Some(task.next_run_at.map_or(now, |next| next.min(now)));
+    task.next_run_at = Some(now);
     task
 }
 
@@ -634,9 +635,9 @@ mod tests {
         assert_eq!(requested.resume_at, Some(scheduled));
         assert_eq!(requested.scheduled_run_at(), Some(scheduled));
         assert_eq!(hourly.scheduled_run_at(), Some(scheduled));
-        // A second request keeps the first scheduled run.
+        // A second request runs at its own time and keeps the scheduled run.
         let again = request_run_now(&requested, 8_030);
-        assert_eq!(again.next_run_at, Some(8_000));
+        assert_eq!(again.next_run_at, Some(8_030));
         assert_eq!(again.resume_at, Some(scheduled));
 
         assert_eq!(
@@ -680,9 +681,18 @@ mod tests {
             })
         ));
 
-        // A task that is already due keeps its own run.
+        // A run that is already due, or held after a failure, is replaced,
+        // and the schedule continues on its grid.
         let due = request_run_now(&hourly, 10_050);
-        assert_eq!(due.next_run_at, Some(scheduled));
+        assert_eq!(due.next_run_at, Some(10_050));
+        assert_eq!(due.resume_at, Some(scheduled));
+        assert!(matches!(
+            evaluate_due(&due, 10_051),
+            Ok(DueDecision::Execute {
+                next_run_at: Some(13_600),
+                ..
+            })
+        ));
         let unscheduled = request_run_now(&task(TaskSchedule::Once, None), 8_000);
         assert_eq!(unscheduled.next_run_at, Some(8_000));
         assert_eq!(unscheduled.resume_at, None);

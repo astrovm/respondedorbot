@@ -117,6 +117,39 @@ fn real_redis_scheduler_claims_executes_advances_and_deletes() -> Result<(), Box
         .ok_or("recurring task was not retained")?;
     assert_eq!(recurring.task.next_run_at, now.checked_add(600));
     assert!(recurring.task.last_execution_id.is_some());
+
+    // A run asked for by hand runs on the next step and leaves the schedule
+    // where it was.
+    let manual_id = format!("manual_{}_{}", std::process::id(), suffix);
+    let scheduled = now + 3_000;
+    let manual = document(
+        &manual_id,
+        TaskSchedule::IntervalSeconds { seconds: 3_600 },
+        scheduled,
+    )?;
+    verify.save_task(&manual, 600)?;
+    let requested = verify
+        .request_run_now(&manual_id, &manual.task.chat_id, now, 600)?
+        .ok_or("manual run was not requested")?;
+    assert_eq!(requested.task.resume_at, Some(scheduled));
+    let SchedulerStep::Observed { tasks, failures } = scheduler.step(now)? else {
+        return Err("integration scheduler lost ownership".into());
+    };
+    assert!(failures.is_empty());
+    assert!(tasks.iter().any(|task| task.task_id == manual_id
+        && matches!(&task.observation, TaskObservation::Executed { execution_id }
+            if *execution_id == format!("{manual_id}:{now}"))));
+    let after = verify
+        .load_task(&manual_id)?
+        .ok_or("manual task was not retained")?;
+    assert_eq!(after.task.next_run_at, Some(scheduled));
+    assert_eq!(after.task.resume_at, None);
+    assert!(verify.cancel_task(&manual_id, &manual.task.chat_id)?);
+    assert!(
+        verify
+            .request_run_now(&manual_id, &manual.task.chat_id, now, 600)?
+            .is_none()
+    );
     assert!(scheduler.shutdown()?);
 
     let boundary_id = format!("boundary_{}_{}", std::process::id(), suffix);

@@ -16,8 +16,9 @@ const TASK_EXECUTION_PREFIX: &str = "task:execution:";
 
 const RENEW_LEASE_SCRIPT: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) else return 0 end";
 const UPSERT_TASK_SCRIPT: &str = "redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2]); redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4]); redis.call('EXPIRE', KEYS[2], ARGV[1]); redis.call('SETEX', KEYS[3], ARGV[1], '1'); redis.call('ZADD', KEYS[4], ARGV[3], ARGV[4]); return 1";
-/// The upsert above, done only while the stored task is still `ARGV[5]`.
-const REPLACE_TASK_SCRIPT: &str = "if redis.call('GET', KEYS[1]) ~= ARGV[5] then return 0 end; redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2]); redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4]); redis.call('EXPIRE', KEYS[2], ARGV[1]); redis.call('SETEX', KEYS[3], ARGV[1], '1'); redis.call('ZADD', KEYS[4], ARGV[3], ARGV[4]); return 1";
+/// The upsert above, done only while the stored task is still `ARGV[5]`. The
+/// chat list is scored by `ARGV[6]`, so it can stay in schedule order.
+const REPLACE_TASK_SCRIPT: &str = "if redis.call('GET', KEYS[1]) ~= ARGV[5] then return 0 end; redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2]); redis.call('ZADD', KEYS[2], ARGV[6], ARGV[4]); redis.call('EXPIRE', KEYS[2], ARGV[1]); redis.call('SETEX', KEYS[3], ARGV[1], '1'); redis.call('ZADD', KEYS[4], ARGV[3], ARGV[4]); return 1";
 const COMPLETE_TASK_SCRIPT: &str = "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end; if redis.call('EXISTS', KEYS[2]) == 0 then redis.call('DEL', KEYS[1], KEYS[5]); return 0 end; if ARGV[2] == '' then redis.call('DEL', KEYS[2]); redis.call('ZREM', KEYS[3], ARGV[3]); redis.call('ZREM', KEYS[4], ARGV[3]); else redis.call('SETEX', KEYS[2], ARGV[4], ARGV[2]); redis.call('ZADD', KEYS[3], ARGV[5], ARGV[3]); redis.call('EXPIRE', KEYS[3], ARGV[4]); redis.call('ZADD', KEYS[4], ARGV[5], ARGV[3]); end; redis.call('DEL', KEYS[1], KEYS[5]); return 1";
 const CANCEL_TASK_SCRIPT: &str = "local removed = redis.call('DEL', KEYS[1]); redis.call('ZREM', KEYS[2], ARGV[1]); redis.call('ZREM', KEYS[3], ARGV[1]); return removed";
 
@@ -305,7 +306,8 @@ impl RedisTaskStore {
             return Ok(None);
         }
         document.task = request_run_now(&document.task, now);
-        let next_run_at = document.task.next_run_at.unwrap_or(now);
+        // The task lists keep showing, and sorting by, the scheduled run.
+        let scheduled_at = document.task.scheduled_run_at().unwrap_or(now);
         let chat_key = format!("task:chat:{chat_id}");
         let marker_key = format!("{chat_key}:indexed");
         let mut connection = self.client.get_connection()?;
@@ -318,9 +320,10 @@ impl RedisTaskStore {
             .arg(TASK_DUE_INDEX_KEY)
             .arg(ttl_seconds)
             .arg(encode_task_record(&document)?)
-            .arg(next_run_at as f64)
+            .arg(now as f64)
             .arg(task_id)
             .arg(stored)
+            .arg(scheduled_at as f64)
             .query::<i64>(&mut connection)?;
         if replaced == 1 {
             Ok(Some(document))
@@ -613,6 +616,7 @@ mod tests {
                     format!("{now}.0"),
                     "t1".to_owned(),
                     stored.to_owned(),
+                    format!("{scheduled}.0"),
                 ],
                 reply.to_owned(),
             )
