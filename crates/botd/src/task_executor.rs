@@ -515,16 +515,18 @@ where
                     segments.extend(error.billing_segments);
                     self.diagnostics
                         .record(task.id.as_str(), "provider", &message);
+                    // The chat hears about the failure: a task that ends in
+                    // silence looks like it never ran.
                     let state = TaskExecutionState {
                         poll: None,
                         poll_attempted: false,
                         poll_delivery_attempts: 0,
                         poll_retry_at: None,
-                        response: None,
+                        response: Some(execute_failed(task, &message)),
                         billing_segments: segments,
                         kind: TaskExecutionKind::ProviderError,
                         billing_finalized: false,
-                        delivered: true,
+                        delivered: false,
                         delivery_attempts: 0,
                         finish: false,
                     };
@@ -549,11 +551,11 @@ where
                     poll_attempted: false,
                     poll_delivery_attempts: 0,
                     poll_retry_at: None,
-                    response: None,
+                    response: Some(execute_failed(task, empty_reply_message(&task.locale))),
                     billing_segments: segments,
                     kind: TaskExecutionKind::Empty,
                     billing_finalized: false,
-                    delivered: true,
+                    delivered: false,
                     delivery_attempts: 0,
                     finish: false,
                 };
@@ -679,6 +681,14 @@ fn force_nonfallback(locale: &str) -> &'static str {
         "you must provide a real answer"
     } else {
         "tenés que responder. no hay opcion de no responder"
+    }
+}
+
+fn empty_reply_message(locale: &str) -> &'static str {
+    if locale == "en" {
+        "the AI returned an empty reply"
+    } else {
+        "la IA devolvió una respuesta vacía"
     }
 }
 
@@ -1326,6 +1336,14 @@ mod tests {
         assert_eq!(billing.settlements[0].2, "task_error_provider_usage");
         assert_eq!(billing.settlements[0].1, [json!({"attempt": "partial"})]);
         assert_eq!(diagnostics.0[0].1, "provider");
+        assert_eq!(
+            failed.parts().2.messages,
+            [(
+                "-100123".to_owned(),
+                "synthetic-user, no pude ejecutar la tarea «synthetic task»:\nprovider unavailable"
+                    .to_owned()
+            )]
+        );
 
         let provider = Provider {
             replies: VecDeque::from([Err(TaskProviderFailure::new(
@@ -1360,6 +1378,75 @@ mod tests {
         let mut empty = executor(provider, Billing::default(), Messenger::default());
         assert!(empty.execute(&task("es"), "task123:1000").is_ok());
         assert_eq!(empty.parts().1.refunds[0].1, "task_empty");
+        assert_eq!(
+            empty.parts().2.messages[0].1,
+            "synthetic-user, no pude ejecutar la tarea «synthetic task»:\nla IA devolvió una respuesta vacía"
+        );
+    }
+
+    #[test]
+    fn failure_notices_are_delivered_once_and_retried_like_replies() {
+        let provider = Provider {
+            replies: VecDeque::from([Err(TaskProviderFailure::new(
+                "provider unavailable",
+                Vec::new(),
+            ))]),
+            ..Provider::default()
+        };
+        let messenger = Messenger {
+            fail: true,
+            ..Messenger::default()
+        };
+        let mut failing = executor(provider, Billing::default(), messenger);
+        let english = task("en");
+        assert!(matches!(
+            failing.execute(&english, "task123:1000"),
+            Err(NativeTaskExecutorError::Delivery { .. })
+        ));
+        failing.messenger.fail = false;
+        assert_eq!(
+            failing.execute(&english, "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        let (provider, billing, messenger, _) = failing.parts();
+        assert_eq!(provider.prompts.len(), 1);
+        assert_eq!(billing.refunds.len(), 1);
+        assert_eq!(messenger.messages.len(), 2);
+        assert_eq!(
+            messenger.messages[1].1,
+            "synthetic-user, I could not run the task “synthetic task”:\nprovider unavailable"
+        );
+        assert_eq!(
+            failing.execute(&english, "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        assert_eq!(failing.parts().2.messages.len(), 2);
+
+        let provider = Provider {
+            replies: VecDeque::from([
+                Ok(TaskProviderReply {
+                    poll: None,
+                    text: String::new(),
+                    fallback: false,
+                    finish: false,
+                    billing_segments: Vec::new(),
+                }),
+                Ok(TaskProviderReply {
+                    poll: None,
+                    text: String::new(),
+                    fallback: false,
+                    finish: false,
+                    billing_segments: Vec::new(),
+                }),
+            ]),
+            ..Provider::default()
+        };
+        let mut empty = executor(provider, Billing::default(), Messenger::default());
+        assert!(empty.execute(&english, "task123:1000").is_ok());
+        assert_eq!(
+            empty.parts().2.messages[0].1,
+            "synthetic-user, I could not run the task “synthetic task”:\nthe AI returned an empty reply"
+        );
     }
 
     #[test]

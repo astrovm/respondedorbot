@@ -3,16 +3,19 @@
 //! applies the same public-address checks as `web_fetch`, so a page cannot
 //! make it load internal services.
 
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, fs, process, thread};
 
+use serde_json::{Value, json};
 use thiserror::Error;
 use url::{Position, Url};
 
@@ -20,10 +23,21 @@ use crate::web_fetch::{FETCH_MAX_BYTES, HostResolver, SystemHostResolver, public
 
 /// How long one render may take, page load and scripts included.
 pub const RENDER_TIME_LIMIT: Duration = Duration::from_secs(20);
-/// How long Chromium lets scripts and timers run after the page starts
-/// loading. Virtual time pauses while requests are pending, so data fetched
-/// by scripts still arrives.
-const SCRIPT_TIME_BUDGET_MS: u32 = 8_000;
+/// How long scripts may keep loading data after the page's load event.
+const SCRIPT_TIME_BUDGET: Duration = Duration::from_secs(8);
+/// A loaded page with no request in flight for this long is done.
+const NETWORK_QUIET: Duration = Duration::from_millis(500);
+/// Time kept free before the hard limit to read the page and close Chromium.
+const READ_MARGIN: Duration = Duration::from_secs(3);
+/// How long a closed Chromium gets to exit before it is stopped.
+const EXIT_GRACE: Duration = Duration::from_secs(3);
+/// The largest DevTools message read. The page's HTML is cut to
+/// `FETCH_MAX_BYTES` characters in the browser, and JSON escapes can make
+/// each character up to six bytes.
+const MAX_MESSAGE_BYTES: usize = FETCH_MAX_BYTES * 6 + 65_536;
+/// Gives Chromium its DevTools pipe (it reads fd 3 and writes fd 4) on the
+/// child's stdin and stdout, so it opens no port and no other descriptor.
+const PIPE_WRAPPER: &str = "exec \"$@\" 3<&0 4>&1 0</dev/null 1>/dev/null 2>/dev/null";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HEAD_BYTES: usize = 65_536;
@@ -45,7 +59,7 @@ const CHROMIUM_FLAGS: &[&str] = &[
     // Chromium sends loopback requests around a proxy unless told not to.
     "--proxy-bypass-list=<-loopback>",
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-    "--dump-dom",
+    "--remote-debugging-pipe",
 ];
 
 pub trait PageRenderer {
@@ -251,46 +265,273 @@ impl PageRenderer for ChromiumRenderer {
     fn render(&self, url: &str) -> Result<String, RenderError> {
         let _running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
         let profile = Profile::create().map_err(|error| RenderError::Start(error.to_string()))?;
+        let started = Instant::now();
         // `timeout` signals Chromium's whole process group, helpers included.
         let mut command = Command::new("timeout");
         command
             .arg("--kill-after=2")
             .arg(format!("{}s", self.time_limit.as_secs().max(1)))
+            .args(["sh", "-c", PIPE_WRAPPER, "chromium-pipe"])
             .args(&self.command)
             .args(CHROMIUM_FLAGS)
-            .arg(format!("--virtual-time-budget={SCRIPT_TIME_BUDGET_MS}"))
             .arg(format!("--proxy-server=http://{}", self.proxy))
             .arg(format!("--user-data-dir={}", profile.0.display()))
             .arg(format!(
                 "--disk-cache-dir={}",
                 profile.0.join("cache").display()
             ))
-            .arg(url);
-        read_rendered_page(&mut command, Child::wait)
+            .arg("about:blank");
+        let read_by = started + self.time_limit.saturating_sub(READ_MARGIN);
+        run_browser(&mut command, Child::wait, |session| {
+            session.render(url, read_by)
+        })
     }
 }
 
-fn read_rendered_page(
+/// Starts the browser, lets `work` drive it over the DevTools pipe, then
+/// closes it. A browser that exits early reports its exit status.
+fn run_browser(
     command: &mut Command,
     wait: impl FnOnce(&mut Child) -> io::Result<ExitStatus>,
+    work: impl FnOnce(&mut DevTools<std::process::ChildStdin>) -> Result<String, DevToolsError>,
 ) -> Result<String, RenderError> {
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| RenderError::Start(error.to_string()))?;
-    let mut html = Vec::new();
-    child.stdout.take().into_iter().for_each(|mut stdout| {
-        let limit = u64::try_from(FETCH_MAX_BYTES).unwrap_or(u64::MAX);
-        let _ = (&mut stdout).take(limit).read_to_end(&mut html);
-        let _ = io::copy(&mut stdout, &mut io::sink());
-    });
-    let status = wait(&mut child).map_err(|error| RenderError::Failed(error.to_string()))?;
-    if !status.success() {
-        return Err(RenderError::Failed(status.to_string()));
+    let mut devtools = DevTools::new(child.stdin.take(), read_messages(child.stdout.take()));
+    let result = work(&mut devtools);
+    devtools.close();
+    let status = stop(&mut child, wait);
+    match result {
+        Ok(html) => Ok(html),
+        Err(DevToolsError::Failed(message)) => Err(RenderError::Failed(message)),
+        Err(DevToolsError::Closed) => Err(RenderError::Failed(
+            status.map_or_else(|error| error.to_string(), |status| status.to_string()),
+        )),
     }
-    Ok(String::from_utf8_lossy(&html).into_owned())
+}
+
+/// Waits a moment for the browser to exit, then asks `timeout` to stop it.
+fn stop(
+    child: &mut Child,
+    wait: impl FnOnce(&mut Child) -> io::Result<ExitStatus>,
+) -> io::Result<ExitStatus> {
+    let grace_ends = Instant::now() + EXIT_GRACE;
+    while child.try_wait()?.is_none() && Instant::now() < grace_ends {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if child.try_wait()?.is_none() {
+        // `timeout` passes the signal on to Chromium.
+        let _ = Command::new("sh")
+            .args(["-c", "kill -TERM \"$1\"", "stop-browser"])
+            .arg(child.id().to_string())
+            .status();
+    }
+    wait(child)
+}
+
+/// Reads NUL-separated DevTools messages on a thread, so waits can time out.
+/// Messages that are too large or not JSON are skipped.
+fn read_messages<R: Read + Send + 'static>(output: Option<R>) -> Receiver<Value> {
+    let (sender, receiver) = mpsc::channel();
+    let _ = thread::Builder::new()
+        .name("browser-devtools".to_owned())
+        .spawn(move || -> Option<()> {
+            let mut reader = BufReader::new(output?);
+            loop {
+                let mut message = Vec::new();
+                let limit = u64::try_from(MAX_MESSAGE_BYTES).unwrap_or(u64::MAX);
+                (&mut reader).take(limit).read_until(0, &mut message).ok()?;
+                if message.last() != Some(&0) {
+                    if message.len() < MAX_MESSAGE_BYTES {
+                        return None;
+                    }
+                    reader.skip_until(0).ok()?;
+                    continue;
+                }
+                message.pop();
+                if let Ok(message) = serde_json::from_slice(&message) {
+                    sender.send(message).ok()?;
+                }
+            }
+        });
+    receiver
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DevToolsError {
+    /// The browser closed the pipe, usually because it exited.
+    Closed,
+    Failed(String),
+}
+
+/// One DevTools connection, with what the page has loaded so far.
+struct DevTools<W> {
+    input: Option<W>,
+    messages: Receiver<Value>,
+    next_id: u64,
+    responses: HashMap<u64, Value>,
+    loaded_at: Option<Instant>,
+    in_flight: HashSet<String>,
+}
+
+impl<W: Write> DevTools<W> {
+    fn new(input: Option<W>, messages: Receiver<Value>) -> Self {
+        Self {
+            input,
+            messages,
+            next_id: 0,
+            responses: HashMap::new(),
+            loaded_at: None,
+            in_flight: HashSet::new(),
+        }
+    }
+
+    /// Loads `url` in a new tab, waits until it settles or `read_by`, and
+    /// returns its HTML.
+    fn render(&mut self, url: &str, read_by: Instant) -> Result<String, DevToolsError> {
+        let target = self.call("Target.createTarget", json!({"url": "about:blank"}), None)?;
+        let target = text_at(&target, "/targetId")?;
+        let attached = self.call(
+            "Target.attachToTarget",
+            json!({"targetId": target, "flatten": true}),
+            None,
+        )?;
+        let session = text_at(&attached, "/sessionId")?;
+        self.call("Network.enable", json!({}), Some(&session))?;
+        self.call("Page.enable", json!({}), Some(&session))?;
+        // Load events before this point belong to the blank tab.
+        self.loaded_at = None;
+        let navigation = self.call("Page.navigate", json!({"url": url}), Some(&session))?;
+        if let Some(error) = navigation.get("errorText").and_then(Value::as_str) {
+            return Err(DevToolsError::Failed(format!("navigation failed: {error}")));
+        }
+        self.settle(read_by);
+        let expression = format!(
+            "(document.documentElement ? document.documentElement.outerHTML : '').slice(0, {FETCH_MAX_BYTES})"
+        );
+        let evaluated = self.call(
+            "Runtime.evaluate",
+            json!({"expression": expression, "returnByValue": true}),
+            Some(&session),
+        )?;
+        let html = text_at(&evaluated, "/result/value")?;
+        Ok(truncate(html, FETCH_MAX_BYTES))
+    }
+
+    /// Waits in real time until the page has loaded and its network has been
+    /// quiet for a moment. Scripts get at most `SCRIPT_TIME_BUDGET` after the
+    /// load event, and nothing waits past `read_by`, so a page that never
+    /// settles is still read.
+    fn settle(&mut self, read_by: Instant) {
+        loop {
+            let ends = self
+                .loaded_at
+                .map_or(read_by, |loaded| (loaded + SCRIPT_TIME_BUDGET).min(read_by));
+            let left = ends.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            let quiet = self.loaded_at.is_some() && self.in_flight.is_empty();
+            match self
+                .messages
+                .recv_timeout(if quiet { NETWORK_QUIET.min(left) } else { left })
+            {
+                Ok(message) => self.observe(message),
+                Err(RecvTimeoutError::Timeout) if !quiet => {}
+                Err(_) => return,
+            }
+        }
+    }
+
+    fn call(
+        &mut self,
+        method: &str,
+        params: Value,
+        session: Option<&str>,
+    ) -> Result<Value, DevToolsError> {
+        self.next_id += 1;
+        let id = self.next_id;
+        let mut message = json!({"id": id, "method": method, "params": params});
+        if let Some(session) = session {
+            message["sessionId"] = json!(session);
+        }
+        let mut bytes = message.to_string().into_bytes();
+        bytes.push(0);
+        let input = self.input.as_mut().ok_or(DevToolsError::Closed)?;
+        send(input, &bytes).map_err(|_| DevToolsError::Closed)?;
+        loop {
+            if let Some(response) = self.responses.remove(&id) {
+                return match response.get("error") {
+                    Some(error) => Err(DevToolsError::Failed(format!(
+                        "{method} failed: {}",
+                        error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown error")
+                    ))),
+                    None => Ok(response.get("result").cloned().unwrap_or(Value::Null)),
+                };
+            }
+            let message = self.messages.recv().map_err(|_| DevToolsError::Closed)?;
+            self.observe(message);
+        }
+    }
+
+    fn observe(&mut self, message: Value) {
+        if let Some(id) = message.get("id").and_then(Value::as_u64) {
+            self.responses.insert(id, message);
+            return;
+        }
+        let request = message
+            .pointer("/params/requestId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        match (message.get("method").and_then(Value::as_str), request) {
+            (Some("Page.loadEventFired"), _) => self.loaded_at = Some(Instant::now()),
+            (Some("Network.requestWillBeSent"), Some(request)) => {
+                self.in_flight.insert(request);
+            }
+            (Some("Network.loadingFinished" | "Network.loadingFailed"), Some(request)) => {
+                self.in_flight.remove(&request);
+            }
+            _ => {}
+        }
+    }
+
+    /// Asks the browser to quit and closes the pipe.
+    fn close(&mut self) {
+        if let Some(mut input) = self.input.take() {
+            let _ = send(&mut input, b"{\"id\":0,\"method\":\"Browser.close\"}\0");
+        }
+    }
+}
+
+/// Writes one whole message and pushes it through any buffering writer.
+fn send(input: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
+    input.write_all(bytes)?;
+    input.flush()
+}
+
+fn text_at(value: &Value, pointer: &str) -> Result<String, DevToolsError> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| DevToolsError::Failed(format!("DevTools reply has no {pointer}")))
+}
+
+/// `text` cut to at most `limit` bytes on a character boundary.
+fn truncate(mut text: String, limit: usize) -> String {
+    let mut end = limit.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
 }
 
 /// A fresh Chromium profile directory, deleted when the render ends.
@@ -522,50 +763,115 @@ mod tests {
         )
     }
 
+    /// A fake browser answers on fd 4 in the order `DevTools::render` asks.
+    const SAY: &str = r#"say() { printf '%s\0' "$1" >&4; }"#;
+    const OPENED: &str = r#"
+        say '{"id":1,"result":{"targetId":"T"}}'
+        say '{"id":2,"result":{"sessionId":"S"}}'
+        say '{"id":3,"result":{}}'
+        say '{"id":4,"result":{}}'
+        say '{"id":5,"result":{"frameId":"F"}}'
+        say '{"method":"Network.requestWillBeSent","sessionId":"S","params":{"requestId":"r1"}}'
+        say '{"method":"Page.loadEventFired","sessionId":"S","params":{}}'
+        say '{"method":"Network.loadingFinished","sessionId":"S","params":{"requestId":"r1"}}'
+    "#;
+
+    fn scratch_file(name: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        env::temp_dir().join(format!(
+            "respondedorbot-{name}-{}-{}",
+            process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
     #[test]
     fn renders_through_the_proxy_in_a_profile_that_is_deleted_afterwards() -> TestResult {
-        let script = r#"
+        let log = scratch_file("devtools-log");
+        let script = format!(
+            r#"{SAY}
             for argument; do
-                case "$argument" in --user-data-dir=*) profile="${argument#*=}" ;; esac
-                url="$argument"
+                case "$argument" in --user-data-dir=*) profile="${{argument#*=}}" ;; esac
+                last="$argument"
             done
             case " $* " in
-                *" --headless "*" --dump-dom "*" --proxy-server=http://127.0.0.1:9 "*) ;;
+                *" --headless "*" --remote-debugging-pipe"*" --proxy-server=http://127.0.0.1:9 "*) ;;
                 *) exit 3 ;;
             esac
+            case " $* " in *" --dump-dom "*) exit 6 ;; esac
+            test "$last" = about:blank || exit 5
             test -d "$profile" || exit 4
-            printf '<title>%s</title><p>%s</p>' "$profile" "$url"
-        "#;
-        let html = fake_chromium(script, RENDER_TIME_LIMIT).render("https://site.example/app")?;
+            {OPENED}
+            say "{{\"id\":6,\"result\":{{\"result\":{{\"type\":\"string\",\"value\":\"<title>$profile</title>\"}}}}}}"
+            tr '\0' '\n' <&3 > '{}'
+            "#,
+            log.display()
+        );
+        let html = fake_chromium(&script, RENDER_TIME_LIMIT).render("https://site.example/app")?;
         let profile = html
             .strip_prefix("<title>")
-            .and_then(|rest| rest.split_once("</title>"))
-            .map(|(profile, _)| PathBuf::from(profile));
-        assert!(html.ends_with("<p>https://site.example/app</p>"), "{html}");
-        assert!(profile.is_some_and(|profile| !profile.exists()));
+            .and_then(|rest| rest.strip_suffix("</title>"))
+            .map(PathBuf::from);
+        assert!(profile.is_some_and(|profile| !profile.exists()), "{html}");
+        let requests = fs::read_to_string(&log)?;
+        fs::remove_file(&log)?;
+        let requests = requests
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let methods = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods,
+            [
+                "Target.createTarget",
+                "Target.attachToTarget",
+                "Network.enable",
+                "Page.enable",
+                "Page.navigate",
+                "Runtime.evaluate",
+                "Browser.close",
+            ]
+        );
+        assert_eq!(requests[1]["params"]["targetId"], "T");
+        assert_eq!(requests[4]["params"]["url"], "https://site.example/app");
+        assert_eq!(requests[4]["sessionId"], "S");
+        assert!(requests[0].get("sessionId").is_none());
         Ok(())
     }
 
     #[test]
-    fn reports_process_start_and_wait_failures() {
+    fn reports_start_failures_and_exit_or_wait_errors() {
+        let ignored = |_: &mut DevTools<std::process::ChildStdin>| Err(DevToolsError::Closed);
         let mut missing = Command::new("/nonexistent/respondedorbot-renderer");
         assert!(matches!(
-            read_rendered_page(&mut missing, Child::wait),
+            run_browser(&mut missing, Child::wait, ignored),
             Err(RenderError::Start(_))
         ));
 
-        let mut command = Command::new("true");
         assert_eq!(
-            read_rendered_page(&mut command, |child| {
-                child.wait()?;
-                Err(io::Error::other("synthetic wait failure"))
-            }),
+            run_browser(
+                &mut Command::new("true"),
+                |child| {
+                    child.wait()?;
+                    Err(io::Error::other("synthetic wait failure"))
+                },
+                ignored
+            ),
             Err(RenderError::Failed("synthetic wait failure".to_owned()))
+        );
+        assert_eq!(
+            run_browser(&mut Command::new("true"), Child::wait, |_| Err(
+                DevToolsError::Failed("synthetic".to_owned())
+            )),
+            Err(RenderError::Failed("synthetic".to_owned()))
         );
     }
 
     #[test]
-    fn failed_slow_or_huge_renders_are_bounded() {
+    fn failed_slow_stuck_or_huge_renders_are_bounded() {
         assert_eq!(
             fake_chromium("exit 3", RENDER_TIME_LIMIT).render("https://site.example/"),
             Err(RenderError::Failed("exit status: 3".to_owned()))
@@ -578,13 +884,280 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_secs(10));
 
-        let huge = format!("head -c {} /dev/zero | tr '\\0' a", FETCH_MAX_BYTES + 100);
+        // A browser that ignores the close request is stopped after the grace.
+        let stuck = format!(
+            r#"{SAY}
+            {OPENED}
+            say '{{"id":6,"result":{{"result":{{"value":"<p>ok</p>"}}}}}}'
+            exec sleep 30
+            "#
+        );
+        let started = Instant::now();
+        assert_eq!(
+            fake_chromium(&stuck, RENDER_TIME_LIMIT).render("https://site.example/"),
+            Ok("<p>ok</p>".to_owned())
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        let huge = format!(
+            r#"{SAY}
+            {OPENED}
+            {{ printf '{{"id":6,"result":{{"result":{{"value":"'
+              head -c {} /dev/zero | tr '\0' a
+              printf '"}}}}}}\0'
+            }} >&4
+            cat <&3 >/dev/null
+            "#,
+            FETCH_MAX_BYTES + 100
+        );
         assert_eq!(
             fake_chromium(&huge, RENDER_TIME_LIMIT)
                 .render("https://site.example/")
                 .map(|html| html.len()),
             Ok(FETCH_MAX_BYTES)
         );
+    }
+
+    /// DevTools with `messages` queued. The browser stays connected while
+    /// the returned sender lives.
+    fn devtools(messages: &[Value]) -> (DevTools<Vec<u8>>, mpsc::Sender<Value>) {
+        let (sender, receiver) = mpsc::channel();
+        for message in messages {
+            let _ = sender.send(message.clone());
+        }
+        (DevTools::new(Some(Vec::new()), receiver), sender)
+    }
+
+    fn written(devtools: &DevTools<Vec<u8>>) -> Vec<Value> {
+        devtools
+            .input
+            .as_deref()
+            .unwrap_or_default()
+            .split(|byte| *byte == 0)
+            .filter(|message| !message.is_empty())
+            .filter_map(|message| serde_json::from_slice(message).ok())
+            .collect()
+    }
+
+    /// A pipe that takes the bytes but breaks when they are pushed through.
+    struct BrokenPipe;
+
+    impl Write for BrokenPipe {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[test]
+    fn calls_return_results_errors_and_closed_pipes() {
+        let (mut tools, browser) = devtools(&[
+            json!({"method": "Page.frameNavigated", "params": {}}),
+            json!({"id": 1, "result": {"ok": true}}),
+            json!({"id": 2}),
+            json!({"id": 3, "error": {"message": "boom"}}),
+            json!({"id": 4, "error": {}}),
+        ]);
+        assert_eq!(
+            tools.call("A.one", json!({"x": 1}), Some("S")),
+            Ok(json!({"ok": true}))
+        );
+        assert_eq!(tools.call("A.two", json!({}), None), Ok(Value::Null));
+        assert_eq!(
+            tools.call("A.three", json!({}), None),
+            Err(DevToolsError::Failed("A.three failed: boom".to_owned()))
+        );
+        assert_eq!(
+            tools.call("A.four", json!({}), None),
+            Err(DevToolsError::Failed(
+                "A.four failed: unknown error".to_owned()
+            ))
+        );
+        drop(browser);
+        assert_eq!(
+            tools.call("A.five", json!({}), None),
+            Err(DevToolsError::Closed)
+        );
+        let sent = written(&tools);
+        assert_eq!(
+            sent[0],
+            json!({"id": 1, "method": "A.one", "params": {"x": 1}, "sessionId": "S"})
+        );
+        assert_eq!(sent.len(), 5);
+
+        tools.close();
+        assert!(tools.input.is_none());
+        tools.close();
+        assert_eq!(
+            tools.call("A.six", json!({}), None),
+            Err(DevToolsError::Closed)
+        );
+
+        let (_sender, receiver) = mpsc::channel();
+        let mut broken = DevTools::new(Some(BrokenPipe), receiver);
+        assert_eq!(
+            broken.call("A.one", json!({}), None),
+            Err(DevToolsError::Closed)
+        );
+        broken.close();
+    }
+
+    /// A pipe end whose bytes the test can still read after it is dropped.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn closing_asks_the_browser_to_quit_once() {
+        let pipe = Shared::default();
+        let mut tools = DevTools::new(Some(pipe.clone()), mpsc::channel().1);
+        tools.close();
+        tools.close();
+        assert_eq!(
+            pipe.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_slice(),
+            b"{\"id\":0,\"method\":\"Browser.close\"}\0"
+        );
+    }
+
+    fn opened(session_reply: Value) -> Vec<Value> {
+        vec![
+            json!({"id": 1, "result": {"targetId": "T"}}),
+            json!({"id": 2, "result": session_reply}),
+            json!({"id": 3, "result": {}}),
+            json!({"id": 4, "result": {}}),
+        ]
+    }
+
+    #[test]
+    fn render_reports_missing_replies_and_navigation_errors() {
+        let soon = || Instant::now() + Duration::from_millis(50);
+        let (mut no_target, _browser) = devtools(&[json!({"id": 1, "result": {}})]);
+        assert_eq!(
+            no_target.render("https://site.example/", soon()),
+            Err(DevToolsError::Failed(
+                "DevTools reply has no /targetId".to_owned()
+            ))
+        );
+
+        let mut replies = opened(json!({"sessionId": "S"}));
+        replies.push(json!({"id": 5, "result": {"errorText": "net::ERR_NAME_NOT_RESOLVED"}}));
+        assert_eq!(
+            devtools(&replies).0.render("https://site.example/", soon()),
+            Err(DevToolsError::Failed(
+                "navigation failed: net::ERR_NAME_NOT_RESOLVED".to_owned()
+            ))
+        );
+
+        let mut replies = opened(json!({"sessionId": "S"}));
+        replies.push(json!({"id": 5, "result": {}}));
+        replies.push(json!({"id": 6, "result": {"result": {"type": "undefined"}}}));
+        assert_eq!(
+            devtools(&replies).0.render("https://site.example/", soon()),
+            Err(DevToolsError::Failed(
+                "DevTools reply has no /result/value".to_owned()
+            ))
+        );
+
+        // A load event from the blank tab does not count for the new page.
+        let mut replies = opened(json!({"sessionId": "S"}));
+        replies.insert(3, json!({"method": "Page.loadEventFired", "params": {}}));
+        replies.push(json!({"id": 5, "result": {}}));
+        replies.push(json!({"id": 6, "result": {"result": {"value": "añb"}}}));
+        let (mut tools, _browser) = devtools(&replies);
+        let started = Instant::now();
+        assert_eq!(
+            tools.render(
+                "https://site.example/",
+                started + Duration::from_millis(300)
+            ),
+            Ok("añb".to_owned())
+        );
+        assert!(tools.loaded_at.is_none());
+        assert!(started.elapsed() >= Duration::from_millis(250));
+    }
+
+    #[test]
+    fn settling_waits_for_load_and_quiet_but_never_past_the_deadline() {
+        // Never loads: read at the deadline.
+        let (mut unloaded, _browser) = devtools(&[]);
+        let started = Instant::now();
+        unloaded.settle(started + Duration::from_millis(200));
+        assert!(started.elapsed() >= Duration::from_millis(150));
+
+        // Loaded with a request that never ends: also read at the deadline.
+        let (mut busy, _busy_browser) = devtools(&[
+            json!({"method": "Network.requestWillBeSent", "params": {"requestId": "beacon"}}),
+            json!({"method": "Network.requestWillBeSent", "params": {}}),
+            json!({"method": "Page.loadEventFired", "params": {}}),
+        ]);
+        let started = Instant::now();
+        busy.settle(started + Duration::from_millis(300));
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert_eq!(busy.in_flight.len(), 1);
+
+        // Loaded and quiet: read after the quiet period, before the deadline.
+        let (mut quiet, _quiet_browser) = devtools(&[
+            json!({"method": "Network.requestWillBeSent", "params": {"requestId": "data"}}),
+            json!({"method": "Page.loadEventFired", "params": {}}),
+            json!({"method": "Network.loadingFailed", "params": {"requestId": "data"}}),
+        ]);
+        let started = Instant::now();
+        quiet.settle(started + Duration::from_secs(10));
+        let waited = started.elapsed();
+        assert!(waited >= NETWORK_QUIET && waited < Duration::from_secs(5));
+        assert!(quiet.in_flight.is_empty());
+
+        // A browser that went away is read at once.
+        let mut gone = DevTools::new(Some(Vec::new()), mpsc::channel().1);
+        let started = Instant::now();
+        gone.settle(started + Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        // A deadline already past returns without waiting.
+        let (mut late, _late_browser) = devtools(&[]);
+        late.settle(Instant::now());
+    }
+
+    #[test]
+    fn message_reader_skips_oversized_and_invalid_messages() {
+        let mut stream = b"{\"id\":1}\0not json\0".to_vec();
+        stream.extend(std::iter::repeat_n(b'x', MAX_MESSAGE_BYTES + 10));
+        stream.extend_from_slice(b"\0{\"id\":2}\0{\"id\":3,\"cut");
+        let messages = read_messages(Some(io::Cursor::new(stream)));
+        assert_eq!(messages.recv().ok(), Some(json!({"id": 1})));
+        assert_eq!(messages.recv().ok(), Some(json!({"id": 2})));
+        assert!(messages.recv().is_err());
+
+        assert!(read_messages(None::<io::Empty>).recv().is_err());
+
+        // The reader stops when nobody listens any more.
+        drop(read_messages(Some(io::Cursor::new(
+            b"{\"id\":1}\0".to_vec(),
+        ))));
+    }
+
+    #[test]
+    fn truncation_keeps_whole_characters() {
+        assert_eq!(truncate("añb".to_owned(), 2), "a");
+        assert_eq!(truncate("añb".to_owned(), 3), "añ");
+        assert_eq!(truncate("ab".to_owned(), 10), "ab");
     }
 
     #[test]
