@@ -1,4 +1,4 @@
-//! Scheduled-task list rendering and deletion authorization.
+//! Scheduled-task list rendering and run and deletion authorization.
 
 use chrono::{FixedOffset, TimeZone, Utc, Weekday};
 
@@ -16,6 +16,7 @@ pub struct TaskListView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskCallbackParse {
     Delete(TaskId),
+    Run(TaskId),
     View(TaskId),
     Confirm(TaskId),
     Page(usize),
@@ -43,6 +44,7 @@ pub fn parse_task_callback(data: &str) -> TaskCallbackParse {
     };
     match action {
         "del" => TaskCallbackParse::Delete(id),
+        "run" => TaskCallbackParse::Run(id),
         "view" => TaskCallbackParse::View(id),
         "ask" => TaskCallbackParse::Confirm(id),
         _ => TaskCallbackParse::Guard,
@@ -60,6 +62,17 @@ pub fn can_delete_task(
         return true;
     }
     request_user_id.is_some() && request_user_id == owner_user_id || is_group_admin
+}
+
+/// A run asked for by hand spends the creator's credits, so in a group only
+/// the creator may ask for one.
+#[must_use]
+pub fn can_run_task(
+    is_group: bool,
+    request_user_id: Option<i64>,
+    owner_user_id: Option<i64>,
+) -> bool {
+    !is_group || request_user_id.is_some() && request_user_id == owner_user_id
 }
 
 fn interval_text(seconds: i64, locale: Locale) -> String {
@@ -180,7 +193,7 @@ pub fn format_task_summary(task: &ScheduledTask, locale: Locale) -> String {
     } else {
         format!(" ({})", no_mention(&task.user_name))
     };
-    let next = local_time(task.next_run_at, task.timezone_offset, locale);
+    let next = local_time(task.scheduled_run_at(), task.timezone_offset, locale);
     if let Some(frequency) = frequency(&task.schedule, locale) {
         let next = match locale {
             Locale::Es => format!("próx: {next}"),
@@ -220,7 +233,7 @@ pub fn render_task_page(tasks: &[ScheduledTask], locale: Locale, page: usize) ->
             };
             format!(
                 "{recurring}{} | {name}",
-                local_time(task.next_run_at, task.timezone_offset, locale)
+                local_time(task.scheduled_run_at(), task.timezone_offset, locale)
             )
         })
         .collect::<Vec<_>>();
@@ -265,10 +278,13 @@ pub fn render_task_page(tasks: &[ScheduledTask], locale: Locale, page: usize) ->
         } else {
             match locale {
                 Locale::Es => format!(
-                    "Tareas ({})\n\nTocá una para verla o cancelarla.",
+                    "Tareas ({})\n\nTocá una para verla, ejecutarla ahora o cancelarla.",
                     tasks.len()
                 ),
-                Locale::En => format!("Tasks ({})\n\nTap one to see or cancel it.", tasks.len()),
+                Locale::En => format!(
+                    "Tasks ({})\n\nTap one to see it, run it now or cancel it.",
+                    tasks.len()
+                ),
             }
         },
         keyboard: Some(InlineKeyboardMarkup {
@@ -286,7 +302,7 @@ pub fn render_task_detail(task: &ScheduledTask, locale: Locale, confirm: bool) -
             Locale::En => format!("Repeats {frequency}"),
         });
     }
-    let next = local_time(task.next_run_at, task.timezone_offset, locale);
+    let next = local_time(task.scheduled_run_at(), task.timezone_offset, locale);
     lines.push(match locale {
         Locale::Es => format!("Próxima: {next}"),
         Locale::En => format!("Next: {next}"),
@@ -324,23 +340,32 @@ pub fn render_task_detail(task: &ScheduledTask, locale: Locale, confirm: bool) -
             "Cancel task"
         },
     );
+    let mut rows = Vec::new();
+    if !confirm {
+        rows.push(vec![button(
+            localized(locale, "▶️ Ejecutar ahora", "▶️ Run now"),
+            format!("task:run:{}", task.id.as_str()),
+        )]);
+    }
+    rows.push(vec![button(
+        label,
+        format!("task:{action}:{}", task.id.as_str()),
+    )]);
+    rows.push(vec![
+        back(
+            locale,
+            if confirm {
+                format!("task:view:{}", task.id.as_str())
+            } else {
+                "task:page:0".to_owned()
+            },
+        ),
+        close(locale, "task:close"),
+    ]);
     TaskListView {
         text,
         keyboard: Some(InlineKeyboardMarkup {
-            inline_keyboard: vec![
-                vec![button(label, format!("task:{action}:{}", task.id.as_str()))],
-                vec![
-                    back(
-                        locale,
-                        if confirm {
-                            format!("task:view:{}", task.id.as_str())
-                        } else {
-                            "task:page:0".to_owned()
-                        },
-                    ),
-                    close(locale, "task:close"),
-                ],
-            ],
+            inline_keyboard: rows,
         }),
     }
 }
@@ -378,6 +403,30 @@ pub fn task_delete_forbidden(locale: Locale) -> &'static str {
 }
 
 #[must_use]
+pub fn task_run_forbidden(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => "Solo quien creó esta tarea puede ejecutarla, porque usa sus créditos",
+        Locale::En => "Only the creator can run this task, because it uses their credits",
+    }
+}
+
+#[must_use]
+pub fn task_run_failed(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => "No pude ejecutar la tarea. Probá de nuevo",
+        Locale::En => "I could not run the task. Try again",
+    }
+}
+
+#[must_use]
+pub fn task_run_started(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Es => "La ejecuto ahora. Su horario no cambia",
+        Locale::En => "Running it now. Its schedule does not change",
+    }
+}
+
+#[must_use]
 pub fn task_deleted(task_id: &TaskId, locale: Locale) -> String {
     match locale {
         Locale::Es => format!("Tarea {} cancelada", task_id.as_str()),
@@ -390,9 +439,10 @@ mod tests {
     use chrono::Weekday;
 
     use super::{
-        TaskCallbackParse, can_delete_task, format_task_summary, parse_task_callback,
-        render_task_list, task_delete_failed, task_delete_forbidden, task_deleted,
-        task_load_failed, task_not_found,
+        TaskCallbackParse, can_delete_task, can_run_task, format_task_summary, parse_task_callback,
+        render_task_detail, render_task_list, task_delete_failed, task_delete_forbidden,
+        task_deleted, task_load_failed, task_not_found, task_run_failed, task_run_forbidden,
+        task_run_started,
     };
     use crate::locale::Locale;
     use crate::scheduled_tasks::{ScheduledTask, TaskId, TaskSchedule, TaskStateError};
@@ -416,6 +466,7 @@ mod tests {
             schedule_anchor_at: None,
             next_run_at: Some(next_run_at),
             last_execution_id: None,
+            resume_at: None,
         })
     }
 
@@ -540,6 +591,93 @@ mod tests {
             TaskCallbackParse::Guard
         );
         assert_eq!(parse_task_callback("task:close"), TaskCallbackParse::Close);
+        Ok(())
+    }
+
+    #[test]
+    fn the_detail_offers_a_manual_run_and_keeps_showing_the_schedule() -> Result<(), TaskStateError>
+    {
+        let mut item = task(
+            "hourly01",
+            TaskSchedule::IntervalSeconds { seconds: 3_600 },
+            NEXT,
+        )?;
+        let callbacks = |view: super::TaskListView| {
+            view.keyboard
+                .map_or(Vec::new(), |keyboard| keyboard.inline_keyboard)
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|button| (button.text, button.callback_data.unwrap_or_default()))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let detail = callbacks(render_task_detail(&item, Locale::Es, false));
+        assert_eq!(
+            detail[0],
+            [(
+                "▶️ Ejecutar ahora".to_owned(),
+                "task:run:hourly01".to_owned()
+            )]
+        );
+        assert_eq!(detail[1][0].1, "task:ask:hourly01");
+        let english = callbacks(render_task_detail(&item, Locale::En, false));
+        assert_eq!(english[0][0].0, "▶️ Run now");
+        let confirm = callbacks(render_task_detail(&item, Locale::Es, true));
+        assert_eq!(confirm[0][0].1, "task:del:hourly01");
+        assert!(
+            confirm
+                .iter()
+                .flatten()
+                .all(|(_, data)| !data.starts_with("task:run:"))
+        );
+
+        // While a manual run waits, the views still show the scheduled run.
+        let shown = render_task_detail(&item, Locale::Es, false).text;
+        let summary = format_task_summary(&item, Locale::Es);
+        let label = callbacks(render_task_list(std::slice::from_ref(&item), Locale::Es));
+        item.resume_at = item.next_run_at;
+        item.next_run_at = Some(NEXT - 1_200);
+        assert_eq!(render_task_detail(&item, Locale::Es, false).text, shown);
+        assert_eq!(format_task_summary(&item, Locale::Es), summary);
+        assert_eq!(
+            callbacks(render_task_list(std::slice::from_ref(&item), Locale::Es)),
+            label
+        );
+
+        assert_eq!(
+            parse_task_callback("task:run:hourly01"),
+            TaskCallbackParse::Run(TaskId::new("hourly01")?)
+        );
+        assert!(can_run_task(false, None, Some(42)));
+        assert!(can_run_task(true, Some(42), Some(42)));
+        assert!(!can_run_task(true, Some(7), Some(42)));
+        assert!(!can_run_task(true, None, None));
+        assert_eq!(
+            task_run_forbidden(Locale::Es),
+            "Solo quien creó esta tarea puede ejecutarla, porque usa sus créditos"
+        );
+        assert_eq!(
+            task_run_forbidden(Locale::En),
+            "Only the creator can run this task, because it uses their credits"
+        );
+        assert_eq!(
+            task_run_failed(Locale::Es),
+            "No pude ejecutar la tarea. Probá de nuevo"
+        );
+        assert_eq!(
+            task_run_failed(Locale::En),
+            "I could not run the task. Try again"
+        );
+        assert_eq!(
+            task_run_started(Locale::Es),
+            "La ejecuto ahora. Su horario no cambia"
+        );
+        assert_eq!(
+            task_run_started(Locale::En),
+            "Running it now. Its schedule does not change"
+        );
         Ok(())
     }
 

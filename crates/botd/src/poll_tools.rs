@@ -556,6 +556,7 @@ mod tests {
             schedule_anchor_at: Some(1000),
             next_run_at: Some(1000),
             last_execution_id: None,
+            resume_at: None,
         }
     }
 

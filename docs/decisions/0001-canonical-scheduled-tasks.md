@@ -38,7 +38,13 @@ billing, and single-owner execution.
 `run_date`, `interval_seconds`, and `trigger_config` remain the stored trigger
 representation. `next_run_at` is authoritative for all trigger kinds.
 `schedule_anchor_at` preserves interval alignment across restarts.
-`last_execution_id` records the most recently completed occurrence. Unknown
+`last_execution_id` records the most recently completed occurrence.
+`resume_at` is present only while a run asked for by hand (the **Run now**
+button in `/tareas`) waits: `next_run_at` then holds the time of that request,
+and `resume_at` holds the scheduled run to go back to. When the manual run
+ends, the task returns to `resume_at`, or to the next scheduled run after it if
+that time has also passed, and `resume_at` is removed. The request replaces the
+record only if it did not change since it was read. Unknown
 fields remain permitted for forward compatibility. The scheduler treats these
 records as the only source of truth and reports malformed records rather than
 inventing recurrence.

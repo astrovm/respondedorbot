@@ -40,6 +40,7 @@ fn document(
             schedule_anchor_at: Some(next_run_at),
             next_run_at: Some(next_run_at),
             last_execution_id: None,
+            resume_at: None,
         },
         run_date: None,
         extra: BTreeMap::new(),

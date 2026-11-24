@@ -1,5 +1,6 @@
 //! Redis operations for scheduled-task payloads and per-chat indexes.
 
+use bot_core::scheduled_tasks::request_run_now;
 use thiserror::Error;
 
 use crate::redis_connection::{
@@ -15,6 +16,8 @@ const TASK_EXECUTION_PREFIX: &str = "task:execution:";
 
 const RENEW_LEASE_SCRIPT: &str = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) else return 0 end";
 const UPSERT_TASK_SCRIPT: &str = "redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2]); redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4]); redis.call('EXPIRE', KEYS[2], ARGV[1]); redis.call('SETEX', KEYS[3], ARGV[1], '1'); redis.call('ZADD', KEYS[4], ARGV[3], ARGV[4]); return 1";
+/// The upsert above, done only while the stored task is still `ARGV[5]`.
+const REPLACE_TASK_SCRIPT: &str = "if redis.call('GET', KEYS[1]) ~= ARGV[5] then return 0 end; redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2]); redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4]); redis.call('EXPIRE', KEYS[2], ARGV[1]); redis.call('SETEX', KEYS[3], ARGV[1], '1'); redis.call('ZADD', KEYS[4], ARGV[3], ARGV[4]); return 1";
 const COMPLETE_TASK_SCRIPT: &str = "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end; if redis.call('EXISTS', KEYS[2]) == 0 then redis.call('DEL', KEYS[1], KEYS[5]); return 0 end; if ARGV[2] == '' then redis.call('DEL', KEYS[2]); redis.call('ZREM', KEYS[3], ARGV[3]); redis.call('ZREM', KEYS[4], ARGV[3]); else redis.call('SETEX', KEYS[2], ARGV[4], ARGV[2]); redis.call('ZADD', KEYS[3], ARGV[5], ARGV[3]); redis.call('EXPIRE', KEYS[3], ARGV[4]); redis.call('ZADD', KEYS[4], ARGV[5], ARGV[3]); end; redis.call('DEL', KEYS[1], KEYS[5]); return 1";
 const CANCEL_TASK_SCRIPT: &str = "local removed = redis.call('DEL', KEYS[1]); redis.call('ZREM', KEYS[2], ARGV[1]); redis.call('ZREM', KEYS[3], ARGV[1]); return removed";
 
@@ -30,6 +33,8 @@ pub enum RedisTaskStoreError {
     InvalidScore,
     #[error("canonical recurring task has no next-run state")]
     MissingNextRun,
+    #[error("the task changed while it was being updated")]
+    Conflict,
     #[error(transparent)]
     Record(#[from] TaskRecordError),
 }
@@ -280,6 +285,50 @@ impl RedisTaskStore {
             > 0)
     }
 
+    /// Makes a task due now for a run asked for by hand, keeping its
+    /// schedule. Returns `None` when the task is gone or belongs to another
+    /// chat, and `Conflict` when something else changed it at the same time.
+    pub fn request_run_now(
+        &self,
+        task_id: &str,
+        chat_id: &str,
+        now: i64,
+        ttl_seconds: i64,
+    ) -> Result<Option<TaskRecordDocument>, RedisTaskStoreError> {
+        let ttl_seconds = positive_ttl(ttl_seconds)?;
+        let data_key = format!("task:data:{task_id}");
+        let Some(stored) = self.get(&data_key)? else {
+            return Ok(None);
+        };
+        let mut document = decode_task_record(&stored)?;
+        if document.task.chat_id != chat_id {
+            return Ok(None);
+        }
+        document.task = request_run_now(&document.task, now);
+        let next_run_at = document.task.next_run_at.unwrap_or(now);
+        let chat_key = format!("task:chat:{chat_id}");
+        let marker_key = format!("{chat_key}:indexed");
+        let mut connection = self.client.get_connection()?;
+        let replaced = redis::cmd("EVAL")
+            .arg(REPLACE_TASK_SCRIPT)
+            .arg(4)
+            .arg(data_key)
+            .arg(chat_key)
+            .arg(marker_key)
+            .arg(TASK_DUE_INDEX_KEY)
+            .arg(ttl_seconds)
+            .arg(encode_task_record(&document)?)
+            .arg(next_run_at as f64)
+            .arg(task_id)
+            .arg(stored)
+            .query::<i64>(&mut connection)?;
+        if replaced == 1 {
+            Ok(Some(document))
+        } else {
+            Err(RedisTaskStoreError::Conflict)
+        }
+    }
+
     pub fn load_task(
         &self,
         task_id: &str,
@@ -412,10 +461,11 @@ mod tests {
 
     use super::{
         CANCEL_TASK_SCRIPT, COMPLETE_TASK_SCRIPT, RELEASE_LEASE_SCRIPT, RENEW_LEASE_SCRIPT,
-        RedisTaskStore, RedisTaskStoreError, TASK_DUE_INDEX_KEY, TaskOccurrenceCompletion,
-        UPSERT_TASK_SCRIPT, task_claim_key, task_execution_key,
+        REPLACE_TASK_SCRIPT, RedisTaskStore, RedisTaskStoreError, TASK_DUE_INDEX_KEY,
+        TaskOccurrenceCompletion, UPSERT_TASK_SCRIPT, task_claim_key, task_execution_key,
     };
     use crate::redis_connection::{RedisEndpoint, test_support::read_command};
+    use crate::task_record::{decode_task_record, encode_task_record};
 
     #[test]
     fn rejects_nonpositive_ttls_before_connecting() -> Result<(), RedisTaskStoreError> {
@@ -446,6 +496,10 @@ mod tests {
         ));
         assert!(matches!(
             store.renew_lease("lease", "token", -1),
+            Err(RedisTaskStoreError::InvalidTtl)
+        ));
+        assert!(matches!(
+            store.request_run_now("t1", "c1", 42, 0),
             Err(RedisTaskStoreError::InvalidTtl)
         ));
         assert!(matches!(
@@ -527,6 +581,75 @@ mod tests {
             store.mget(&["task:data:t1".into(), "task:data:t2".into()])?,
             [Some("{}".into()), None]
         );
+        server
+            .join()
+            .ok()
+            .ok_or("synthetic Redis server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn a_manual_run_replaces_only_the_task_it_read() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let stored = r#"{"schema_version":1,"id":"t1","chat_id":"c1","text":"x","interval_seconds":3600,"next_run_at":"2026-08-30T12:21:00Z"}"#;
+        let scheduled = 1_788_092_460;
+        let now = scheduled - 1_200;
+        let mut expected = decode_task_record(stored)?;
+        expected.task.next_run_at = Some(now);
+        expected.task.resume_at = Some(scheduled);
+        let payload = encode_task_record(&expected)?;
+        let bulk = |text: &str| format!("${}\r\n{text}\r\n", text.len());
+        let replace = |reply: &'static str| {
+            (
+                vec![
+                    "EVAL".to_owned(),
+                    REPLACE_TASK_SCRIPT.to_owned(),
+                    "4".to_owned(),
+                    "task:data:t1".to_owned(),
+                    "task:chat:c1".to_owned(),
+                    "task:chat:c1:indexed".to_owned(),
+                    TASK_DUE_INDEX_KEY.to_owned(),
+                    "60".to_owned(),
+                    payload.clone(),
+                    format!("{now}.0"),
+                    "t1".to_owned(),
+                    stored.to_owned(),
+                ],
+                reply.to_owned(),
+            )
+        };
+        let get = |key: &str, reply: String| (vec!["GET".to_owned(), key.to_owned()], reply);
+        let exchanges = vec![
+            get("task:data:t1", bulk(stored)),
+            replace(":1\r\n"),
+            get("task:data:t1", bulk(stored)),
+            replace(":0\r\n"),
+            get("task:data:t2", "$-1\r\n".to_owned()),
+            get("task:data:t1", bulk(stored)),
+        ];
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            for (expected, response) in exchanges {
+                assert_eq!(read_command(&mut stream)?, expected);
+                stream.write_all(response.as_bytes())?;
+            }
+            Ok(())
+        });
+        let store = RedisTaskStore::new(&RedisEndpoint {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: None,
+        })?;
+
+        assert_eq!(store.request_run_now("t1", "c1", now, 60)?, Some(expected));
+        assert!(matches!(
+            store.request_run_now("t1", "c1", now, 60),
+            Err(RedisTaskStoreError::Conflict)
+        ));
+        assert_eq!(store.request_run_now("t2", "c1", now, 60)?, None);
+        assert_eq!(store.request_run_now("t1", "other", now, 60)?, None);
         server
             .join()
             .ok()

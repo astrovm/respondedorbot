@@ -86,8 +86,9 @@ use bot_core::stocks::{
     render_stock_quotes,
 };
 use bot_core::task_commands::{
-    TaskCallbackParse, can_delete_task, parse_task_callback, render_task_list, task_delete_failed,
-    task_delete_forbidden, task_deleted, task_load_failed, task_not_found,
+    TaskCallbackParse, can_delete_task, can_run_task, parse_task_callback, render_task_list,
+    task_delete_failed, task_delete_forbidden, task_deleted, task_load_failed, task_not_found,
+    task_run_failed, task_run_forbidden, task_run_started,
 };
 use bot_core::telegram_actions::{
     InlineKeyboardButton, InlineKeyboardMarkup, MAX_TELEGRAM_TEXT_LENGTH, ParseMode, SendMessage,
@@ -1163,6 +1164,17 @@ pub trait ScheduledTaskSource {
     fn list(&mut self, chat_id: &str) -> Result<Vec<ScheduledTask>, String>;
 
     fn cancel(&mut self, task_id: &TaskId, chat_id: &str) -> Result<bool, String>;
+
+    /// Makes the task run now without changing its schedule. Returns false
+    /// when the task is gone.
+    fn run_now(&mut self, task_id: &TaskId, chat_id: &str) -> Result<bool, String>;
+}
+
+/// What a task button asks for once its task is found.
+enum TaskButton {
+    Show { confirm: bool },
+    Run,
+    Delete,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4349,6 +4361,45 @@ where
         Ok(DispatchOutcome::Handled)
     }
 
+    /// Asks the scheduler to run `task` now, for its creator only.
+    fn run_task_now(
+        &mut self,
+        context: &CallbackContext,
+        locale: bot_core::locale::Locale,
+        is_group: bool,
+        task: &ScheduledTask,
+    ) -> NativeDispatchResult<Config, Actions, Random> {
+        let (text, show_alert) = if can_run_task(is_group, context.user_id, task.user_id) {
+            let missing = DispatchError::MissingService("scheduled tasks");
+            let source = self.scheduled_task_source.as_mut().ok_or(missing)?;
+            match source.run_now(&task.id, &context.chat_id) {
+                Ok(true) => (task_run_started(locale), false),
+                Ok(false) => (task_not_found(locale), true),
+                Err(error) => {
+                    self.state_diagnostics.push(format!(
+                        "scheduled task manual run chat_id={} task_id={}: {error}",
+                        context.chat_id,
+                        task.id.as_str()
+                    ));
+                    (task_run_failed(locale), true)
+                }
+            }
+        } else {
+            (task_run_forbidden(locale), true)
+        };
+        if let Some(callback_id) = context.callback_id.as_deref() {
+            let _receipt = self
+                .actions
+                .execute(TelegramAction::AnswerCallback {
+                    callback_id: callback_id.to_owned(),
+                    text: Some(text.to_owned()),
+                    show_alert,
+                })
+                .map_err(DispatchError::Action)?;
+        }
+        Ok(DispatchOutcome::Handled)
+    }
+
     fn dispatch_task_callback(
         &mut self,
         context: &CallbackContext,
@@ -4392,9 +4443,10 @@ where
                 return Ok(DispatchOutcome::Handled);
             }
             TaskCallbackParse::Page(page) => Err(page),
-            TaskCallbackParse::Delete(id) => Ok((id, None)),
-            TaskCallbackParse::View(id) => Ok((id, Some(false))),
-            TaskCallbackParse::Confirm(id) => Ok((id, Some(true))),
+            TaskCallbackParse::Delete(id) => Ok((id, TaskButton::Delete)),
+            TaskCallbackParse::Run(id) => Ok((id, TaskButton::Run)),
+            TaskCallbackParse::View(id) => Ok((id, TaskButton::Show { confirm: false })),
+            TaskCallbackParse::Confirm(id) => Ok((id, TaskButton::Show { confirm: true })),
         };
         let missing = DispatchError::MissingService("scheduled tasks");
         let source = self.scheduled_task_source.as_mut().ok_or(missing)?;
@@ -4418,7 +4470,7 @@ where
                 return Ok(DispatchOutcome::Handled);
             }
         };
-        let (task_id, detail) = match request {
+        let (task_id, button) = match request {
             Err(page) => {
                 let view = bot_core::task_commands::render_task_page(&tasks, locale, page);
                 self.answer_callback_best_effort(context.callback_id.as_deref());
@@ -4449,7 +4501,7 @@ where
             }
             return Ok(DispatchOutcome::Handled);
         };
-        if let Some(confirm) = detail {
+        if let TaskButton::Show { confirm } = button {
             let view = bot_core::task_commands::render_task_detail(&target, locale, confirm);
             self.answer_callback_best_effort(context.callback_id.as_deref());
             if let Ok(chat_id) = context.chat_id.parse::<i64>() {
@@ -4465,6 +4517,9 @@ where
             return Ok(DispatchOutcome::Handled);
         }
         let is_group = is_group_chat_type(Some(&context.chat_type));
+        if matches!(button, TaskButton::Run) {
+            return self.run_task_now(context, locale, is_group, &target);
+        }
         let authorization = if is_group {
             context.user_id.map_or(
                 GroupAuthorizationDecision {
@@ -8146,6 +8201,13 @@ mod tests {
                 .push((task_id.as_str().to_owned(), chat_id.to_owned()));
             Ok(true)
         }
+
+        fn run_now(&mut self, task_id: &TaskId, chat_id: &str) -> Result<bool, String> {
+            self.cancellations
+                .borrow_mut()
+                .push((format!("run:{}", task_id.as_str()), chat_id.to_owned()));
+            Ok(true)
+        }
     }
 
     struct FallibleTasks {
@@ -8161,6 +8223,10 @@ mod tests {
         fn cancel(&mut self, _task_id: &TaskId, _chat_id: &str) -> Result<bool, String> {
             self.cancel_result.clone()
         }
+
+        fn run_now(&mut self, _task_id: &TaskId, _chat_id: &str) -> Result<bool, String> {
+            self.cancel_result.clone()
+        }
     }
 
     struct SequencedTasks {
@@ -8173,6 +8239,10 @@ mod tests {
         }
 
         fn cancel(&mut self, _task_id: &TaskId, _chat_id: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        fn run_now(&mut self, _task_id: &TaskId, _chat_id: &str) -> Result<bool, String> {
             Ok(true)
         }
     }
@@ -8190,6 +8260,7 @@ mod tests {
             schedule_anchor_at: Some(1_777_523_400),
             next_run_at: Some(1_777_527_000),
             last_execution_id: None,
+            resume_at: None,
         })
     }
 
@@ -19309,6 +19380,98 @@ mod tests {
                 TelegramAction::EditMessage { text: edit_text, .. }
             ] if text == "Tarea task0001 cancelada" && edit_text.starts_with("No hay tareas")
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_creator_can_run_a_task_now_in_a_group() -> Result<(), TaskStateError> {
+        for (owner, ran, expected, show_alert) in [
+            (88, true, "La ejecuto ahora. Su horario no cambia", false),
+            (
+                42,
+                false,
+                "Solo quien creó esta tarea puede ejecutarla, porque usa sus créditos",
+                true,
+            ),
+        ] {
+            let requests = Rc::new(RefCell::new(Vec::new()));
+            let mut dispatcher = dispatcher().with_scheduled_task_source(Box::new(Tasks {
+                lists: vec![vec![scheduled_task(owner)?]],
+                cancellations: Rc::clone(&requests),
+            }));
+            assert_eq!(
+                dispatcher.dispatch(callback_update("task:run:task0001", "group", None)),
+                Ok(DispatchOutcome::Handled)
+            );
+            let expected_requests = if ran {
+                vec![("run:task0001".to_owned(), "-42".to_owned())]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(*requests.borrow(), expected_requests);
+            assert!(matches!(
+                dispatcher.actions.0.as_slice(),
+                [TelegramAction::AnswerCallback {
+                    text: Some(text),
+                    show_alert: alert,
+                    ..
+                }] if text == expected && *alert == show_alert
+            ));
+        }
+
+        // In a private chat the person is always the one who pays.
+        let mut private = dispatcher().with_scheduled_task_source(Box::new(SequencedTasks {
+            lists: VecDeque::from([Ok(vec![scheduled_task(42)?])]),
+        }));
+        assert_eq!(
+            private.dispatch(callback_update("task:run:task0001", "private", Some("en"))),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert!(matches!(
+            private.actions.0.as_slice(),
+            [TelegramAction::AnswerCallback {
+                text: Some(text),
+                show_alert: false,
+                ..
+            }] if text == "Running it now. Its schedule does not change"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_manual_run_reports_a_missing_task_or_a_store_failure() -> Result<(), TaskStateError> {
+        for (run_result, expected, has_diagnostic) in [
+            (Ok(false), "Esa tarea ya no existe", false),
+            (
+                Err("synthetic run failure".to_owned()),
+                "No pude ejecutar la tarea. Probá de nuevo",
+                true,
+            ),
+        ] {
+            let mut dispatcher = dispatcher().with_scheduled_task_source(Box::new(FallibleTasks {
+                list_result: Ok(vec![scheduled_task(88)?]),
+                cancel_result: run_result,
+            }));
+            assert_eq!(
+                dispatcher.dispatch(callback_update("task:run:task0001", "group", None)),
+                Ok(DispatchOutcome::Handled)
+            );
+            assert!(matches!(
+                dispatcher.actions.0.as_slice(),
+                [TelegramAction::AnswerCallback {
+                    text: Some(text),
+                    show_alert: true,
+                    ..
+                }] if text == expected
+            ));
+            assert_eq!(
+                dispatcher
+                    .state_diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains("synthetic run failure")),
+                has_diagnostic
+            );
+        }
         Ok(())
     }
 

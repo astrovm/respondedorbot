@@ -180,7 +180,7 @@ fn run_weekly_poll(repair: bool) -> Result<(), Box<dyn Error>> {
         user_name: "synthetic-user".to_owned(), user_id: Some(4242),
         schedule: TaskSchedule::IntervalSeconds { seconds: 604_800 },
         timezone_offset: -3, locale: "es".to_owned(), schedule_anchor_at: Some(now),
-        next_run_at: Some(now), last_execution_id: None,
+        next_run_at: Some(now), last_execution_id: None, resume_at: None,
     };
     let store = RedisTaskStore::new(&endpoint)?;
     store.delete(TASK_SCHEDULER_OWNER_KEY)?;
