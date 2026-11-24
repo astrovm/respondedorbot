@@ -271,6 +271,15 @@ mod tests {
                 "{broken}"
             );
         }
+        // A RIFF file that is not WebP, such as WAV audio, is no picture.
+        assert_eq!(
+            classified("audio/wav", b"RIFF\0\0\0\0WAVEfmt ", "/a.wav"),
+            Ok((
+                MediaKind::Document,
+                "audio/wav".to_owned(),
+                "a.wav".to_owned()
+            ))
+        );
         assert_eq!(
             classified("", b"\0\x01binary", "/"),
             Ok((
@@ -303,10 +312,19 @@ mod tests {
             classify_media("image/png", b"", "/a.png"),
             Err(MediaRejection::Empty)
         );
+        let mut largest = vec![0; UPLOAD_MAX_BYTES];
+        assert!(classify_media("application/octet-stream", &largest, "/a.bin").is_ok());
+        largest.push(0);
         assert_eq!(
-            classify_media("image/png", &vec![0; UPLOAD_MAX_BYTES + 1], "/a.png"),
+            classify_media("image/png", &largest, "/a.png"),
             Err(MediaRejection::TooLarge)
         );
+    }
+
+    #[test]
+    fn the_limits_are_the_bot_apis() {
+        assert_eq!(PHOTO_MAX_BYTES, 10_485_760);
+        assert_eq!(UPLOAD_MAX_BYTES, 52_428_800);
     }
 
     #[test]
