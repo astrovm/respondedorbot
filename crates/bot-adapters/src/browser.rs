@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 use std::{env, fs, process, thread};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde_json::{Value, json};
 use thiserror::Error;
 use url::{Position, Url};
@@ -55,7 +57,6 @@ const CHROMIUM_FLAGS: &[&str] = &[
     "--mute-audio",
     "--hide-scrollbars",
     "--window-size=1280,2400",
-    "--blink-settings=imagesEnabled=false",
     // Chromium sends loopback requests around a proxy unless told not to.
     "--proxy-bypass-list=<-loopback>",
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
@@ -65,6 +66,22 @@ const CHROMIUM_FLAGS: &[&str] = &[
 pub trait PageRenderer {
     /// Loads `url`, runs its scripts and returns the resulting HTML.
     fn render(&self, url: &str) -> Result<String, RenderError>;
+}
+
+/// The width of a page screenshot, a common laptop screen.
+pub const SCREENSHOT_WIDTH: u32 = 1280;
+/// The height of a screenshot of the first screen.
+pub const SCREENSHOT_HEIGHT: u32 = 800;
+/// The tallest full-page screenshot. Telegram refuses photos whose width and
+/// height add up to more than 10000 pixels.
+pub const FULL_PAGE_MAX_HEIGHT: u32 = 8000;
+const SCREENSHOT_QUALITY: u8 = 85;
+
+pub trait PageCapturer {
+    /// Loads `url` with its images and returns a JPEG of the first screen,
+    /// or with `full_page` of the page from the top down to
+    /// [`FULL_PAGE_MAX_HEIGHT`].
+    fn screenshot(&self, url: &str, full_page: bool) -> Result<Vec<u8>, RenderError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -263,6 +280,26 @@ impl ChromiumRenderer {
 
 impl PageRenderer for ChromiumRenderer {
     fn render(&self, url: &str) -> Result<String, RenderError> {
+        self.run(false, |session, read_by| session.render(url, read_by))
+    }
+}
+
+impl PageCapturer for ChromiumRenderer {
+    fn screenshot(&self, url: &str, full_page: bool) -> Result<Vec<u8>, RenderError> {
+        self.run(true, |session, read_by| {
+            session.screenshot(url, read_by, full_page)
+        })
+    }
+}
+
+impl ChromiumRenderer {
+    /// Starts Chromium in a fresh profile and lets `work` drive it until the
+    /// read deadline. Images load only when a screenshot needs them.
+    fn run<T>(
+        &self,
+        images: bool,
+        work: impl FnOnce(&mut DevTools<std::process::ChildStdin>, Instant) -> Result<T, DevToolsError>,
+    ) -> Result<T, RenderError> {
         let _running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
         let profile = Profile::create().map_err(|error| RenderError::Start(error.to_string()))?;
         let started = Instant::now();
@@ -274,6 +311,7 @@ impl PageRenderer for ChromiumRenderer {
             .args(["sh", "-c", PIPE_WRAPPER, "chromium-pipe"])
             .args(&self.command)
             .args(CHROMIUM_FLAGS)
+            .args((!images).then_some("--blink-settings=imagesEnabled=false"))
             .arg(format!("--proxy-server=http://{}", self.proxy))
             .arg(format!("--user-data-dir={}", profile.0.display()))
             .arg(format!(
@@ -282,19 +320,17 @@ impl PageRenderer for ChromiumRenderer {
             ))
             .arg("about:blank");
         let read_by = started + self.time_limit.saturating_sub(READ_MARGIN);
-        run_browser(&mut command, Child::wait, |session| {
-            session.render(url, read_by)
-        })
+        run_browser(&mut command, Child::wait, |session| work(session, read_by))
     }
 }
 
 /// Starts the browser, lets `work` drive it over the DevTools pipe, then
 /// closes it. A browser that exits early reports its exit status.
-fn run_browser(
+fn run_browser<T>(
     command: &mut Command,
     wait: impl FnOnce(&mut Child) -> io::Result<ExitStatus>,
-    work: impl FnOnce(&mut DevTools<std::process::ChildStdin>) -> Result<String, DevToolsError>,
-) -> Result<String, RenderError> {
+    work: impl FnOnce(&mut DevTools<std::process::ChildStdin>) -> Result<T, DevToolsError>,
+) -> Result<T, RenderError> {
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -306,7 +342,7 @@ fn run_browser(
     devtools.close();
     let status = stop(&mut child, wait);
     match result {
-        Ok(html) => Ok(html),
+        Ok(output) => Ok(output),
         Err(DevToolsError::Failed(message)) => Err(RenderError::Failed(message)),
         Err(DevToolsError::Closed) => Err(RenderError::Failed(
             status.map_or_else(|error| error.to_string(), |status| status.to_string()),
@@ -393,23 +429,7 @@ impl<W: Write> DevTools<W> {
     /// Loads `url` in a new tab, waits until it settles or `read_by`, and
     /// returns its HTML.
     fn render(&mut self, url: &str, read_by: Instant) -> Result<String, DevToolsError> {
-        let target = self.call("Target.createTarget", json!({"url": "about:blank"}), None)?;
-        let target = text_at(&target, "/targetId")?;
-        let attached = self.call(
-            "Target.attachToTarget",
-            json!({"targetId": target, "flatten": true}),
-            None,
-        )?;
-        let session = text_at(&attached, "/sessionId")?;
-        self.call("Network.enable", json!({}), Some(&session))?;
-        self.call("Page.enable", json!({}), Some(&session))?;
-        // Load events before this point belong to the blank tab.
-        self.loaded_at = None;
-        let navigation = self.call("Page.navigate", json!({"url": url}), Some(&session))?;
-        if let Some(error) = navigation.get("errorText").and_then(Value::as_str) {
-            return Err(DevToolsError::Failed(format!("navigation failed: {error}")));
-        }
-        self.settle(read_by);
+        let session = self.open(url, read_by, None)?;
         let expression = format!(
             "(document.documentElement ? document.documentElement.outerHTML : '').slice(0, {FETCH_MAX_BYTES})"
         );
@@ -420,6 +440,87 @@ impl<W: Write> DevTools<W> {
         )?;
         let html = text_at(&evaluated, "/result/value")?;
         Ok(truncate(html, FETCH_MAX_BYTES))
+    }
+
+    /// Loads `url` in a screen-sized tab, waits until it settles or
+    /// `read_by`, and returns a JPEG of it.
+    fn screenshot(
+        &mut self,
+        url: &str,
+        read_by: Instant,
+        full_page: bool,
+    ) -> Result<Vec<u8>, DevToolsError> {
+        let session = self.open(url, read_by, Some(screen(SCREENSHOT_HEIGHT)))?;
+        let mut height = SCREENSHOT_HEIGHT;
+        if full_page {
+            let metrics = self.call("Page.getLayoutMetrics", json!({}), Some(&session))?;
+            height = metrics
+                .pointer("/cssContentSize/height")
+                .and_then(Value::as_f64)
+                .filter(|height| height.is_finite())
+                .map_or(SCREENSHOT_HEIGHT, |height| {
+                    // The clamp keeps the height inside the u32 range.
+                    height.ceil().clamp(
+                        f64::from(SCREENSHOT_HEIGHT),
+                        f64::from(FULL_PAGE_MAX_HEIGHT),
+                    ) as u32
+                });
+            if height > SCREENSHOT_HEIGHT {
+                // A taller tab, because Chromium can stall for many seconds
+                // when it captures beyond the tab on a very long page.
+                self.call(
+                    "Emulation.setDeviceMetricsOverride",
+                    screen(height),
+                    Some(&session),
+                )?;
+                // The taller tab shows more images, so let them load.
+                self.loaded_at = Some(Instant::now());
+                self.settle(read_by);
+            }
+        }
+        let shot = self.call(
+            "Page.captureScreenshot",
+            json!({
+                "format": "jpeg",
+                "quality": SCREENSHOT_QUALITY,
+                "clip": {"x": 0, "y": 0, "width": SCREENSHOT_WIDTH, "height": height, "scale": 1},
+            }),
+            Some(&session),
+        )?;
+        BASE64_STANDARD
+            .decode(text_at(&shot, "/data")?)
+            .map_err(|_| DevToolsError::Failed("screenshot data is not base64".to_owned()))
+    }
+
+    /// Opens `url` in a new tab, with the screen size `screen` when given,
+    /// and waits until it settles or `read_by`. Returns the tab's session.
+    fn open(
+        &mut self,
+        url: &str,
+        read_by: Instant,
+        screen: Option<Value>,
+    ) -> Result<String, DevToolsError> {
+        let target = self.call("Target.createTarget", json!({"url": "about:blank"}), None)?;
+        let target = text_at(&target, "/targetId")?;
+        let attached = self.call(
+            "Target.attachToTarget",
+            json!({"targetId": target, "flatten": true}),
+            None,
+        )?;
+        let session = text_at(&attached, "/sessionId")?;
+        self.call("Network.enable", json!({}), Some(&session))?;
+        self.call("Page.enable", json!({}), Some(&session))?;
+        if let Some(screen) = screen {
+            self.call("Emulation.setDeviceMetricsOverride", screen, Some(&session))?;
+        }
+        // Load events before this point belong to the blank tab.
+        self.loaded_at = None;
+        let navigation = self.call("Page.navigate", json!({"url": url}), Some(&session))?;
+        if let Some(error) = navigation.get("errorText").and_then(Value::as_str) {
+            return Err(DevToolsError::Failed(format!("navigation failed: {error}")));
+        }
+        self.settle(read_by);
+        Ok(session)
     }
 
     /// Waits in real time until the page has loaded and its network has been
@@ -508,6 +609,16 @@ impl<W: Write> DevTools<W> {
             let _ = send(&mut input, b"{\"id\":0,\"method\":\"Browser.close\"}\0");
         }
     }
+}
+
+/// DevTools screen metrics for a tab `height` pixels tall.
+fn screen(height: u32) -> Value {
+    json!({
+        "width": SCREENSHOT_WIDTH,
+        "height": height,
+        "deviceScaleFactor": 1,
+        "mobile": false,
+    })
 }
 
 /// Writes one whole message and pushes it through any buffering writer.
@@ -799,6 +910,7 @@ mod tests {
                 *) exit 3 ;;
             esac
             case " $* " in *" --dump-dom "*) exit 6 ;; esac
+            case " $* " in *" --blink-settings=imagesEnabled=false "*) ;; *) exit 7 ;; esac
             test "$last" = about:blank || exit 5
             test -d "$profile" || exit 4
             {OPENED}
@@ -842,9 +954,131 @@ mod tests {
         Ok(())
     }
 
+    /// A fake browser that answers a screenshot: the tab opens, the page
+    /// loads, then `replies` answer the calls after navigation.
+    fn screenshot_browser(log: &PathBuf, replies: &[String]) -> ChromiumRenderer {
+        let replies = replies
+            .iter()
+            .enumerate()
+            .map(|(index, result)| format!("say '{{\"id\":{},\"result\":{result}}}'\n", index + 7))
+            .collect::<String>();
+        fake_chromium(
+            &format!(
+                r#"{SAY}
+                case " $* " in *imagesEnabled=false*) exit 7 ;; esac
+                say '{{"id":1,"result":{{"targetId":"T"}}}}'
+                say '{{"id":2,"result":{{"sessionId":"S"}}}}'
+                say '{{"id":3,"result":{{}}}}'
+                say '{{"id":4,"result":{{}}}}'
+                say '{{"id":5,"result":{{}}}}'
+                say '{{"id":6,"result":{{"frameId":"F"}}}}'
+                say '{{"method":"Page.loadEventFired","sessionId":"S","params":{{}}}}'
+                {replies}
+                tr '\0' '\n' <&3 > '{}'
+                "#,
+                log.display()
+            ),
+            RENDER_TIME_LIMIT,
+        )
+    }
+
+    fn logged_requests(
+        log: &PathBuf,
+    ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+        let requests = fs::read_to_string(log)?;
+        fs::remove_file(log)?;
+        Ok(requests
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    #[test]
+    fn screenshots_load_images_in_a_screen_sized_tab() -> TestResult {
+        let jpeg = BASE64_STANDARD.encode(b"\xFF\xD8\xFFjpeg");
+        let log = scratch_file("devtools-shot");
+        let shot = screenshot_browser(&log, &[format!(r#"{{"data":"{jpeg}"}}"#)])
+            .screenshot("https://site.example/", false)?;
+        assert_eq!(shot, b"\xFF\xD8\xFFjpeg");
+        let requests = logged_requests(&log)?;
+        let methods = requests
+            .iter()
+            .map(|request| request["method"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods,
+            [
+                "Target.createTarget",
+                "Target.attachToTarget",
+                "Network.enable",
+                "Page.enable",
+                "Emulation.setDeviceMetricsOverride",
+                "Page.navigate",
+                "Page.captureScreenshot",
+                "Browser.close",
+            ]
+        );
+        assert_eq!(
+            requests[4]["params"],
+            json!({"width": 1280, "height": 800, "deviceScaleFactor": 1, "mobile": false})
+        );
+        assert_eq!(requests[4]["sessionId"], "S");
+        assert_eq!(
+            requests[6]["params"],
+            json!({
+                "format": "jpeg",
+                "quality": 85,
+                "clip": {"x": 0, "y": 0, "width": 1280, "height": 800, "scale": 1},
+            })
+        );
+
+        // A full page is measured, the tab grows to it up to the tallest
+        // photo Telegram takes, and only the tab is captured.
+        for (layout, height) in [
+            (r#"{"cssContentSize":{"height":20000.5}}"#, 8000),
+            (r#"{"cssContentSize":{"height":1200.2}}"#, 1201),
+            (r#"{"cssContentSize":{"height":10}}"#, 800),
+            (r#"{}"#, 800),
+        ] {
+            let log = scratch_file("devtools-full");
+            let mut replies = vec![layout.to_owned()];
+            if height > 800 {
+                replies.push("{}".to_owned());
+            }
+            replies.push(format!(r#"{{"data":"{jpeg}"}}"#));
+            screenshot_browser(&log, &replies).screenshot("https://site.example/", true)?;
+            let requests = logged_requests(&log)?;
+            assert_eq!(requests[6]["method"], "Page.getLayoutMetrics");
+            let capture = requests.len() - 2;
+            if height > 800 {
+                assert_eq!(requests[7]["method"], "Emulation.setDeviceMetricsOverride");
+                assert_eq!(requests[7]["params"]["height"], height, "{layout}");
+            }
+            assert_eq!(requests[capture]["method"], "Page.captureScreenshot");
+            assert_eq!(
+                requests[capture]["params"]["clip"]["height"], height,
+                "{layout}"
+            );
+        }
+
+        let log = scratch_file("devtools-bad");
+        assert_eq!(
+            screenshot_browser(&log, &[r#"{"data":"not base64!"}"#.to_owned()])
+                .screenshot("https://site.example/", false),
+            Err(RenderError::Failed(
+                "screenshot data is not base64".to_owned()
+            ))
+        );
+        fs::remove_file(&log)?;
+        Ok(())
+    }
+
     #[test]
     fn reports_start_failures_and_exit_or_wait_errors() {
-        let ignored = |_: &mut DevTools<std::process::ChildStdin>| Err(DevToolsError::Closed);
+        let ignored =
+            |_: &mut DevTools<std::process::ChildStdin>| -> Result<String, DevToolsError> {
+                Err(DevToolsError::Closed)
+            };
         let mut missing = Command::new("/nonexistent/respondedorbot-renderer");
         assert!(matches!(
             run_browser(&mut missing, Child::wait, ignored),
@@ -863,7 +1097,7 @@ mod tests {
             Err(RenderError::Failed("synthetic wait failure".to_owned()))
         );
         assert_eq!(
-            run_browser(&mut Command::new("true"), Child::wait, |_| Err(
+            run_browser::<String>(&mut Command::new("true"), Child::wait, |_| Err(
                 DevToolsError::Failed("synthetic".to_owned())
             )),
             Err(RenderError::Failed("synthetic".to_owned()))

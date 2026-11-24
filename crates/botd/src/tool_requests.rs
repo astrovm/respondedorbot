@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
+use bot_adapters::web_fetch::normalize_http_url;
 use bot_core::locale::Locale;
+use bot_core::media_reply::CAPTION_MAX_CHARS;
 use bot_core::polls::{MAX_POLL_OPTIONS, PollRequest};
 use serde_json::Value;
 
@@ -53,6 +55,15 @@ pub enum ExternalToolRequest {
     },
     CreatePoll(PollRequest),
     GetPolls,
+    SendMedia {
+        url: String,
+        caption: String,
+    },
+    PageScreenshot {
+        url: String,
+        full_page: bool,
+        caption: String,
+    },
     BotCapabilities,
 }
 
@@ -75,6 +86,8 @@ impl ExternalToolRequest {
             Self::Polymarket { .. } => NativeTool::Polymarket,
             Self::CreatePoll(_) => NativeTool::CreatePoll,
             Self::GetPolls => NativeTool::GetPolls,
+            Self::SendMedia { .. } => NativeTool::SendMedia,
+            Self::PageScreenshot { .. } => NativeTool::PageScreenshot,
             Self::BotCapabilities => NativeTool::BotCapabilities,
         }
     }
@@ -370,8 +383,43 @@ pub(crate) fn validate_request(
         .map(ExternalToolRequest::CreatePoll)
         .map_err(|error| error.message(locale).to_owned()),
         NativeTool::GetPolls => Ok(ExternalToolRequest::GetPolls),
+        NativeTool::SendMedia => {
+            let (url, caption) = media_target(arguments, locale)?;
+            Ok(ExternalToolRequest::SendMedia { url, caption })
+        }
+        NativeTool::PageScreenshot => {
+            let (url, caption) = media_target(arguments, locale)?;
+            Ok(ExternalToolRequest::PageScreenshot {
+                url,
+                full_page: arguments
+                    .get("full_page")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                caption,
+            })
+        }
         NativeTool::BotCapabilities => Ok(ExternalToolRequest::BotCapabilities),
     }
+}
+
+/// The web link and optional caption of a media tool call.
+fn media_target(arguments: &Value, locale: Locale) -> Result<(String, String), String> {
+    let url = normalize_http_url(&text(arguments, "url")).ok_or_else(|| {
+        localized(
+            locale,
+            "necesito un link http o https",
+            "provide an http or https link",
+        )
+    })?;
+    let caption = text(arguments, "caption");
+    if caption.chars().count() > CAPTION_MAX_CHARS {
+        return Err(localized(
+            locale,
+            "el texto de abajo puede tener hasta 1024 caracteres",
+            "the caption can have at most 1024 characters",
+        ));
+    }
+    Ok((url.to_string(), caption))
 }
 
 fn localized(locale: Locale, spanish: &str, english: &str) -> String {
@@ -832,6 +880,79 @@ mod tests {
         );
         assert!(ports.services().calls.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn media_requests_need_a_web_link_and_a_short_caption() {
+        let validate =
+            |tool, arguments: Value, locale| super::validate_request(tool, &arguments, locale);
+        assert_eq!(
+            validate(
+                NativeTool::SendMedia,
+                json!({"url": " example.com/cat.jpg#top ", "caption": " A cat "}),
+                Locale::En
+            ),
+            Ok(ExternalToolRequest::SendMedia {
+                url: "https://example.com/cat.jpg".to_owned(),
+                caption: "A cat".to_owned(),
+            })
+        );
+        assert_eq!(
+            validate(
+                NativeTool::PageScreenshot,
+                json!({"url": "http://example.com/", "full_page": true}),
+                Locale::En
+            ),
+            Ok(ExternalToolRequest::PageScreenshot {
+                url: "http://example.com/".to_owned(),
+                full_page: true,
+                caption: String::new(),
+            })
+        );
+        assert_eq!(
+            validate(
+                NativeTool::PageScreenshot,
+                json!({"url": "example.com"}),
+                Locale::En
+            )
+            .map(|request| request.tool()),
+            Ok(NativeTool::PageScreenshot)
+        );
+        assert_eq!(
+            ExternalToolRequest::SendMedia {
+                url: String::new(),
+                caption: String::new()
+            }
+            .tool(),
+            NativeTool::SendMedia
+        );
+        for (arguments, locale, error) in [
+            (json!({}), Locale::Es, "necesito un link http o https"),
+            (
+                json!({"url": "file:///etc/passwd"}),
+                Locale::En,
+                "provide an http or https link",
+            ),
+            (
+                json!({"url": "example.com", "caption": "a".repeat(1025)}),
+                Locale::Es,
+                "el texto de abajo puede tener hasta 1024 caracteres",
+            ),
+            (
+                json!({"url": "example.com", "caption": "a".repeat(1025)}),
+                Locale::En,
+                "the caption can have at most 1024 characters",
+            ),
+        ] {
+            assert_eq!(
+                validate(NativeTool::SendMedia, arguments.clone(), locale),
+                Err(error.to_owned())
+            );
+            assert_eq!(
+                validate(NativeTool::PageScreenshot, arguments, locale),
+                Err(error.to_owned())
+            );
+        }
     }
 
     #[test]

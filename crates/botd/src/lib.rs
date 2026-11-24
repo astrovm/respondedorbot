@@ -22,6 +22,7 @@ pub mod maintenance;
 pub mod market_tools;
 pub mod media;
 pub mod media_adapters;
+pub mod media_tools;
 pub mod native_ai;
 pub mod native_tools;
 pub mod operational_reporting;

@@ -13,6 +13,8 @@ use std::sync::OnceLock;
 use thiserror::Error;
 use url::{Host, Url};
 
+use bot_core::media_reply::UPLOAD_MAX_BYTES;
+
 use crate::browser::{PageRenderer, RenderError};
 use crate::http_client::{BROWSER_USER_AGENT, error_chain};
 
@@ -29,6 +31,10 @@ const IFRAME_WRAPPER_MAX_CHARS: usize = 200;
 /// A page with scripts and less visible text than this is probably built by
 /// JavaScript, so it is rendered in a browser.
 pub const RENDER_BELOW_CHARS: usize = 3_000;
+/// How long a file the bot sends on may take to download.
+const MEDIA_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+/// Page tags that point at the page's main picture, best first.
+const PAGE_IMAGE_TAGS: &[&str] = &["og:image:secure_url", "og:image", "twitter:image"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebFetchResponse {
@@ -70,6 +76,7 @@ impl HostResolver for SystemHostResolver {
 
 pub struct ReqwestWebFetchTransport {
     client: Client,
+    max_bytes: usize,
 }
 
 impl ReqwestWebFetchTransport {
@@ -81,7 +88,10 @@ impl ReqwestWebFetchTransport {
                 .redirect(Policy::none())
                 .build()
         })
-        .map(|client| Self { client })
+        .map(|client| Self {
+            client,
+            max_bytes: FETCH_MAX_BYTES,
+        })
         .map_err(classify_error)
     }
 
@@ -92,8 +102,29 @@ impl ReqwestWebFetchTransport {
             .timeout(timeout)
             .redirect(Policy::none())
             .build()
-            .map(|client| Self { client })
+            .map(|client| Self {
+                client,
+                max_bytes: FETCH_MAX_BYTES,
+            })
             .map_err(classify_error)
+    }
+
+    /// A transport for files the bot sends on: it reads up to the bot's
+    /// upload limit and gives a large file time to arrive.
+    pub fn for_media() -> Result<Self, WebFetchTransportError> {
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder()
+                .connect_timeout(Duration::from_secs(8))
+                .timeout(MEDIA_FETCH_TIMEOUT)
+                .redirect(Policy::none())
+                .build()
+        })
+        .map(|client| Self {
+            client,
+            max_bytes: UPLOAD_MAX_BYTES,
+        })
+        .map_err(classify_error)
     }
 }
 
@@ -120,11 +151,15 @@ impl WebFetchTransport for ReqwestWebFetchTransport {
         let mut body = Vec::new();
         response
             .by_ref()
-            .take(u64::try_from(FETCH_MAX_BYTES).unwrap_or(u64::MAX) + 1)
+            .take(
+                u64::try_from(self.max_bytes)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1),
+            )
             .read_to_end(&mut body)
             .map_err(|error| WebFetchTransportError::Other(error_chain(&error)))?;
-        let truncated = body.len() > FETCH_MAX_BYTES;
-        body.truncate(FETCH_MAX_BYTES);
+        let truncated = body.len() > self.max_bytes;
+        body.truncate(self.max_bytes);
         Ok(WebFetchResponse {
             status_code,
             content_type,
@@ -269,6 +304,56 @@ pub fn fetch_public_image<T: WebFetchTransport, R: HostResolver>(
             detail: detail.to_owned(),
         }),
         None => Ok(response.body),
+    }
+}
+
+/// A whole file from a public address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicFile {
+    /// The address that served the file, after redirects.
+    pub url: String,
+    pub content_type: String,
+    pub body: Vec<u8>,
+}
+
+/// Downloads a public file whole, to send it on. A web page stands for its
+/// main picture, so a link to an article or a post gives its image.
+pub fn fetch_public_media<T: WebFetchTransport, R: HostResolver>(
+    transport: &T,
+    resolver: &R,
+    raw_url: &str,
+) -> Result<PublicFile, PublicFetchError> {
+    let mut url = normalize_http_url(raw_url).ok_or_else(|| PublicFetchError::Blocked {
+        url: raw_url.trim().to_owned(),
+    })?;
+    let mut redirect_count = 0;
+    let mut followed_page = false;
+    loop {
+        let response = fetch_public_response(transport, resolver, &mut url, &mut redirect_count)?;
+        if !followed_page && response.content_type.to_ascii_lowercase().contains("html") {
+            let html = String::from_utf8_lossy(&response.body);
+            if let Some(image) = PAGE_IMAGE_TAGS
+                .iter()
+                .filter_map(|tag| extract_meta_content(&html, tag))
+                .find_map(|source| normalize_http_url(url.join(source.trim()).ok()?.as_str()))
+            {
+                next_hop(&url, &mut redirect_count)?;
+                url = image;
+                followed_page = true;
+                continue;
+            }
+        }
+        if response.truncated {
+            return Err(PublicFetchError::Request {
+                url: url.to_string(),
+                detail: "file is over the upload limit".to_owned(),
+            });
+        }
+        return Ok(PublicFile {
+            url: url.to_string(),
+            content_type: response.content_type,
+            body: response.body,
+        });
     }
 }
 
@@ -1932,6 +2017,113 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn media_downloads_follow_a_page_to_its_main_picture_once() {
+        let page = |html: &str| image_response(html.as_bytes(), false, "text/html; charset=utf-8");
+        let transport = scripted(vec![
+            Ok(page(
+                r#"<html><head><meta property="og:image" content=" /img/cover.png "><meta name="twitter:image" content="https://other.example/t.png"></head></html>"#,
+            )),
+            Ok(image_response(b"pixels", false, "image/png")),
+        ]);
+        assert_eq!(
+            fetch_public_media(&transport, &public_resolver(), "example.com/post"),
+            Ok(PublicFile {
+                url: "https://example.com/img/cover.png".to_owned(),
+                content_type: "image/png".to_owned(),
+                body: b"pixels".to_vec(),
+            })
+        );
+        assert_eq!(
+            transport.urls.borrow().as_slice(),
+            [
+                "https://example.com/post",
+                "https://example.com/img/cover.png"
+            ]
+        );
+
+        // A picture tag that leads to another page is not followed again,
+        // and a page without a usable picture comes back as it is.
+        let looping = scripted(vec![
+            Ok(page(
+                r#"<meta property="og:image" content="https://example.com/b">"#,
+            )),
+            Ok(page(
+                r#"<meta property="og:image" content="https://example.com/c">"#,
+            )),
+        ]);
+        assert_eq!(
+            fetch_public_media(&looping, &public_resolver(), "https://example.com/a")
+                .map(|file| file.url),
+            Ok("https://example.com/b".to_owned())
+        );
+        let without = scripted(vec![Ok(page(
+            r#"<meta property="og:image" content="javascript:alert(1)"><p>text</p>"#,
+        ))]);
+        assert_eq!(
+            fetch_public_media(&without, &public_resolver(), "https://example.com/a")
+                .map(|file| file.content_type),
+            Ok("text/html; charset=utf-8".to_owned())
+        );
+    }
+
+    #[test]
+    fn media_downloads_are_whole_public_and_web_only() {
+        assert_eq!(
+            fetch_public_media(
+                &scripted(vec![Ok(image_response(b"part", true, "video/mp4"))]),
+                &public_resolver(),
+                "https://example.com/big.mp4"
+            ),
+            Err(PublicFetchError::Request {
+                url: "https://example.com/big.mp4".to_owned(),
+                detail: "file is over the upload limit".to_owned(),
+            })
+        );
+        assert_eq!(
+            fetch_public_media(&scripted(Vec::new()), &public_resolver(), "ftp://x/a"),
+            Err(PublicFetchError::Blocked {
+                url: "ftp://x/a".to_owned(),
+            })
+        );
+        let to_private = scripted(vec![Ok(image_response(
+            br#"<meta property="og:image" content="http://127.0.0.1/secret.png">"#,
+            false,
+            "text/html",
+        ))]);
+        assert_eq!(
+            fetch_public_media(&to_private, &public_resolver(), "https://example.com/"),
+            Err(PublicFetchError::Blocked {
+                url: "http://127.0.0.1/secret.png".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn the_media_transport_reads_past_the_page_limit() -> TestResult {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let body = vec![b'v'; FETCH_MAX_BYTES + 32];
+        let length = body.len();
+        let server = thread::spawn(move || -> TestResult {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 4_096];
+            let _ = stream.read(&mut request);
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(headers.as_bytes())?;
+            stream.write_all(&body)?;
+            Ok(())
+        });
+        let response =
+            ReqwestWebFetchTransport::for_media()?.get(&format!("http://{address}/clip"))?;
+        assert_eq!(response.body.len(), length);
+        assert!(!response.truncated);
+        assert!(matches!(server.join(), Ok(Ok(()))));
+        Ok(())
     }
 
     #[test]

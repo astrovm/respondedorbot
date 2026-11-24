@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use thiserror::Error;
 
+use bot_core::media_reply::{CAPTION_MAX_CHARS, MediaKind};
 use bot_core::telegram_actions::{CommandScope, ParseMode, TelegramAction, truncate_text};
 use bot_core::telegram_input::MessageId;
 
@@ -16,6 +17,8 @@ use std::time::Duration;
 
 const ACTION_TIMEOUT_SECONDS: u64 = 10;
 const EDIT_TIMEOUT_SECONDS: u64 = 5;
+/// Telegram takes a while to accept a file of up to 50 MB.
+const MEDIA_UPLOAD_TIMEOUT_SECONDS: u64 = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionOutcome {
@@ -255,6 +258,7 @@ fn prepare(action: TelegramAction) -> Result<PreparedAction, ActionError> {
         }
         TelegramAction::SendDocument { .. }
         | TelegramAction::SendVideo { .. }
+        | TelegramAction::SendMedia { .. }
         | TelegramAction::SendPhoto { .. }
         | TelegramAction::EditMessagePhoto { .. } => return Err(ActionError::InvalidAction),
         TelegramAction::SendInvoice {
@@ -573,6 +577,37 @@ pub fn execute_with<T: TelegramTransport>(
                 timeout: Duration::from_secs(60),
             }
         }
+        TelegramAction::SendMedia {
+            chat_id,
+            kind,
+            file,
+            file_name,
+            content_type,
+            reply_to_message_id,
+            caption,
+        } => {
+            let mut fields = vec![("chat_id".to_owned(), chat_id.0.to_string())];
+            if !caption.is_empty() {
+                fields.push((
+                    "caption".to_owned(),
+                    caption.chars().take(CAPTION_MAX_CHARS).collect(),
+                ));
+            }
+            if kind == MediaKind::Video {
+                fields.push(("supports_streaming".to_owned(), "true".to_owned()));
+            }
+            push_reply_field(&mut fields, reply_to_message_id);
+            TelegramMultipartRequest {
+                token: token.to_owned(),
+                endpoint: kind.method().to_owned(),
+                fields,
+                file_field: kind.field().to_owned(),
+                file_name,
+                file_bytes: file,
+                content_type,
+                timeout: Duration::from_secs(MEDIA_UPLOAD_TIMEOUT_SECONDS),
+            }
+        }
         TelegramAction::SendPhoto {
             chat_id,
             photo,
@@ -685,6 +720,7 @@ mod tests {
     use std::cell::RefCell;
     use std::time::Duration;
 
+    use bot_core::media_reply::MediaKind;
     use bot_core::telegram_actions::{
         CommandScope, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, ParseMode,
         SendMessage, TelegramAction,
@@ -1089,6 +1125,73 @@ mod tests {
                 && value.contains("Details")
                 && value.contains("https://example.test/details")
         }));
+    }
+
+    #[test]
+    fn shared_media_uses_its_kinds_method_and_keeps_the_file_metadata() {
+        let transport = transport(r#"{"ok":true,"result":{"message_id":12}}"#);
+        let media = |kind, caption: &str| TelegramAction::SendMedia {
+            chat_id: ChatId(42),
+            kind,
+            file: vec![7, 8].into(),
+            file_name: "clip.mp4".to_owned(),
+            content_type: "video/mp4".to_owned(),
+            reply_to_message_id: Some(MessageId(7)),
+            caption: caption.to_owned(),
+        };
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                media(MediaKind::Video, &"c".repeat(1_100))
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(12)
+            })
+        );
+        transport.response.replace(Some(Ok(HttpResponse {
+            status_code: 200,
+            body: r#"{"ok":true,"result":{"message_id":13}}"#.to_owned(),
+        })));
+        assert_eq!(
+            execute_with(
+                &transport,
+                "synthetic-token",
+                media(MediaKind::Document, "")
+            ),
+            Ok(ActionOutcome::Completed {
+                message_id: Some(13)
+            })
+        );
+        let requests = transport.multipart_requests.borrow();
+        assert_eq!(requests[0].endpoint, "sendVideo");
+        assert_eq!(requests[0].file_field, "video");
+        assert_eq!(requests[0].file_name, "clip.mp4");
+        assert_eq!(requests[0].content_type, "video/mp4");
+        assert_eq!(requests[0].file_bytes.as_ref(), [7, 8]);
+        assert_eq!(requests[0].timeout, Duration::from_secs(120));
+        assert_eq!(
+            requests[0].fields,
+            [
+                ("chat_id".to_owned(), "42".to_owned()),
+                ("caption".to_owned(), "c".repeat(1_024)),
+                ("supports_streaming".to_owned(), "true".to_owned()),
+                ("reply_parameters".to_owned(), REPLY_TO_7.to_owned()),
+            ]
+        );
+        assert_eq!(requests[1].endpoint, "sendDocument");
+        assert_eq!(requests[1].file_field, "document");
+        assert_eq!(
+            requests[1].fields,
+            [
+                ("chat_id".to_owned(), "42".to_owned()),
+                ("reply_parameters".to_owned(), REPLY_TO_7.to_owned()),
+            ]
+        );
+        assert!(matches!(
+            prepare(media(MediaKind::Photo, "")),
+            Err(ActionError::InvalidAction)
+        ));
     }
 
     #[test]

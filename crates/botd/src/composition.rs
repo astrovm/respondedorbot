@@ -139,6 +139,10 @@ use crate::media_adapters::{
     FfmpegMediaProcessor, OpenRouterTranscriptionProvider, OpenRouterVisionProvider,
     RedisMediaCache, TelegramMediaFiles,
 };
+use crate::media_tools::{
+    MediaBudget, MediaTool, MediaToolContext, PublicMediaFetcher, SharedCapturer,
+    TelegramMediaSender,
+};
 use crate::native_tools::{NativeTool, NativeToolRegistry, StandardNativeToolBackend};
 use crate::poll_tools::{PollTool, PollToolContext, TelegramPollSender};
 use crate::polymarket_tool::PolymarketTool;
@@ -150,7 +154,7 @@ use crate::task_tools::{
     BillingTaskFunds, RandomTaskIdSource, TaskCancelTool, TaskListTool, TaskSetTool,
     TaskToolContext,
 };
-use crate::tool_requests::{ExternalToolbox, ValidatedNativeToolPorts};
+use crate::tool_requests::{ExternalToolExecutor, ExternalToolbox, ValidatedNativeToolPorts};
 use crate::web_fetch_tool::{SharedRenderer, WebFetchTool};
 use crate::youtube::{NativeYoutubeContext, YoutubeContextRuntime};
 use bot_adapters::redis_poll_store::RedisPollStore;
@@ -1961,6 +1965,7 @@ fn telegram_action_chat_id(action: &TelegramAction) -> Option<i64> {
         TelegramAction::SendDocument { chat_id, .. }
         | TelegramAction::SendAnimation { chat_id, .. }
         | TelegramAction::SendVideo { chat_id, .. }
+        | TelegramAction::SendMedia { chat_id, .. }
         | TelegramAction::SendPhoto { chat_id, .. }
         | TelegramAction::EditMessagePhoto { chat_id, .. }
         | TelegramAction::SendInvoice { chat_id, .. }
@@ -3606,6 +3611,16 @@ impl ConversationToolFactory for ProductionToolFactory {
                     )),
                 );
             }
+            toolbox = media_executors(
+                toolbox,
+                token,
+                MediaToolContext {
+                    chat_id: input.chat_id.0,
+                    reply_to_message_id: Some(input.message_id.0),
+                    locale,
+                },
+                bot_adapters::browser::shared_renderer(),
+            )?;
         }
 
         if let Some(api_key) = self.firecrawl_key.clone().filter(|key| !key.is_empty()) {
@@ -3644,6 +3659,37 @@ impl crate::native_ai::TaskToolFactory for ProductionToolFactory {
             StandardNativeToolBackend::new(ValidatedNativeToolPorts::new(toolbox, locale), locale),
             locale,
         )))
+    }
+}
+
+/// Registers `send_media`, and `page_screenshot` when a browser is
+/// available. Both send to the chat in `context`.
+fn media_executors(
+    toolbox: ExternalToolbox,
+    token: &str,
+    context: MediaToolContext,
+    capturer: Option<Arc<bot_adapters::browser::ChromiumRenderer>>,
+) -> Result<ExternalToolbox, String> {
+    let budget = MediaBudget::default();
+    let tool = |capturer: Option<SharedCapturer>| -> Result<Box<dyn ExternalToolExecutor>, String> {
+        Ok(Box::new(MediaTool::new(
+            PublicMediaFetcher::new(
+                ReqwestWebFetchTransport::for_media().map_err(error_text)?,
+                SystemHostResolver,
+            ),
+            capturer,
+            tool_transport("Telegram media", TelegramMediaSender::new(token))?,
+            context,
+            budget.clone(),
+        )))
+    };
+    let toolbox = toolbox.with_executor(NativeTool::SendMedia, tool(None)?);
+    match capturer {
+        Some(capturer) => Ok(toolbox.with_executor(
+            NativeTool::PageScreenshot,
+            tool(Some(capturer as SharedCapturer))?,
+        )),
+        None => Ok(toolbox),
     }
 }
 
@@ -7219,6 +7265,18 @@ mod tests {
             Some(42)
         );
         assert_eq!(
+            super::telegram_action_chat_id(&TelegramAction::SendMedia {
+                chat_id: ChatId(44),
+                kind: bot_core::media_reply::MediaKind::Video,
+                file: Arc::from(b"synthetic video".as_slice()),
+                file_name: "clip.mp4".to_owned(),
+                content_type: "video/mp4".to_owned(),
+                reply_to_message_id: None,
+                caption: String::new(),
+            }),
+            Some(44)
+        );
+        assert_eq!(
             super::telegram_action_chat_id(&TelegramAction::EditMessagePhoto {
                 chat_id: ChatId(43),
                 message_id: MessageId(5),
@@ -10547,5 +10605,31 @@ mod tests {
             })
             .is_ok()
         );
+    }
+
+    #[test]
+    fn screenshots_are_offered_only_with_a_browser() -> crate::test_env::TestResult {
+        use crate::tool_requests::ExternalToolServices;
+        let context = super::MediaToolContext {
+            chat_id: -100,
+            reply_to_message_id: None,
+            locale: Locale::En,
+        };
+        let without = super::media_executors(
+            super::ExternalToolbox::new(Locale::En),
+            "synthetic-token",
+            context,
+            None,
+        )?;
+        assert!(without.is_available(super::NativeTool::SendMedia));
+        assert!(!without.is_available(super::NativeTool::PageScreenshot));
+        let with = super::media_executors(
+            super::ExternalToolbox::new(Locale::En),
+            "synthetic-token",
+            context,
+            bot_adapters::browser::shared_renderer(),
+        )?;
+        assert!(with.is_available(super::NativeTool::PageScreenshot));
+        Ok(())
     }
 }

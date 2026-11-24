@@ -50,13 +50,16 @@ native_tools! {
     Polymarket => "polymarket",
     CreatePoll => "create_poll",
     GetPolls => "get_polls",
+    SendMedia => "send_media",
+    PageScreenshot => "page_screenshot",
     BotCapabilities => "bot_capabilities",
 }
 
 impl NativeTool {
     #[must_use]
     pub const fn task_allowed(self) -> bool {
-        !matches!(self, Self::TaskSet)
+        // A task run can be retried, which would post its files twice.
+        !matches!(self, Self::TaskSet | Self::SendMedia | Self::PageScreenshot)
     }
 
     /// Reads whose result cannot change within one message, so a repeated
@@ -66,7 +69,12 @@ impl NativeTool {
     pub const fn reusable(self) -> bool {
         !matches!(
             self,
-            Self::RandomChoice | Self::TaskSet | Self::TaskCancel | Self::CreatePoll
+            Self::RandomChoice
+                | Self::TaskSet
+                | Self::TaskCancel
+                | Self::CreatePoll
+                | Self::SendMedia
+                | Self::PageScreenshot
         )
     }
 
@@ -379,6 +387,31 @@ pub(crate) fn tool_schema(tool: NativeTool) -> Value {
             "Read the polls you sent in this chat, newest first, with vote counts and who voted for each option. Telegram never tells bots who voted in polls that users created.",
             empty_parameters(),
         ),
+        NativeTool::SendMedia => (
+            "Send a file from a public link to the current chat: an image, GIF, video, audio track, PDF or any other file up to 50 MB. The file's type decides how it shows. A link to a web page sends the page's main picture, such as an article's or a post's image. Use it when someone asks to see or get something, or when a picture shows the answer better than words. Find links with web_search or web_fetch first; never invent one. After sending, reply briefly without pasting the link.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "maxLength": 2000, "description": "Public http or https link to the file or to a page with a main picture."},
+                    "caption": {"type": "string", "maxLength": 1024, "description": "Optional short text shown under the file."}
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+        ),
+        NativeTool::PageScreenshot => (
+            "Load a public web page in a browser and send a screenshot of it to the current chat. Use it when someone asks to see a page or how a site looks. It shows the first screen by default; set full_page to show the page from the top down, up to 8000 pixels. Takes a few seconds. After sending, reply briefly.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "maxLength": 2000, "description": "Public http or https link to the page."},
+                    "full_page": {"type": "boolean", "default": false, "description": "Capture the whole page from the top, not only the first screen."},
+                    "caption": {"type": "string", "maxLength": 1024, "description": "Optional short text shown under the screenshot."}
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+        ),
         NativeTool::BotCapabilities => (
             "Get the authoritative list of bot features and commands. Use when a user asks what the bot can do or which command to use.",
             empty_parameters(),
@@ -543,6 +576,8 @@ mod tests {
                 "polymarket",
                 "create_poll",
                 "get_polls",
+                "send_media",
+                "page_screenshot",
                 "bot_capabilities"
             ]
         );
@@ -551,7 +586,7 @@ mod tests {
             normal[3]["function"]["parameters"]["additionalProperties"],
             false
         );
-        assert_eq!(registry.schemas(true).len(), normal.len() - 1);
+        assert_eq!(registry.schemas(true).len(), normal.len() - 3);
         let single_use = ALL_TOOLS
             .iter()
             .filter(|tool| !registry.reusable(tool.name()))
@@ -559,12 +594,21 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             single_use,
-            ["task_set", "task_cancel", "random_choice", "create_poll"]
+            [
+                "task_set",
+                "task_cancel",
+                "random_choice",
+                "create_poll",
+                "send_media",
+                "page_screenshot"
+            ]
         );
         assert!(!registry.reusable("unknown"));
         assert_eq!(catalog_schemas(), normal);
         assert!(!registry.contains("task_set", true));
         assert!(registry.contains("task_set", false));
+        assert!(!registry.contains("send_media", true));
+        assert!(!registry.contains("page_screenshot", true));
     }
 
     #[test]
