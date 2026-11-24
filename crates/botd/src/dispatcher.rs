@@ -19435,6 +19435,27 @@ mod tests {
                 ..
             }] if text == "Running it now. Its schedule does not change"
         ));
+
+        // A tap without a callback id still runs the task, with no answer.
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let mut silent = dispatcher().with_scheduled_task_source(Box::new(Tasks {
+            lists: vec![vec![scheduled_task(88)?]],
+            cancellations: Rc::clone(&requests),
+        }));
+        assert_eq!(
+            silent.dispatch(callback_update_with_context(
+                "task:run:task0001",
+                json!(-42),
+                "group",
+                7,
+                Some(88),
+                None,
+                None,
+            )),
+            Ok(DispatchOutcome::Handled)
+        );
+        assert_eq!(requests.borrow().len(), 1);
+        assert!(silent.actions.0.is_empty());
         Ok(())
     }
 
