@@ -399,10 +399,32 @@ impl<Transport: OpenRouterTransport> TaskAiProvider for OpenRouterTaskProvider<T
                     .push(ChatMessage::tool_result(call.id, result.output));
             }
         }
-        Err(TaskProviderFailure::new(
-            OpenRouterChatError::MalformedResponse,
+        // Every tool round is spent. One last round may not call tools, so the
+        // task still reports what it found instead of failing in silence.
+        request.tool_choice = Some("none".to_owned());
+        request.messages.push(ChatMessage::text(
+            ChatRole::System,
+            crate::chat_tool_loop::TOOL_LIMIT_ANSWER_PROMPT,
+        ));
+        let completion = complete_with(&self.transport, &self.api_key, &self.base_url, &request)
+            .map_err(|source| TaskProviderFailure::new(source, billing_segments.clone()))?;
+        crate::chat_tool_loop::trace(
+            &trace_id,
+            crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS + 1,
+            "provider_round",
+            task_round_trace(&completion),
+        );
+        billing_segments.push(task_completion_segment(&completion));
+        // A model that ignores `tool_choice` gets no more tool runs: only its
+        // text is used. If that text is empty, the executor's empty-reply
+        // retry runs the task again.
+        Ok(TaskProviderReply {
+            text: completion.text,
+            poll: None,
+            fallback: false,
+            finish,
             billing_segments,
-        ))
+        })
     }
 }
 
@@ -2352,8 +2374,102 @@ mod tests {
         assert_eq!(body["messages"][2]["tool_call_id"], "poll-call");
     }
 
+    fn text_completion(content: &str) -> HttpResponse {
+        HttpResponse {
+            status_code: 200,
+            body: json!({
+                "id": "generation-answer", "model": "resolved/model",
+                "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 34}
+            })
+            .to_string(),
+            headers: BTreeMap::new(),
+        }
+    }
+
     #[test]
-    fn exhausted_poll_repairs_fail_with_all_incurred_usage() {
+    fn exhausted_poll_repairs_answer_in_text_with_all_incurred_usage() {
+        let rounds = crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
+        let mut responses = VecDeque::from(vec![
+            poll_completion(
+                json!({"question": "Q", "options": ["same", "SAME"]}),
+                json!("An unfinished poll"),
+            );
+            rounds
+        ]);
+        responses.push_back(text_completion("Could not build a valid poll."));
+        let mut provider = OpenRouterTaskProvider::new(
+            Transport {
+                requests: RefCell::new(Vec::new()),
+                responses: RefCell::new(responses),
+            },
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "synthetic/model",
+            "persona",
+        );
+        let reply = provider
+            .complete(&[], &task("en"), "task123:1000")
+            .expect("the answer round replies in text");
+        assert_eq!(reply.text, "Could not build a valid poll.");
+        assert!(reply.poll.is_none());
+        assert_eq!(reply.billing_segments.len(), rounds + 1);
+        assert_eq!(provider.transport.requests.borrow().len(), rounds + 1);
+    }
+
+    #[test]
+    fn a_task_that_uses_every_tool_round_still_answers_without_tools() {
+        let rounds = crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
+        let tool_round = HttpResponse {
+            status_code: 200,
+            body: json!({
+                "id": "generation-tools", "model": "resolved/model",
+                "choices": [{"message": {"content": null, "tool_calls": [{
+                    "id": "call-other", "type": "function",
+                    "function": {"name": "synthetic_tool", "arguments": "{}"}
+                }]}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 34}
+            })
+            .to_string(),
+            headers: BTreeMap::new(),
+        };
+        let mut responses = VecDeque::from(vec![tool_round; rounds]);
+        responses.push_back(text_completion("Partial report"));
+        let mut provider = OpenRouterTaskProvider::new(
+            Transport {
+                requests: RefCell::new(Vec::new()),
+                responses: RefCell::new(responses),
+            },
+            "synthetic-key",
+            "https://synthetic.invalid/api/v1",
+            "synthetic/model",
+            "persona",
+        );
+        let reply = provider
+            .complete(&[], &task("es"), "task123:1000")
+            .expect("the answer round replies");
+        assert_eq!(reply.text, "Partial report");
+        assert_eq!(reply.billing_segments.len(), rounds + 1);
+        let requests = provider.transport.requests.borrow();
+        assert_eq!(requests.len(), rounds + 1);
+        for request in &requests[..rounds] {
+            let body: Value = serde_json::from_str(&request.body).expect("request JSON");
+            assert!(body.get("tool_choice").is_none());
+        }
+        let last: Value = serde_json::from_str(&requests[rounds].body).expect("request JSON");
+        assert_eq!(last["tool_choice"], "none");
+        let messages = last["messages"].as_array().expect("messages");
+        let instruction = messages.last().expect("answer instruction");
+        assert_eq!(instruction["role"], "system");
+        assert_eq!(
+            instruction["content"],
+            crate::chat_tool_loop::TOOL_LIMIT_ANSWER_PROMPT
+        );
+        assert!(!last["tools"].as_array().expect("tools").is_empty());
+    }
+
+    #[test]
+    fn a_failed_answer_round_returns_every_incurred_usage() {
         let rounds = crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
         let mut provider = OpenRouterTaskProvider::new(
             Transport {
@@ -2373,10 +2489,13 @@ mod tests {
         );
         let failure = provider
             .complete(&[], &task("en"), "task123:1000")
-            .expect_err("invalid polls must not be returned as successful text");
-        assert_eq!(failure.source, OpenRouterChatError::MalformedResponse);
+            .expect_err("the answer round has no response");
+        assert_eq!(
+            failure.source,
+            OpenRouterChatError::Transport("missing response".to_owned())
+        );
         assert_eq!(failure.billing_segments.len(), rounds);
-        assert_eq!(provider.transport.requests.borrow().len(), rounds);
+        assert_eq!(provider.transport.requests.borrow().len(), rounds + 1);
     }
 
     #[test]
