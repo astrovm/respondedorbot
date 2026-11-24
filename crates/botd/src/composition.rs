@@ -2763,6 +2763,22 @@ impl ScheduledTaskSource for RedisScheduledTaskSource {
             .cancel_task(task_id.as_str(), chat_id)
             .map_err(error_text)
     }
+
+    fn run_now(
+        &mut self,
+        task_id: &bot_core::scheduled_tasks::TaskId,
+        chat_id: &str,
+    ) -> Result<bool, String> {
+        self.store
+            .request_run_now(
+                task_id.as_str(),
+                chat_id,
+                current_unix_timestamp(),
+                crate::task_tools::TASK_RECORD_TTL_SECONDS,
+            )
+            .map(|document| document.is_some())
+            .map_err(error_text)
+    }
 }
 
 fn task_admin_transport(
@@ -7914,6 +7930,7 @@ mod tests {
             schedule_anchor_at: None,
             next_run_at: None,
             last_execution_id: None,
+            resume_at: None,
         };
         let task_tools = crate::native_ai::TaskToolFactory::create(&mut factory, &task);
         let names = task_tools
@@ -8760,8 +8777,13 @@ mod tests {
                 .save_task(&record, 60)
                 .map_err(super::error_text)?
         );
-        assert_eq!(tasks.list(&chat_id)?, [record.task]);
+        assert_eq!(tasks.list(&chat_id)?, std::slice::from_ref(&record.task));
+        assert!(tasks.run_now(&task_id, &chat_id)?);
+        let listed = tasks.list(&chat_id)?;
+        assert_eq!(listed[0].resume_at, record.task.next_run_at);
+        assert!(!tasks.run_now(&task_id, "synthetic-other-chat")?);
         assert!(tasks.cancel(&task_id, &chat_id)?);
+        assert!(!tasks.run_now(&task_id, &chat_id)?);
         assert!(tasks.list(&chat_id)?.is_empty());
         Ok(())
     }

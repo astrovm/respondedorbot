@@ -51,13 +51,6 @@ pub enum TaskSchedule {
     },
 }
 
-impl TaskSchedule {
-    #[must_use]
-    pub const fn is_recurring(&self) -> bool {
-        !matches!(self, Self::Once)
-    }
-}
-
 /// Canonical task data after adapter validation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScheduledTask {
@@ -72,6 +65,28 @@ pub struct ScheduledTask {
     pub schedule_anchor_at: Option<i64>,
     pub next_run_at: Option<i64>,
     pub last_execution_id: Option<String>,
+    /// While a run asked for by hand waits, the scheduled run to go back to.
+    pub resume_at: Option<i64>,
+}
+
+impl ScheduledTask {
+    /// The next run on the task's own schedule, which a pending run asked
+    /// for by hand does not change.
+    #[must_use]
+    pub fn scheduled_run_at(&self) -> Option<i64> {
+        self.resume_at.or(self.next_run_at)
+    }
+}
+
+/// Makes `task` due at `now` for a run asked for by hand. After that run the
+/// task goes back to its schedule, so a manual run never moves it. A run that
+/// is already due, or held after a failure, is replaced by this one.
+#[must_use]
+pub fn request_run_now(task: &ScheduledTask, now: i64) -> ScheduledTask {
+    let mut task = task.clone();
+    task.resume_at = task.scheduled_run_at();
+    task.next_run_at = Some(now);
+    task
 }
 
 /// Action selected for one scheduler observation.
@@ -251,11 +266,17 @@ pub fn evaluate_due(task: &ScheduledTask, now: i64) -> Result<DueDecision, TaskS
         return Ok(DueDecision::Wait);
     }
 
-    let next_run_at = next_run_after(&task.schedule, task.timezone_offset, scheduled_for, now)?;
+    let next_run_at = match task.resume_at {
+        // A run asked for by hand goes back to the run it came before. When
+        // that time has passed too, this run took its place.
+        Some(resume_at) if resume_at > now => Some(resume_at),
+        Some(resume_at) => next_run_after(&task.schedule, task.timezone_offset, resume_at, now)?,
+        None => next_run_after(&task.schedule, task.timezone_offset, scheduled_for, now)?,
+    };
     let lateness = now.saturating_sub(scheduled_for);
     if lateness > MISFIRE_GRACE_SECONDS {
         return Ok(DueDecision::Skip {
-            remove_task: !task.schedule.is_recurring(),
+            remove_task: next_run_at.is_none(),
             next_run_at,
         });
     }
@@ -300,7 +321,7 @@ mod tests {
 
     use super::{
         DueDecision, ScheduledTask, TaskId, TaskSchedule, TaskStateError, evaluate_due,
-        initial_next_run, next_run_after, parse_weekday, weekday_name,
+        initial_next_run, next_run_after, parse_weekday, request_run_now, weekday_name,
     };
 
     fn timestamp(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
@@ -322,6 +343,7 @@ mod tests {
             schedule_anchor_at: None,
             next_run_at,
             last_execution_id: None,
+            resume_at: None,
         }
     }
 
@@ -599,6 +621,81 @@ mod tests {
             next_run_after(&schedule, 0, at, at),
             Ok(Some(timestamp(2026, 8, 31, 8, 30)))
         );
+    }
+
+    #[test]
+    fn a_manual_run_goes_back_to_the_schedule_it_came_before() {
+        let scheduled = 10_000;
+        let hourly = task(
+            TaskSchedule::IntervalSeconds { seconds: 3_600 },
+            Some(scheduled),
+        );
+        let requested = request_run_now(&hourly, 8_000);
+        assert_eq!(requested.next_run_at, Some(8_000));
+        assert_eq!(requested.resume_at, Some(scheduled));
+        assert_eq!(requested.scheduled_run_at(), Some(scheduled));
+        assert_eq!(hourly.scheduled_run_at(), Some(scheduled));
+        // A second request runs at its own time and keeps the scheduled run.
+        let again = request_run_now(&requested, 8_030);
+        assert_eq!(again.next_run_at, Some(8_030));
+        assert_eq!(again.resume_at, Some(scheduled));
+
+        assert_eq!(
+            evaluate_due(&requested, 8_001),
+            Ok(DueDecision::Execute {
+                execution_id: "abc12345:8000".to_owned(),
+                scheduled_for: 8_000,
+                next_run_at: Some(scheduled),
+            })
+        );
+        // When the scheduled run has passed too, the manual run takes its
+        // place and the grid stays on the original time.
+        assert_eq!(
+            evaluate_due(&request_run_now(&hourly, 9_900), 10_100),
+            Ok(DueDecision::Execute {
+                execution_id: "abc12345:9900".to_owned(),
+                scheduled_for: 9_900,
+                next_run_at: Some(13_600),
+            })
+        );
+        // A manual run missed while the bot was down is skipped, and the
+        // schedule is kept.
+        assert_eq!(
+            evaluate_due(&requested, 8_301),
+            Ok(DueDecision::Skip {
+                remove_task: false,
+                next_run_at: Some(scheduled),
+            })
+        );
+
+        let once = task(TaskSchedule::Once, Some(scheduled));
+        assert!(matches!(
+            evaluate_due(&request_run_now(&once, 8_000), 8_000),
+            Ok(DueDecision::Execute { next_run_at: Some(at), .. }) if at == scheduled
+        ));
+        assert!(matches!(
+            evaluate_due(&request_run_now(&once, 9_900), scheduled),
+            Ok(DueDecision::Execute {
+                next_run_at: None,
+                ..
+            })
+        ));
+
+        // A run that is already due, or held after a failure, is replaced,
+        // and the schedule continues on its grid.
+        let due = request_run_now(&hourly, 10_050);
+        assert_eq!(due.next_run_at, Some(10_050));
+        assert_eq!(due.resume_at, Some(scheduled));
+        assert!(matches!(
+            evaluate_due(&due, 10_051),
+            Ok(DueDecision::Execute {
+                next_run_at: Some(13_600),
+                ..
+            })
+        ));
+        let unscheduled = request_run_now(&task(TaskSchedule::Once, None), 8_000);
+        assert_eq!(unscheduled.next_run_at, Some(8_000));
+        assert_eq!(unscheduled.resume_at, None);
     }
 
     #[test]

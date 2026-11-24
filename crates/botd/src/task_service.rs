@@ -312,6 +312,7 @@ mod tests {
             schedule_anchor_at: Some(1_700_000_000),
             next_run_at: Some(1_700_000_000),
             last_execution_id: None,
+            resume_at: None,
         };
         assert_eq!(
             VerificationExecutor.execute(&task, &execution_id),

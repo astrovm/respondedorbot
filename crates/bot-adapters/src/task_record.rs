@@ -62,6 +62,8 @@ struct RawTaskRecord {
     next_run_at: Option<String>,
     #[serde(default)]
     last_execution_id: Option<String>,
+    #[serde(default)]
+    resume_at: Option<String>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -82,6 +84,10 @@ struct CanonicalTaskRecord<'a> {
     schedule_anchor_at: Option<String>,
     next_run_at: Option<String>,
     last_execution_id: Option<&'a str>,
+    /// Only written while a run asked for by hand waits, so other records
+    /// keep their shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume_at: Option<String>,
     #[serde(flatten)]
     extra: &'a BTreeMap<String, Value>,
 }
@@ -273,6 +279,7 @@ pub fn decode_task_record(payload: &str) -> Result<TaskRecordDocument, TaskRecor
             schedule_anchor_at: timestamp(raw.schedule_anchor_at.as_deref(), "schedule_anchor_at")?,
             next_run_at,
             last_execution_id: raw.last_execution_id,
+            resume_at: timestamp(raw.resume_at.as_deref(), "resume_at")?,
         },
         run_date: raw.run_date,
         extra: raw.extra,
@@ -302,6 +309,7 @@ pub fn encode_task_record(document: &TaskRecordDocument) -> Result<String, TaskR
         schedule_anchor_at: timestamp_text(document.task.schedule_anchor_at)?,
         next_run_at: timestamp_text(document.task.next_run_at)?,
         last_execution_id: document.task.last_execution_id.as_deref(),
+        resume_at: timestamp_text(document.task.resume_at)?,
         extra: &document.extra,
     })
     .map_err(TaskRecordError::from)
@@ -353,6 +361,29 @@ mod tests {
         let encoded: Value = serde_json::from_str(&encode_task_record(&document)?)?;
         assert_eq!(encoded["future_field"], json!({"kept":true}));
         assert_eq!(encoded["last_execution_id"], "abc12345:1");
+        assert_eq!(document.task.resume_at, None);
+        assert!(encoded.get("resume_at").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_pending_manual_run_keeps_its_resume_time() -> Result<(), TaskRecordError> {
+        let document = decode_task_record(
+            r#"{"schema_version":1,"id":"abc12351","chat_id":"1","text":"x","interval_seconds":3600,"next_run_at":"2026-08-30T12:00:00Z","resume_at":"2026-08-30T12:21:00Z"}"#,
+        )?;
+        assert_eq!(document.task.next_run_at, Some(1_788_091_200));
+        assert_eq!(document.task.resume_at, Some(1_788_092_460));
+        let encoded: Value = serde_json::from_str(&encode_task_record(&document)?)?;
+        assert_eq!(encoded["resume_at"], "2026-08-30T12:21:00Z");
+        assert!(encoded.get("future_field").is_none());
+
+        let bad = decode_task_record(
+            r#"{"schema_version":1,"id":"abc12352","chat_id":"1","text":"x","interval_seconds":600,"resume_at":"soon"}"#,
+        );
+        assert!(
+            matches!(bad, Err(TaskRecordError::InvalidTimestamp("resume_at"))),
+            "{bad:?}"
+        );
         Ok(())
     }
 
@@ -626,6 +657,7 @@ mod tests {
                 schedule_anchor_at: anchor,
                 next_run_at: Some(next_run_at),
                 last_execution_id: last_execution.map(|at| format!("{}:{at}", id.as_str())),
+                resume_at: None,
             };
             let document = TaskRecordDocument {
                 task,

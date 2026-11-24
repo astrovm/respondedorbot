@@ -380,6 +380,7 @@ where
         let mut next = document.clone();
         next.task.next_run_at = Some(next_run_at?);
         next.task.last_execution_id = Some(execution_id.to_owned());
+        next.task.resume_at = None;
         Some(next)
     }
 
@@ -823,6 +824,7 @@ mod tests {
                 schedule_anchor_at: Some(100),
                 next_run_at: Some(next_run_at),
                 last_execution_id: None,
+                resume_at: None,
             },
             run_date: None,
             extra: Default::default(),
@@ -932,6 +934,38 @@ mod tests {
             .expect("recurring task must advance");
         assert_eq!(next.task.next_run_at, Some(1_600));
         assert_eq!(next.task.last_execution_id.as_deref(), Some("repeat1:1000"));
+    }
+
+    #[test]
+    fn a_manual_run_executes_now_and_returns_to_the_schedule() {
+        let mut manual = document(
+            "repeat1",
+            TaskSchedule::IntervalSeconds { seconds: 600 },
+            1_000,
+        );
+        manual.task = bot_core::scheduled_tasks::request_run_now(&manual.task, 700);
+        let mut store = Store {
+            due: vec!["repeat1".to_owned()],
+            ..Store::default()
+        };
+        store.documents.insert("repeat1".to_owned(), manual);
+        let mut scheduler = scheduler(store, Executor::default(), SchedulerMode::Authoritative);
+        assert!(matches!(
+            scheduler.step(701),
+            Ok(SchedulerStep::Observed { failures, .. }) if failures.is_empty()
+        ));
+        let (store, executor) = scheduler.parts();
+        assert_eq!(
+            executor.calls,
+            [("repeat1".to_owned(), "repeat1:700".to_owned())]
+        );
+        let next = store.completed[0]
+            .next
+            .as_ref()
+            .expect("recurring task must go back to its schedule");
+        assert_eq!(next.task.next_run_at, Some(1_000));
+        assert_eq!(next.task.resume_at, None);
+        assert_eq!(next.task.last_execution_id.as_deref(), Some("repeat1:700"));
     }
 
     #[test]

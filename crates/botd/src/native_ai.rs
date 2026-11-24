@@ -1033,6 +1033,7 @@ mod tests {
             schedule_anchor_at: Some(1_000),
             next_run_at: Some(1_000),
             last_execution_id: None,
+            resume_at: None,
         }
     }
 

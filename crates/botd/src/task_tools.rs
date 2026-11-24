@@ -31,7 +31,7 @@ use crate::task_payer::{
 use crate::tool_output;
 use crate::tool_requests::{ExternalToolExecutor, ExternalToolRequest, json_integer};
 
-const TASK_RECORD_TTL_SECONDS: i64 = 86_400 * 3_650;
+pub(crate) const TASK_RECORD_TTL_SECONDS: i64 = 86_400 * 3_650;
 
 pub trait TaskToolStore {
     fn list(&mut self, chat_id: &str) -> Result<Vec<ScheduledTask>, String>;
@@ -329,6 +329,7 @@ where
                 schedule_anchor_at: Some(now),
                 next_run_at: Some(next_run_at),
                 last_execution_id: None,
+                resume_at: None,
             },
             run_date,
             extra: BTreeMap::new(),
@@ -896,6 +897,7 @@ mod tests {
                 schedule_anchor_at: Some(1_700_000_000),
                 next_run_at: Some(1_700_000_000),
                 last_execution_id: None,
+                resume_at: None,
             },
             run_date: None,
             extra: BTreeMap::new(),
@@ -932,6 +934,7 @@ mod tests {
                 schedule_anchor_at: None,
                 next_run_at: None,
                 last_execution_id: None,
+                resume_at: None,
             },
             run_date: None,
             extra: BTreeMap::new(),
@@ -1442,6 +1445,7 @@ mod tests {
             schedule_anchor_at: Some(1_700_000_000),
             next_run_at: Some(1_700_003_600),
             last_execution_id: None,
+            resume_at: None,
         })
     }
 
