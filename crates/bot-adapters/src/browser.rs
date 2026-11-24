@@ -956,7 +956,7 @@ mod tests {
 
     /// A fake browser that answers a screenshot: the tab opens, the page
     /// loads, then `replies` answer the calls after navigation.
-    fn screenshot_browser(log: &PathBuf, replies: &[String]) -> ChromiumRenderer {
+    fn screenshot_browser(log: &std::path::Path, replies: &[String]) -> ChromiumRenderer {
         let replies = replies
             .iter()
             .enumerate()
