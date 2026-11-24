@@ -461,11 +461,8 @@ impl<W: Write> DevTools<W> {
         }
         let mut bytes = message.to_string().into_bytes();
         bytes.push(0);
-        self.input
-            .as_mut()
-            .ok_or(DevToolsError::Closed)?
-            .write_all(&bytes)
-            .map_err(|_| DevToolsError::Closed)?;
+        let input = self.input.as_mut().ok_or(DevToolsError::Closed)?;
+        send(input, &bytes).map_err(|_| DevToolsError::Closed)?;
         loop {
             if let Some(response) = self.responses.remove(&id) {
                 return match response.get("error") {
@@ -508,9 +505,15 @@ impl<W: Write> DevTools<W> {
     /// Asks the browser to quit and closes the pipe.
     fn close(&mut self) {
         if let Some(mut input) = self.input.take() {
-            let _ = input.write_all(b"{\"id\":0,\"method\":\"Browser.close\"}\0");
+            let _ = send(&mut input, b"{\"id\":0,\"method\":\"Browser.close\"}\0");
         }
     }
+}
+
+/// Writes one whole message and pushes it through any buffering writer.
+fn send(input: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
+    input.write_all(bytes)?;
+    input.flush()
 }
 
 fn text_at(value: &Value, pointer: &str) -> Result<String, DevToolsError> {
@@ -936,14 +939,15 @@ mod tests {
             .collect()
     }
 
+    /// A pipe that takes the bytes but breaks when they are pushed through.
     struct BrokenPipe;
 
     impl Write for BrokenPipe {
-        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-            Err(io::ErrorKind::BrokenPipe.into())
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
         }
         fn flush(&mut self) -> io::Result<()> {
-            Ok(())
+            Err(io::ErrorKind::BrokenPipe.into())
         }
     }
 
