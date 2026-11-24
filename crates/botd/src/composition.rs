@@ -116,6 +116,7 @@ use crate::chat_tool_loop::DEFAULT_MAX_TOOL_ROUNDS;
 use crate::compaction_scheduler::production_compaction_scheduler;
 use crate::conversation::ConversationToolFactory;
 use crate::conversation::NativeConversation;
+use crate::conversation::{CreditHold, ReplyCredits};
 use crate::conversation_adapters::{PostgresConversationBilling, RedisConversationState};
 use crate::dispatcher::{
     ActionReceipt, ActionSink, AdminCreditLogSource, AdminCreditSink, BcraLoad, BcraSource,
@@ -132,12 +133,17 @@ use crate::dispatcher::{
 use crate::error_text;
 use crate::firecrawl_tool::FirecrawlTool;
 use crate::hacker_news_tool::HackerNewsTool;
+use crate::image_tool::{ImageTool, OpenRouterImageGenerator};
 use crate::lightning_payments::{OpenNodeOptions, ProviderCheckout, opennode_provider};
 use crate::market_tools::{CryptoPricesTool, DollarRatesTool, StockPricesTool, WeatherTool};
 use crate::media::NativeMedia;
 use crate::media_adapters::{
     FfmpegMediaProcessor, OpenRouterTranscriptionProvider, OpenRouterVisionProvider,
     RedisMediaCache, TelegramMediaFiles,
+};
+use crate::media_tools::{
+    MediaBudget, MediaTool, MediaToolContext, PublicMediaFetcher, SharedCapturer,
+    TelegramMediaSender,
 };
 use crate::native_tools::{NativeTool, NativeToolRegistry, StandardNativeToolBackend};
 use crate::poll_tools::{PollTool, PollToolContext, TelegramPollSender};
@@ -150,7 +156,7 @@ use crate::task_tools::{
     BillingTaskFunds, RandomTaskIdSource, TaskCancelTool, TaskListTool, TaskSetTool,
     TaskToolContext,
 };
-use crate::tool_requests::{ExternalToolbox, ValidatedNativeToolPorts};
+use crate::tool_requests::{ExternalToolExecutor, ExternalToolbox, ValidatedNativeToolPorts};
 use crate::web_fetch_tool::{SharedRenderer, WebFetchTool};
 use crate::youtube::{NativeYoutubeContext, YoutubeContextRuntime};
 use bot_adapters::redis_poll_store::RedisPollStore;
@@ -1961,6 +1967,7 @@ fn telegram_action_chat_id(action: &TelegramAction) -> Option<i64> {
         TelegramAction::SendDocument { chat_id, .. }
         | TelegramAction::SendAnimation { chat_id, .. }
         | TelegramAction::SendVideo { chat_id, .. }
+        | TelegramAction::SendMedia { chat_id, .. }
         | TelegramAction::SendPhoto { chat_id, .. }
         | TelegramAction::EditMessagePhoto { chat_id, .. }
         | TelegramAction::SendInvoice { chat_id, .. }
@@ -3370,6 +3377,44 @@ pub struct ProductionToolFactory {
     firecrawl_key: Option<String>,
     openrouter_pricing: Option<Arc<OpenRouterPricingCache>>,
     telegram_token: Option<String>,
+    images: Option<ImageGeneration>,
+    task_images: Option<ImageGeneration<ProductionTaskBilling>>,
+}
+
+/// The billing a reply and its tools share, so a tool's credit hold joins
+/// the reply's operation and payer.
+pub type SharedBilling = Arc<std::sync::Mutex<PostgresConversationBilling>>;
+
+/// The billing scheduled-task runs and their tools share.
+pub type ProductionTaskBilling = crate::native_ai::SharedTaskBilling<PostgresConversationBilling>;
+
+/// What `generate_image` needs besides the Telegram token. `Billing` holds
+/// the picture's credits: a reply's or a task run's.
+pub struct ImageGeneration<Billing = SharedBilling> {
+    pub api_key: String,
+    pub base_url: String,
+    pub billing: Billing,
+}
+
+/// Who a reply's or task run's tools work for.
+struct ToolCaller {
+    chat_id: String,
+    /// The Telegram chat that the tools post to. Without one, no tool posts.
+    telegram_chat: Option<i64>,
+    reply_to_message_id: Option<i64>,
+    user_name: String,
+    user_id: Option<i64>,
+    timezone_offset: i32,
+    locale: bot_core::locale::Locale,
+    photo_file_id: Option<String>,
+}
+
+/// Where a run records that it used a tool that acts.
+fn task_acted_key(execution_id: &str) -> String {
+    format!(
+        "{}:acted",
+        bot_adapters::redis_task_store::task_execution_key(execution_id)
+    )
 }
 
 impl ProductionToolFactory {
@@ -3387,7 +3432,27 @@ impl ProductionToolFactory {
             firecrawl_key,
             openrouter_pricing: None,
             telegram_token: None,
+            images: None,
+            task_images: None,
         }
+    }
+
+    /// Enables `generate_image`. It also needs the Telegram token, to send
+    /// the picture and to download a photo to edit.
+    #[must_use]
+    pub fn with_image_generation(mut self, images: ImageGeneration) -> Self {
+        self.images = Some(images);
+        self
+    }
+
+    /// Enables `generate_image` in scheduled tasks, billed to the run.
+    #[must_use]
+    pub fn with_task_image_generation(
+        mut self,
+        images: ImageGeneration<ProductionTaskBilling>,
+    ) -> Self {
+        self.task_images = Some(images);
+        self
     }
 
     /// Enables `create_poll`, which posts through the Bot API directly.
@@ -3525,17 +3590,19 @@ impl ProductionToolFactory {
     }
 }
 
-impl ConversationToolFactory for ProductionToolFactory {
-    type Tools = ProductionConversationTools;
-
-    fn create(
-        &mut self,
-        input: &crate::ai_dispatch::AiConversationInput,
-    ) -> Result<Self::Tools, String> {
-        let locale = input.locale;
-        let chat_id = input.chat_id.0.to_string();
+impl ProductionToolFactory {
+    /// The tools a reply and a task run share: the read tools, the task
+    /// tools, `polls`, and the tools that post files and pictures.
+    fn acting_toolbox<Credits: CreditHold + Send + 'static>(
+        &self,
+        caller: &ToolCaller,
+        images: Option<(&str, &str, Credits)>,
+        polls: &[NativeTool],
+    ) -> Result<ExternalToolbox, String> {
+        let locale = caller.locale;
+        let chat_id = caller.chat_id.as_str();
         let mut toolbox = self
-            .read_toolbox(locale, &chat_id)?
+            .read_toolbox(locale, chat_id)?
             .with_executor(
                 NativeTool::TaskSet,
                 Box::new({
@@ -3561,15 +3628,10 @@ impl ConversationToolFactory for ProductionToolFactory {
                         RandomTaskIdSource,
                         current_unix_timestamp,
                         TaskToolContext {
-                            chat_id: chat_id.clone(),
-                            user_name: if input.sender_username.is_empty() {
-                                input.sender_first_name.clone()
-                            } else {
-                                input.sender_username.clone()
-                            },
-                            user_id: Some(input.sender_id.0),
-                            timezone_offset: i32::try_from(input.timezone_offset_hours)
-                                .unwrap_or_default(),
+                            chat_id: chat_id.to_owned(),
+                            user_name: caller.user_name.clone(),
+                            user_id: caller.user_id,
+                            timezone_offset: caller.timezone_offset,
                             locale,
                         },
                     );
@@ -3584,29 +3646,118 @@ impl ConversationToolFactory for ProductionToolFactory {
                 NativeTool::TaskCancel,
                 Box::new(TaskCancelTool::new(
                     RedisTaskStore::new(&self.redis_endpoint).map_err(error_text)?,
-                    &chat_id,
+                    chat_id,
                     locale,
                 )),
             );
 
-        if let Some(token) = self.telegram_token.as_deref() {
-            let context = PollToolContext {
-                chat_id: input.chat_id.0,
-                reply_to_message_id: Some(input.message_id.0),
-                locale,
-            };
-            for tool in [NativeTool::CreatePoll, NativeTool::GetPolls] {
-                toolbox = toolbox.with_executor(
-                    tool,
-                    Box::new(PollTool::new(
-                        tool_transport("Telegram poll", TelegramPollSender::new(token))?,
-                        RedisPollStore::new(&self.redis_endpoint).map_err(error_text)?,
-                        current_unix_timestamp,
-                        context,
-                    )),
-                );
-            }
+        let (Some(token), Some(telegram_chat)) =
+            (self.telegram_token.as_deref(), caller.telegram_chat)
+        else {
+            return Ok(toolbox);
+        };
+        let context = PollToolContext {
+            chat_id: telegram_chat,
+            reply_to_message_id: caller.reply_to_message_id,
+            locale,
+        };
+        for tool in polls {
+            toolbox = toolbox.with_executor(
+                *tool,
+                Box::new(PollTool::new(
+                    tool_transport("Telegram poll", TelegramPollSender::new(token))?,
+                    RedisPollStore::new(&self.redis_endpoint).map_err(error_text)?,
+                    current_unix_timestamp,
+                    context,
+                )),
+            );
         }
+        let context = MediaToolContext {
+            chat_id: telegram_chat,
+            reply_to_message_id: caller.reply_to_message_id,
+            locale,
+        };
+        let budget = MediaBudget::default();
+        toolbox = media_executors(
+            toolbox,
+            token,
+            (context, &budget),
+            bot_adapters::browser::shared_renderer(),
+        )?;
+        if let Some((api_key, base_url, credits)) = images {
+            toolbox = toolbox.with_executor(
+                NativeTool::GenerateImage,
+                Box::new(ImageTool::new(
+                    OpenRouterImageGenerator::new(
+                        tool_transport(
+                            "OpenRouter image",
+                            ReqwestOpenRouterTransport::for_images(),
+                        )?,
+                        api_key,
+                        base_url,
+                    ),
+                    (
+                        TelegramMediaFiles::new(
+                            tool_transport("Telegram file", ReqwestTelegramTransport::new())?,
+                            token,
+                        ),
+                        caller.photo_file_id.clone(),
+                    ),
+                    credits,
+                    tool_transport("Telegram media", TelegramMediaSender::new(token))?,
+                    context,
+                    budget,
+                )),
+            );
+        }
+        Ok(toolbox)
+    }
+}
+
+fn tool_registry(
+    toolbox: ExternalToolbox,
+    locale: bot_core::locale::Locale,
+) -> ProductionConversationTools {
+    NativeToolRegistry::new(
+        StandardNativeToolBackend::new(ValidatedNativeToolPorts::new(toolbox, locale), locale),
+        locale,
+    )
+}
+
+impl ConversationToolFactory for ProductionToolFactory {
+    type Tools = ProductionConversationTools;
+
+    fn create(
+        &mut self,
+        input: &crate::ai_dispatch::AiConversationInput,
+    ) -> Result<Self::Tools, String> {
+        let locale = input.locale;
+        let caller = ToolCaller {
+            chat_id: input.chat_id.0.to_string(),
+            telegram_chat: Some(input.chat_id.0),
+            reply_to_message_id: Some(input.message_id.0),
+            user_name: if input.sender_username.is_empty() {
+                input.sender_first_name.clone()
+            } else {
+                input.sender_username.clone()
+            },
+            user_id: Some(input.sender_id.0),
+            timezone_offset: i32::try_from(input.timezone_offset_hours).unwrap_or_default(),
+            locale,
+            photo_file_id: input.photo_file_id.clone(),
+        };
+        let images = self.images.as_ref().map(|images| {
+            (
+                images.api_key.as_str(),
+                images.base_url.as_str(),
+                ReplyCredits::new(Arc::clone(&images.billing), input),
+            )
+        });
+        let mut toolbox = self.acting_toolbox(
+            &caller,
+            images,
+            &[NativeTool::CreatePoll, NativeTool::GetPolls],
+        )?;
 
         if let Some(api_key) = self.firecrawl_key.clone().filter(|key| !key.is_empty()) {
             toolbox = toolbox.with_executor(
@@ -3622,10 +3773,7 @@ impl ConversationToolFactory for ProductionToolFactory {
             );
         }
 
-        Ok(NativeToolRegistry::new(
-            StandardNativeToolBackend::new(ValidatedNativeToolPorts::new(toolbox, locale), locale),
-            locale,
-        ))
+        Ok(tool_registry(toolbox, locale))
     }
 }
 
@@ -3633,17 +3781,84 @@ impl crate::native_ai::TaskToolFactory for ProductionToolFactory {
     fn create(
         &mut self,
         task: &bot_core::scheduled_tasks::ScheduledTask,
+        execution_id: &str,
     ) -> Result<Box<dyn crate::chat_tool_loop::NativeToolRuntime>, String> {
         let locale = if task.locale == "en" {
             bot_core::locale::Locale::En
         } else {
             bot_core::locale::Locale::Es
         };
-        let toolbox = self.read_toolbox(locale, &task.chat_id)?;
-        Ok(Box::new(NativeToolRegistry::new(
-            StandardNativeToolBackend::new(ValidatedNativeToolPorts::new(toolbox, locale), locale),
+        let caller = ToolCaller {
+            chat_id: task.chat_id.clone(),
+            telegram_chat: task.chat_id.parse().ok(),
+            reply_to_message_id: None,
+            user_name: task.user_name.clone(),
+            user_id: task.user_id,
+            timezone_offset: task.timezone_offset,
             locale,
+            photo_file_id: None,
+        };
+        let images = self.task_images.as_ref().map(|images| {
+            (
+                images.api_key.as_str(),
+                images.base_url.as_str(),
+                crate::native_ai::TaskCredits::new(Arc::clone(&images.billing), task, execution_id),
+            )
+        });
+        // The run creates its own poll, so it is delivered after billing.
+        let toolbox = self.acting_toolbox(&caller, images, &[NativeTool::GetPolls])?;
+        Ok(Box::new(tool_registry(toolbox, locale)))
+    }
+
+    fn acted(&mut self, execution_id: &str) -> Result<bool, String> {
+        RedisTaskStore::new(&self.redis_endpoint)
+            .map_err(error_text)?
+            .get(&task_acted_key(execution_id))
+            .map(|marker| marker.is_some())
+            .map_err(error_text)
+    }
+
+    fn mark_acted(&mut self, execution_id: &str) -> Result<(), String> {
+        RedisTaskStore::new(&self.redis_endpoint)
+            .map_err(error_text)?
+            .setex(
+                &task_acted_key(execution_id),
+                crate::task_service::TASK_EXECUTION_TTL_SECONDS,
+                "1",
+            )
+            .map(|_saved| ())
+            .map_err(error_text)
+    }
+}
+
+/// Registers `send_media`, and `page_screenshot` when a browser is
+/// available. Both send to the chat in `context` and count against the
+/// reply's `budget`.
+fn media_executors(
+    toolbox: ExternalToolbox,
+    token: &str,
+    (context, budget): (MediaToolContext, &MediaBudget),
+    capturer: Option<Arc<bot_adapters::browser::ChromiumRenderer>>,
+) -> Result<ExternalToolbox, String> {
+    let tool = |capturer: Option<SharedCapturer>| -> Result<Box<dyn ExternalToolExecutor>, String> {
+        Ok(Box::new(MediaTool::new(
+            PublicMediaFetcher::new(
+                ReqwestWebFetchTransport::for_media().map_err(error_text)?,
+                SystemHostResolver,
+            ),
+            capturer,
+            tool_transport("Telegram media", TelegramMediaSender::new(token))?,
+            context,
+            budget.clone(),
         )))
+    };
+    let toolbox = toolbox.with_executor(NativeTool::SendMedia, tool(None)?);
+    match capturer {
+        Some(capturer) => Ok(toolbox.with_executor(
+            NativeTool::PageScreenshot,
+            tool(Some(capturer as SharedCapturer))?,
+        )),
+        None => Ok(toolbox),
     }
 }
 
@@ -3924,6 +4139,11 @@ fn build_native_dispatcher_with_stream_delivery(
             let creditless_cap = RedisCreditlessCap::new(options.redis_endpoint)
                 .map_err(error_text)
                 .map_err(CompositionError::ConversationBillingPolicy)?;
+            let billing: SharedBilling = Arc::new(std::sync::Mutex::new(
+                PostgresConversationBilling::new(options.database_url)
+                    .with_creditless_cap(creditless_cap)
+                    .with_active_operations(options.active_operations.clone()),
+            ));
             let mut conversation = NativeConversation::new(
                 provider,
                 ProductionToolFactory::new(
@@ -3933,11 +4153,14 @@ fn build_native_dispatcher_with_stream_delivery(
                     conversation_firecrawl_key,
                 )
                 .with_openrouter_pricing(Arc::clone(&openrouter_pricing))
-                .with_telegram_token(options.token),
+                .with_telegram_token(options.token)
+                .with_image_generation(ImageGeneration {
+                    api_key: api_key.clone(),
+                    base_url: openrouter_base_url.clone(),
+                    billing: Arc::clone(&billing),
+                }),
                 conversation_state,
-                PostgresConversationBilling::new(options.database_url)
-                    .with_creditless_cap(creditless_cap)
-                    .with_active_operations(options.active_operations.clone()),
+                billing,
                 &system_prompt,
                 crate::native_ai::PRIMARY_CHAT_MODEL,
                 DEFAULT_MAX_TOOL_ROUNDS,
@@ -7219,6 +7442,18 @@ mod tests {
             Some(42)
         );
         assert_eq!(
+            super::telegram_action_chat_id(&TelegramAction::SendMedia {
+                chat_id: ChatId(44),
+                kind: bot_core::media_reply::MediaKind::Video,
+                file: Arc::from(b"synthetic video".as_slice()),
+                file_name: "clip.mp4".to_owned(),
+                content_type: "video/mp4".to_owned(),
+                reply_to_message_id: None,
+                caption: String::new(),
+            }),
+            Some(44)
+        );
+        assert_eq!(
             super::telegram_action_chat_id(&TelegramAction::EditMessagePhoto {
                 chat_id: ChatId(43),
                 message_id: MessageId(5),
@@ -7833,7 +8068,24 @@ mod tests {
             Some("synthetic-market-key".to_owned()),
             Some("synthetic-search-key".to_owned()),
         )
-        .with_telegram_token("synthetic-token");
+        .with_telegram_token("synthetic-token")
+        .with_image_generation(super::ImageGeneration {
+            api_key: "synthetic-openrouter-key".to_owned(),
+            base_url: "https://openrouter.test/api/v1".to_owned(),
+            billing: Arc::new(std::sync::Mutex::new(
+                crate::conversation_adapters::PostgresConversationBilling::new(&database_url),
+            )),
+        })
+        .with_task_image_generation(super::ImageGeneration {
+            api_key: "synthetic-openrouter-key".to_owned(),
+            base_url: "https://openrouter.test/api/v1".to_owned(),
+            billing: Arc::new(std::sync::Mutex::new(
+                crate::native_ai::PostgresTaskBilling::new(
+                    crate::conversation_adapters::PostgresConversationBilling::new(&database_url),
+                    crate::native_ai::PRIMARY_CHAT_MODEL,
+                ),
+            )),
+        });
         let input = AiConversationInput {
             chat_id: ChatId(-42),
             message_id: MessageId(7),
@@ -7867,10 +8119,7 @@ mod tests {
         assert!(tools.is_ok());
         let Ok(mut tools) = tools else { return };
         // Fully configured, every declared tool is wired up and offered.
-        assert_eq!(
-            tools.schemas(false).len(),
-            crate::native_tools::ALL_TOOLS.len()
-        );
+        assert_eq!(tools.schemas().len(), crate::native_tools::ALL_TOOLS.len());
         // Read-only tools run in parallel; building the call must not run it.
         for (name, arguments) in [
             ("crypto_prices", serde_json::json!({"assets": ["BTC"]})),
@@ -7905,19 +8154,25 @@ mod tests {
         assert!(
             tools
                 .as_ref()
-                .is_ok_and(|tools| tools.contains("create_poll", false))
+                .is_ok_and(|tools| tools.contains("create_poll"))
         );
-        assert!(tools.is_ok_and(|tools| tools.contains("get_polls", true)));
+        // Without the OpenRouter key and billing, no picture can be made.
+        assert!(
+            tools
+                .as_ref()
+                .is_ok_and(|tools| !tools.contains("generate_image"))
+        );
+        assert!(tools.is_ok_and(|tools| tools.contains("get_polls")));
         let mut no_token = super::ProductionToolFactory::new(&endpoint, &database_url, None, None)
             .with_telegram_token("");
         assert!(
             no_token
                 .create(&input)
-                .is_ok_and(|tools| !tools.contains("create_poll", false))
+                .is_ok_and(|tools| !tools.contains("create_poll"))
         );
 
-        // Scheduled tasks get the read-only tools only: their web search and
-        // polls go through the task's own billed paths.
+        // Scheduled tasks get every tool a message gets, except web search
+        // and create_poll: the task runs those itself.
         let mut task = bot_core::scheduled_tasks::ScheduledTask {
             id: bot_core::scheduled_tasks::TaskId::new("synthetic-task").must(),
             chat_id: "-42".to_owned(),
@@ -7932,38 +8187,69 @@ mod tests {
             last_execution_id: None,
             resume_at: None,
         };
-        let task_tools = crate::native_ai::TaskToolFactory::create(&mut factory, &task);
-        let names = task_tools
-            .map(|tools| {
-                tools
-                    .schemas(true)
-                    .iter()
-                    .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_owned))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        assert_eq!(
-            names,
-            [
-                "crypto_prices",
-                "calculate",
-                "web_fetch",
-                "task_list",
-                "get_chat_members",
-                "stock_prices",
-                "random_choice",
-                "dollar_rates",
-                "weather",
-                "hacker_news",
-                "polymarket",
-                "bot_capabilities",
-            ]
-        );
+        let task_names =
+            |factory: &mut super::ProductionToolFactory,
+             task: &bot_core::scheduled_tasks::ScheduledTask| {
+                crate::native_ai::TaskToolFactory::create(factory, task, "synthetic-run")
+                    .map(|tools| {
+                        tools
+                            .schemas()
+                            .iter()
+                            .filter_map(|schema| {
+                                schema["function"]["name"].as_str().map(str::to_owned)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+        let names = task_names(&mut factory, &task);
+        let expected = crate::native_tools::ALL_TOOLS
+            .iter()
+            .map(|tool| tool.name())
+            .filter(|name| !matches!(*name, "web_search" | "create_poll"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, expected);
+        // A chat that is not a Telegram chat id gets no tool that posts.
+        task.chat_id = "synthetic-chat".to_owned();
+        let names = task_names(&mut factory, &task);
+        assert!(names.iter().any(|name| name == "task_set"));
+        assert!(!names.iter().any(|name| name == "send_media"));
         task.locale = "es".to_owned();
         assert!(
-            crate::native_ai::TaskToolFactory::create(&mut minimal, &task)
-                .is_ok_and(|tools| tools.contains("polymarket", true)
-                    && !tools.contains("crypto_prices", true))
+            crate::native_ai::TaskToolFactory::create(&mut minimal, &task, "synthetic-run")
+                .is_ok_and(|tools| tools.contains("polymarket")
+                    && tools.contains("task_set")
+                    && !tools.contains("crypto_prices")
+                    && !tools.contains("generate_image"))
+        );
+
+        // A run that acts is recorded, so a retry of it does not act again.
+        let execution_id = crate::test_env::unique("synthetic-acted");
+        assert_eq!(
+            crate::native_ai::TaskToolFactory::acted(&mut factory, &execution_id),
+            Ok(false)
+        );
+        assert_eq!(
+            crate::native_ai::TaskToolFactory::mark_acted(&mut factory, &execution_id),
+            Ok(())
+        );
+        assert_eq!(
+            crate::native_ai::TaskToolFactory::acted(&mut factory, &execution_id),
+            Ok(true)
+        );
+        let mut offline = super::ProductionToolFactory::new(
+            &RedisEndpoint {
+                host: "127.0.0.1".to_owned(),
+                port: 1,
+                password: None,
+            },
+            &database_url,
+            None,
+            None,
+        );
+        assert!(crate::native_ai::TaskToolFactory::acted(&mut offline, &execution_id).is_err());
+        assert!(
+            crate::native_ai::TaskToolFactory::mark_acted(&mut offline, &execution_id).is_err()
         );
     }
 
@@ -10547,5 +10833,32 @@ mod tests {
             })
             .is_ok()
         );
+    }
+
+    #[test]
+    fn screenshots_are_offered_only_with_a_browser() -> crate::test_env::TestResult {
+        use crate::tool_requests::ExternalToolServices;
+        let context = super::MediaToolContext {
+            chat_id: -100,
+            reply_to_message_id: None,
+            locale: Locale::En,
+        };
+        let budget = super::MediaBudget::default();
+        let without = super::media_executors(
+            super::ExternalToolbox::new(Locale::En),
+            "synthetic-token",
+            (context, &budget),
+            None,
+        )?;
+        assert!(without.is_available(super::NativeTool::SendMedia));
+        assert!(!without.is_available(super::NativeTool::PageScreenshot));
+        let with = super::media_executors(
+            super::ExternalToolbox::new(Locale::En),
+            "synthetic-token",
+            (context, &budget),
+            bot_adapters::browser::shared_renderer(),
+        )?;
+        assert!(with.is_available(super::NativeTool::PageScreenshot));
+        Ok(())
     }
 }

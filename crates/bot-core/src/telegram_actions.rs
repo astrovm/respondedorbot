@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::media_reply::MediaKind;
 use crate::telegram_commands::TelegramCommand;
 use crate::telegram_input::{ChatId, MessageId};
 
@@ -101,6 +102,17 @@ pub enum TelegramAction {
         reply_to_message_id: Option<MessageId>,
         caption: String,
         reply_markup: Option<InlineKeyboardMarkup>,
+    },
+    /// A file the AI chose to share, sent with the Bot API method its kind
+    /// needs.
+    SendMedia {
+        chat_id: ChatId,
+        kind: MediaKind,
+        file: Arc<[u8]>,
+        file_name: String,
+        content_type: String,
+        reply_to_message_id: Option<MessageId>,
+        caption: String,
     },
     SendPhoto {
         chat_id: ChatId,

@@ -25,6 +25,8 @@ const OPENROUTER_PRICING_RETRY_MAX: Duration = Duration::from_secs(15 * 60);
 const OPENROUTER_ENDPOINT_RETRY: Duration = Duration::from_secs(30);
 const USD_MICROS_PER_MILLION_TOKENS: i128 = 1_000_000_000_000;
 const OPENROUTER_MAX_RESPONSE_BYTES: u64 = 1_048_576;
+/// Room for a 10 MB picture in base64 plus the JSON around it.
+const OPENROUTER_MAX_IMAGE_RESPONSE_BYTES: u64 = 16 * 1_048_576;
 // The full catalog is already about 1 MB and grows with every model OpenRouter
 // adds, so it gets a bound of its own instead of the chat response one.
 const OPENROUTER_MAX_CATALOG_BYTES: u64 = 16 * 1_048_576;
@@ -978,6 +980,7 @@ pub trait OpenRouterStreamTransport {
 
 pub struct ReqwestOpenRouterTransport {
     client: Client,
+    max_response_bytes: u64,
 }
 
 impl ReqwestOpenRouterTransport {
@@ -989,7 +992,27 @@ impl ReqwestOpenRouterTransport {
                 .timeout(Duration::from_secs(90))
                 .build()
         })
-        .map(|client| Self { client })
+        .map(|client| Self {
+            client,
+            max_response_bytes: OPENROUTER_MAX_RESPONSE_BYTES,
+        })
+        .map_err(transport_error)
+    }
+
+    /// A transport for image generation: a picture comes back as base64 in
+    /// the JSON, and the best models take up to a couple of minutes.
+    pub fn for_images() -> Result<Self, OpenRouterChatError> {
+        static CLIENT: OnceLock<Client> = OnceLock::new();
+        crate::http_client::shared_client(&CLIENT, || {
+            Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(150))
+                .build()
+        })
+        .map(|client| Self {
+            client,
+            max_response_bytes: OPENROUTER_MAX_IMAGE_RESPONSE_BYTES,
+        })
         .map_err(transport_error)
     }
 }
@@ -1015,7 +1038,7 @@ impl OpenRouterTransport for ReqwestOpenRouterTransport {
                     .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
             })
             .collect();
-        let body = read_bounded_body(&mut response, OPENROUTER_MAX_RESPONSE_BYTES)?;
+        let body = read_bounded_body(&mut response, self.max_response_bytes)?;
         Ok(HttpResponse {
             status_code,
             body,
@@ -1197,7 +1220,7 @@ struct RawStreamFunction {
     arguments: Option<String>,
 }
 
-fn completion_url(base_url: &str) -> Result<String, OpenRouterChatError> {
+pub(crate) fn completion_url(base_url: &str) -> Result<String, OpenRouterChatError> {
     let trimmed = base_url.trim().trim_end_matches('/');
     let parsed = reqwest::Url::parse(trimmed).map_err(|_| OpenRouterChatError::InvalidBaseUrl)?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
@@ -1230,15 +1253,15 @@ fn transport_error(error: impl std::error::Error + 'static) -> OpenRouterChatErr
     OpenRouterChatError::Transport(error_chain(&error))
 }
 
-fn invalid_json(error: serde_json::Error) -> OpenRouterChatError {
+pub(crate) fn invalid_json(error: serde_json::Error) -> OpenRouterChatError {
     OpenRouterChatError::InvalidJson(error.to_string())
 }
 
-fn request_json_error(error: serde_json::Error) -> OpenRouterChatError {
+pub(crate) fn request_json_error(error: serde_json::Error) -> OpenRouterChatError {
     OpenRouterChatError::RequestJson(error.to_string())
 }
 
-fn http_error(
+pub(crate) fn http_error(
     status_code: u16,
     body: &str,
     headers: &BTreeMap<String, String>,

@@ -24,7 +24,10 @@ RUN cargo build --locked --release -p botd
 FROM mirror.gcr.io/library/debian:trixie-slim AS runtime
 WORKDIR /app
 
-# chromium: web_fetch renders pages built by JavaScript in headless Chromium.
+# chromium: web_fetch renders pages built by JavaScript in headless Chromium,
+# and page_screenshot takes pictures of pages with it.
+# fonts-liberation, fonts-noto-color-emoji: screenshots show common web fonts
+# and emoji instead of empty boxes.
 # tini: runs as PID 1 and reaps the helper processes Chromium leaves behind,
 # which botd would otherwise collect as zombies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -35,6 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g \
     ffmpeg \
     chromium \
+    fonts-liberation \
+    fonts-noto-color-emoji \
     tini \
     && rm -rf /var/lib/apt/lists/*
 

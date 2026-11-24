@@ -30,6 +30,9 @@ pub struct TaskProviderReply {
     pub fallback: bool,
     /// The model ended the task: this run is its last.
     pub finish: bool,
+    /// A tool posted to the chat, changed tasks or spent credits. The run
+    /// then counts as done even without text, so it is not run again.
+    pub acted: bool,
     pub billing_segments: Vec<Value>,
 }
 
@@ -537,7 +540,7 @@ where
                 }
             };
             segments.extend(reply.billing_segments);
-            if reply.text.trim().is_empty() && reply.poll.is_none() {
+            if reply.text.trim().is_empty() && reply.poll.is_none() && !reply.acted {
                 if empty_retries < MAX_EMPTY_RETRIES {
                     empty_retries += 1;
                     messages.push(TaskPromptMessage {
@@ -793,6 +796,7 @@ mod tests {
                 text: "synthetic answer".to_owned(),
                 fallback: false,
                 finish: false,
+                acted: false,
                 billing_segments: vec![json!({"kind": "chat"})],
             }))
         }
@@ -1171,6 +1175,7 @@ mod tests {
                 text: "resultado final".to_owned(),
                 fallback: false,
                 finish: true,
+                acted: false,
                 billing_segments: vec![json!({"kind": "chat"})],
             })]),
             ..Provider::default()
@@ -1196,6 +1201,39 @@ mod tests {
         assert_eq!(provider.prompts.len(), 1);
         assert_eq!(messenger.messages.len(), 2);
         assert_eq!(messenger.messages[1].1, "resultado final");
+    }
+
+    #[test]
+    fn a_run_that_acted_without_text_ends_without_a_retry_or_a_message() {
+        let provider = Provider {
+            replies: VecDeque::from([Ok(TaskProviderReply {
+                poll: None,
+                text: " ".to_owned(),
+                fallback: false,
+                finish: false,
+                acted: true,
+                billing_segments: vec![json!({"kind": "image_generation"})],
+            })]),
+            ..Provider::default()
+        };
+        let mut executor = executor(provider, Billing::default(), Messenger::default());
+        assert_eq!(
+            executor.execute(&task("en"), "task123:1000"),
+            Ok(TaskExecutionDisposition::Complete)
+        );
+        let (provider, billing, messenger, _) = executor.parts();
+        // The picture is the answer: running the task again would post it
+        // twice, and an "empty reply" error would be wrong.
+        assert_eq!(provider.prompts.len(), 1);
+        assert!(messenger.messages.is_empty());
+        assert_eq!(
+            billing.settlements,
+            [(
+                "task123:1000".to_owned(),
+                vec![json!({"kind": "image_generation"})],
+                "task_success"
+            )]
+        );
     }
 
     #[test]
@@ -1249,6 +1287,7 @@ mod tests {
                     text: String::new(),
                     fallback: false,
                     finish: false,
+                    acted: false,
                     billing_segments: vec![json!({"attempt": 1})],
                 }),
                 Ok(TaskProviderReply {
@@ -1256,6 +1295,7 @@ mod tests {
                     text: "fallback".to_owned(),
                     fallback: true,
                     finish: false,
+                    acted: false,
                     billing_segments: vec![json!({"attempt": 2})],
                 }),
                 Ok(TaskProviderReply {
@@ -1263,6 +1303,7 @@ mod tests {
                     text: "paid answer".to_owned(),
                     fallback: false,
                     finish: false,
+                    acted: false,
                     billing_segments: vec![json!({"attempt": 3})],
                 }),
             ]),
@@ -1291,6 +1332,7 @@ mod tests {
                         text: "fallback one".to_owned(),
                         fallback: true,
                         finish: false,
+                        acted: false,
                         billing_segments: segments.clone(),
                     }),
                     Ok(TaskProviderReply {
@@ -1298,6 +1340,7 @@ mod tests {
                         text: "fallback two".to_owned(),
                         fallback: true,
                         finish: false,
+                        acted: false,
                         billing_segments: segments.clone(),
                     }),
                 ]),
@@ -1364,6 +1407,7 @@ mod tests {
                     text: String::new(),
                     fallback: false,
                     finish: false,
+                    acted: false,
                     billing_segments: Vec::new(),
                 }),
                 Ok(TaskProviderReply {
@@ -1371,6 +1415,7 @@ mod tests {
                     text: "   ".to_owned(),
                     fallback: false,
                     finish: false,
+                    acted: false,
                     billing_segments: Vec::new(),
                 }),
             ]),
@@ -1430,6 +1475,7 @@ mod tests {
                     text: String::new(),
                     fallback: false,
                     finish: false,
+                    acted: false,
                     billing_segments: Vec::new(),
                 }),
                 Ok(TaskProviderReply {
@@ -1437,6 +1483,7 @@ mod tests {
                     text: String::new(),
                     fallback: false,
                     finish: false,
+                    acted: false,
                     billing_segments: Vec::new(),
                 }),
             ]),
@@ -1655,6 +1702,7 @@ mod tests {
                     text: " ".to_owned(),
                     fallback: false,
                     finish: false,
+                    acted: false,
                     billing_segments: Vec::new(),
                 }),
                 Ok(TaskProviderReply {
@@ -1662,6 +1710,7 @@ mod tests {
                     text: String::new(),
                     fallback: false,
                     finish: false,
+                    acted: false,
                     billing_segments: Vec::new(),
                 }),
             ]),
@@ -1809,6 +1858,7 @@ mod tests {
                 }),
                 fallback: false,
                 finish: false,
+                acted: false,
                 billing_segments: vec![json!({"kind": "chat"})],
             })]),
             ..Provider::default()

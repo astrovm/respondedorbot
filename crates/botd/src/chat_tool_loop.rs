@@ -80,9 +80,9 @@ impl ToolExecutionResult {
 pub type ConcurrentToolCall = Box<dyn FnOnce() -> ToolExecutionResult + Send>;
 
 pub trait NativeToolRuntime {
-    fn schemas(&self, task_mode: bool) -> Vec<Value>;
+    fn schemas(&self) -> Vec<Value>;
 
-    fn contains(&self, name: &str, task_mode: bool) -> bool;
+    fn contains(&self, name: &str) -> bool;
 
     fn execute(&mut self, name: &str, arguments: &Value, tool_call_id: &str)
     -> ToolExecutionResult;
@@ -263,7 +263,6 @@ pub fn run_chat_tool_loop<Provider, Tools>(
     provider: &Provider,
     tools: &mut Tools,
     initial_messages: &[PromptMessage],
-    task_mode: bool,
     max_rounds: usize,
     mut on_text: impl FnMut(&str) -> Result<(), OpenRouterChatError>,
 ) -> Result<ChatToolLoopResult, ChatToolLoopError>
@@ -276,7 +275,6 @@ where
         provider,
         tools,
         initial_messages,
-        task_mode,
         max_rounds,
         true,
         &mut |event| match event {
@@ -294,7 +292,6 @@ pub fn run_chat_tool_loop_events<Provider, Tools>(
     provider: &Provider,
     tools: &mut Tools,
     initial_messages: &[PromptMessage],
-    task_mode: bool,
     max_rounds: usize,
     mut on_event: impl FnMut(ChatToolLoopEvent) -> Result<(), OpenRouterChatError>,
 ) -> Result<ChatToolLoopResult, ChatToolLoopError>
@@ -307,7 +304,6 @@ where
         provider,
         tools,
         initial_messages,
-        task_mode,
         max_rounds,
         false,
         &mut on_event,
@@ -324,7 +320,6 @@ fn run_chat_tool_loop_events_with_policy<Provider, Tools>(
     provider: &Provider,
     tools: &mut Tools,
     initial_messages: &[PromptMessage],
-    task_mode: bool,
     max_rounds: usize,
     include_intermediate_text: bool,
     on_event: &mut EventCallback<'_>,
@@ -333,7 +328,7 @@ where
     Provider: ChatRoundStream,
     Tools: NativeToolRuntime,
 {
-    let schemas = tools.schemas(task_mode);
+    let schemas = tools.schemas();
     let mut result = ChatToolLoopResult::new(initial_messages);
     let mut reusable_results = HashMap::new();
     trace(
@@ -424,7 +419,7 @@ where
             ));
         let plans = calls
             .iter()
-            .map(|call| plan_call(&*tools, call, task_mode, &reusable_results))
+            .map(|call| plan_call(&*tools, call, &reusable_results))
             .collect::<Vec<_>>();
         let concurrent = prepare_concurrent_calls(tools, calls, &plans);
         // Read-only calls start on their own threads right away; results are
@@ -682,10 +677,9 @@ enum CallPlan {
 fn plan_call<Tools: NativeToolRuntime>(
     tools: &Tools,
     call: &StreamToolCall,
-    task_mode: bool,
     reusable_results: &HashMap<(String, String), String>,
 ) -> CallPlan {
-    if !tools.contains(&call.name, task_mode) {
+    if !tools.contains(&call.name) {
         return CallPlan::Skip {
             reason: "unavailable",
             output: unavailable_tool_output(&call.name),
@@ -1168,11 +1162,11 @@ mod tests {
     }
 
     impl NativeToolRuntime for Tools {
-        fn schemas(&self, task_mode: bool) -> Vec<Value> {
-            vec![json!({"task_mode": task_mode})]
+        fn schemas(&self) -> Vec<Value> {
+            vec![json!({"type": "function"})]
         }
 
-        fn contains(&self, name: &str, _task_mode: bool) -> bool {
+        fn contains(&self, name: &str) -> bool {
             matches!(name, "calculate" | "fetch" | "record" | "explode" | "big")
         }
 
@@ -1298,7 +1292,6 @@ mod tests {
             &provider,
             &mut tools,
             &[],
-            false,
             DEFAULT_MAX_TOOL_ROUNDS,
             ignore_text,
         )?;
@@ -1345,7 +1338,6 @@ mod tests {
             &provider,
             &mut tools,
             &[PromptMessage::text(PromptRole::User, "question")],
-            false,
             DEFAULT_MAX_TOOL_ROUNDS,
             |text| {
                 streamed.push_str(text);
@@ -1387,7 +1379,6 @@ mod tests {
             &provider,
             &mut tools,
             &[],
-            false,
             DEFAULT_MAX_TOOL_ROUNDS,
             |event| {
                 events.push(event);
@@ -1446,20 +1437,13 @@ mod tests {
             order: Rc::clone(&order),
         };
         let mut tools = Tools::default();
-        let result = run_chat_tool_loop_events(
-            "test-operation",
-            &provider,
-            &mut tools,
-            &[],
-            false,
-            1,
-            |event| {
+        let result =
+            run_chat_tool_loop_events("test-operation", &provider, &mut tools, &[], 1, |event| {
                 let calls =
                     matches!(event, ChatToolLoopEvent::FinalText(_)).then_some("final_text");
                 order.borrow_mut().extend(calls);
                 Ok(())
-            },
-        );
+            });
         let result = result?;
 
         assert_eq!(&*order.borrow(), &["final_text", "provider_returned"]);
@@ -1467,16 +1451,11 @@ mod tests {
 
         // A delivery failure while streaming aborts the round before it returns.
         order.borrow_mut().clear();
-        let error = run_chat_tool_loop_events(
-            "test-operation",
-            &provider,
-            &mut tools,
-            &[],
-            false,
-            1,
-            |_event| Err(OpenRouterChatError::Stream("synthetic delivery".to_owned())),
-        )
-        .err();
+        let error =
+            run_chat_tool_loop_events("test-operation", &provider, &mut tools, &[], 1, |_event| {
+                Err(OpenRouterChatError::Stream("synthetic delivery".to_owned()))
+            })
+            .err();
         let Some(error) = error else { unreachable!() };
         assert_eq!(
             error.source,
@@ -1508,15 +1487,7 @@ mod tests {
         tools: &mut Tools,
     ) -> Result<(Provider, ChatToolLoopResult), ChatToolLoopError> {
         let provider = Provider::new(rounds.into_iter().map(Ok).collect());
-        let result = run_chat_tool_loop(
-            "test-operation",
-            &provider,
-            tools,
-            &[],
-            false,
-            5,
-            ignore_text,
-        )?;
+        let result = run_chat_tool_loop("test-operation", &provider, tools, &[], 5, ignore_text)?;
         Ok((provider, result))
     }
 
@@ -1648,18 +1619,11 @@ mod tests {
             Ok(round("", vec![call("big", "{}")], json!({"round": 1}))),
             Ok(round("done", Vec::new(), json!({"round": 2}))),
         ]);
-        let result = run_chat_tool_loop_events(
-            "test-operation",
-            &provider,
-            &mut tools,
-            &[],
-            false,
-            5,
-            |event| {
+        let result =
+            run_chat_tool_loop_events("test-operation", &provider, &mut tools, &[], 5, |event| {
                 events.push(event);
                 Ok(())
-            },
-        );
+            });
         assert!(result.is_ok());
         let expected = format!(
             "{}\n[cut 5 more characters; ask for something narrower if you need them]",
@@ -1684,16 +1648,8 @@ mod tests {
             partial: Box::new(round("partial", Vec::new(), json!({"pending": true}))),
         })]);
         let mut tools = Tools::default();
-        let error = run_chat_tool_loop(
-            "test-operation",
-            &provider,
-            &mut tools,
-            &[],
-            false,
-            5,
-            ignore_text,
-        )
-        .err();
+        let error =
+            run_chat_tool_loop("test-operation", &provider, &mut tools, &[], 5, ignore_text).err();
         let Some(error) = error else { unreachable!() };
         assert_eq!(error.provider_rounds, 1);
         assert_eq!(error.partial.text, "partial");
@@ -1720,15 +1676,8 @@ mod tests {
             ..Tools::default()
         };
 
-        let result = run_chat_tool_loop(
-            "test-operation",
-            &provider,
-            &mut tools,
-            &[],
-            false,
-            5,
-            ignore_text,
-        );
+        let result =
+            run_chat_tool_loop("test-operation", &provider, &mut tools, &[], 5, ignore_text);
         let result = result?;
 
         assert_eq!(result.text, "synthetic answer");
@@ -1770,7 +1719,6 @@ mod tests {
             &provider,
             &mut tools,
             &[PromptMessage::text(PromptRole::User, "question")],
-            false,
             1,
             |event| {
                 events.push(event);
@@ -1819,7 +1767,6 @@ mod tests {
                 &provider,
                 &mut Tools::default(),
                 &[PromptMessage::text(PromptRole::User, "question")],
-                false,
                 DEFAULT_MAX_TOOL_ROUNDS,
                 ignore_text,
             )?;
@@ -1844,7 +1791,6 @@ mod tests {
             &provider,
             &mut Tools::default(),
             &[],
-            false,
             DEFAULT_MAX_TOOL_ROUNDS,
             ignore_text,
         )?;
@@ -1874,7 +1820,6 @@ mod tests {
             &provider,
             &mut Tools::default(),
             &[],
-            false,
             DEFAULT_MAX_TOOL_ROUNDS,
             ignore_text,
         )?;
@@ -1907,7 +1852,6 @@ mod tests {
             &provider,
             &mut Tools::default(),
             &[],
-            false,
             DEFAULT_MAX_TOOL_ROUNDS,
             ignore_text,
         )?;
@@ -1943,7 +1887,6 @@ mod tests {
             &provider,
             &mut Tools::default(),
             &[],
-            false,
             1,
             ignore_text,
         )?;
@@ -1965,7 +1908,6 @@ mod tests {
             &provider,
             &mut Tools::default(),
             &[],
-            false,
             1,
             ignore_text,
         )
@@ -1997,7 +1939,6 @@ mod tests {
             &provider,
             &mut tools,
             &[],
-            false,
             DEFAULT_MAX_TOOL_ROUNDS,
             ignore_text,
         )
@@ -2031,16 +1972,8 @@ mod tests {
             ..Tools::default()
         };
 
-        let error = run_chat_tool_loop(
-            "test-operation",
-            &provider,
-            &mut tools,
-            &[],
-            false,
-            5,
-            ignore_text,
-        )
-        .err();
+        let error =
+            run_chat_tool_loop("test-operation", &provider, &mut tools, &[], 5, ignore_text).err();
         let Some(error) = error else { unreachable!() };
 
         assert_eq!(error.provider_rounds, 4);
@@ -2075,16 +2008,8 @@ mod tests {
             ..Tools::default()
         };
 
-        let error = run_chat_tool_loop(
-            "test-operation",
-            &provider,
-            &mut tools,
-            &[],
-            false,
-            5,
-            ignore_text,
-        )
-        .err();
+        let error =
+            run_chat_tool_loop("test-operation", &provider, &mut tools, &[], 5, ignore_text).err();
         let Some(error) = error else { unreachable!() };
 
         assert_eq!(tools.calls.len(), 2);
@@ -2106,16 +2031,9 @@ mod tests {
             })]);
             let mut tools = Tools::default();
 
-            let error = run_chat_tool_loop(
-                "test-operation",
-                &provider,
-                &mut tools,
-                &[],
-                false,
-                5,
-                ignore_text,
-            )
-            .err();
+            let error =
+                run_chat_tool_loop("test-operation", &provider, &mut tools, &[], 5, ignore_text)
+                    .err();
             let Some(error) = error else { unreachable!() };
 
             assert_eq!(error.provider_rounds, 1);
@@ -2199,7 +2117,6 @@ mod tests {
             &provider,
             &mut tools,
             &[],
-            false,
             DEFAULT_MAX_TOOL_ROUNDS,
             |event| {
                 if let ChatToolLoopEvent::ToolResult { id, output, .. } = event {
@@ -2256,15 +2173,8 @@ mod tests {
             barrier: Some(std::sync::Arc::new(std::sync::Barrier::new(1))),
             ..Tools::default()
         };
-        let result = run_chat_tool_loop(
-            "test-operation",
-            &provider,
-            &mut tools,
-            &[],
-            false,
-            1,
-            ignore_text,
-        )?;
+        let result =
+            run_chat_tool_loop("test-operation", &provider, &mut tools, &[], 1, ignore_text)?;
         assert_eq!(executed_ids(&tools), ["call-0", "call-1"]);
         assert!(result.stopped_at_limit);
 
@@ -2280,21 +2190,16 @@ mod tests {
             barrier: Some(std::sync::Arc::new(std::sync::Barrier::new(2))),
             ..Tools::default()
         };
-        let error = run_chat_tool_loop_events(
-            "test-operation",
-            &provider,
-            &mut tools,
-            &[],
-            false,
-            1,
-            |event| match event {
-                ChatToolLoopEvent::ToolResult { .. } => Err(OpenRouterChatError::Stream(
-                    "synthetic delivery failure".to_owned(),
-                )),
-                _ => Ok(()),
-            },
-        )
-        .err();
+        let error =
+            run_chat_tool_loop_events("test-operation", &provider, &mut tools, &[], 1, |event| {
+                match event {
+                    ChatToolLoopEvent::ToolResult { .. } => Err(OpenRouterChatError::Stream(
+                        "synthetic delivery failure".to_owned(),
+                    )),
+                    _ => Ok(()),
+                }
+            })
+            .err();
         let Some(error) = error else { unreachable!() };
         // The running fetches are joined before the error is returned.
         assert_eq!(error.partial.tool_calls_executed, 1);
@@ -2352,7 +2257,6 @@ mod tests {
             &streamer,
             &mut tools,
             &[PromptMessage::text(PromptRole::User, "question")],
-            false,
             DEFAULT_MAX_TOOL_ROUNDS,
             |event| {
                 events.push(event);
@@ -2404,7 +2308,6 @@ mod tests {
                 &provider,
                 &mut tools,
                 &[],
-                false,
                 DEFAULT_MAX_TOOL_ROUNDS,
                 |event| match (failing, event) {
                     ("reset", ChatToolLoopEvent::ResetToTrace)
@@ -2553,7 +2456,6 @@ mod tests {
             &provider,
             &mut tools,
             &[],
-            false,
             DEFAULT_MAX_TOOL_ROUNDS,
             |_text| Err(OpenRouterChatError::Stream("synthetic delivery".to_owned())),
         )
@@ -2575,11 +2477,11 @@ mod tests {
     }
 
     impl NativeToolRuntime for SequentialTools {
-        fn schemas(&self, _task_mode: bool) -> Vec<Value> {
+        fn schemas(&self) -> Vec<Value> {
             Vec::new()
         }
 
-        fn contains(&self, name: &str, _task_mode: bool) -> bool {
+        fn contains(&self, name: &str) -> bool {
             name == "fetch"
         }
 
@@ -2613,7 +2515,6 @@ mod tests {
             &provider,
             &mut tools,
             &[],
-            false,
             DEFAULT_MAX_TOOL_ROUNDS,
             ignore_text,
         );

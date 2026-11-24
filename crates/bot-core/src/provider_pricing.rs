@@ -17,6 +17,35 @@ pub const DEEPSEEK_MODEL: &str = "deepseek/deepseek-v4.1-flash-1017";
 pub const DEEPSEEK_FLASH_MODEL: &str = "deepseek/deepseek-v4-flash";
 pub const OPENROUTER_TRANSCRIPTION_MODEL: &str = "microsoft/mai-transcribe-2";
 
+/// An image model and the most one picture from it can cost the provider,
+/// which is what an image holds from the payer's balance until the reply
+/// settles at the cost OpenRouter reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageModel {
+    pub id: &'static str,
+    /// The `modalities` the model accepts. An image-only model refuses a
+    /// request that also asks for text.
+    pub modalities: &'static [&'static str],
+    pub max_usd_micros: i128,
+}
+
+/// Seedream 5.5: US$0.035 for the 2560x1440 picture it makes by default
+/// (measured on 2026-11-23), plus US$0.008 for a starting picture.
+pub const FAST_IMAGE_MODEL: ImageModel = ImageModel {
+    id: "bytedance-seed/seedream-5-5",
+    modalities: &["image"],
+    max_usd_micros: 50_000,
+};
+
+/// GPT Image 2.6 Sunburst, first on the Artificial Analysis text-to-image
+/// arena in November 2026. It bills US$30 per million image tokens, and a
+/// large high-quality picture is several thousand tokens.
+pub const BEST_IMAGE_MODEL: ImageModel = ImageModel {
+    id: "openai/gpt-image-2.6-sunburst",
+    modalities: &["image"],
+    max_usd_micros: 400_000,
+};
+
 pub const FIRECRAWL_SEARCH_MAX_CREDITS: i128 = 2;
 pub const FIRECRAWL_STANDARD_USD_MICROS_PER_CREDIT: i128 = 830;
 pub const YOUTUBE_TRANSCRIPT_USD_MICROS_PER_SUCCESS: i128 = 3_000;

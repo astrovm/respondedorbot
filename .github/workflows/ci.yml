@@ -112,8 +112,12 @@ jobs:
             fi
             echo "::warning::Installing ffmpeg failed on attempt $attempt"
             sudo dpkg --configure -a || true
-            # apt only moves to the next mirror on errors, not when one is slow
-            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+            # apt only moves to the next mirror on errors, not when one is
+            # slow, and it orders the list by a fixed per-machine shuffle, not
+            # by line order. So the next attempts use only the main Ubuntu
+            # mirrors. Azure and EC2 mirrors both stalled all three attempts.
+            mirrors=$(grep -E '://(archive|security)\.ubuntu\.com/' /etc/apt/apt-mirrors.txt || true)
+            printf '%s\n' "${mirrors:-http://archive.ubuntu.com/ubuntu/}" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           done
           exit 1
 

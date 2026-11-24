@@ -1,7 +1,7 @@
 //! Composition for native scheduled-task verification and execution.
 
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use bot_adapters::chat_bans::ChatBanRepository;
@@ -17,7 +17,8 @@ use bot_core::scheduled_tasks::ScheduledTask;
 use thiserror::Error;
 
 use crate::composition::{
-    ProductionToolFactory, TelegramActionSink, TelegramDeliveryCoordinator, TelegramGroupAuthorizer,
+    ImageGeneration, ProductionTaskBilling, ProductionToolFactory, TelegramActionSink,
+    TelegramDeliveryCoordinator, TelegramGroupAuthorizer,
 };
 use crate::conversation_adapters::PostgresConversationBilling;
 use crate::firecrawl_tool::FirecrawlScheduledWebSearch;
@@ -36,7 +37,7 @@ use crate::task_executor::{
 
 use crate::task_payer::{ChatIgnoredMembers, ChatTaskPayerPolicy};
 
-const TASK_EXECUTION_TTL_SECONDS: i64 = 86_400 * 7;
+pub(crate) const TASK_EXECUTION_TTL_SECONDS: i64 = 86_400 * 7;
 
 impl TaskExecutionJournal for RedisTaskStore {
     type Error = String;
@@ -77,7 +78,7 @@ pub type TaskVerifier = TaskScheduler<RedisTaskStore, VerificationExecutor>;
 
 type ConcreteExecutor = NativeTaskExecutor<
     OpenRouterTaskProvider<ReqwestOpenRouterTransport>,
-    PostgresTaskBilling<PostgresConversationBilling>,
+    ProductionTaskBilling,
     ActionTaskMessenger<TelegramActionSink<ReqwestTelegramTransport>>,
     RedisTaskStore,
     StderrTaskDiagnostics,
@@ -143,6 +144,25 @@ pub fn build_task_scheduler(
     options: TaskServiceOptions<'_>,
 ) -> Result<ConcreteTaskScheduler, TaskServiceError> {
     let pricing = options.openrouter_pricing;
+    let firecrawl_api_key = options.firecrawl_api_key.filter(|key| !key.is_empty());
+    let billing: ProductionTaskBilling = Arc::new(Mutex::new(
+        PostgresTaskBilling::new(
+            PostgresConversationBilling::new(options.database_url)
+                .with_creditless_cap(RedisCreditlessCap::new(options.redis_endpoint)?),
+            PRIMARY_CHAT_MODEL,
+        )
+        .with_payer_policy(Box::new(
+            ChatTaskPayerPolicy::new(options.database_url).with_admin_check(Box::new(
+                TelegramGroupAuthorizer::new(
+                    ReqwestTelegramTransport::new().map_err(TaskServiceError::Telegram)?,
+                    options.telegram_token,
+                    options.redis_endpoint,
+                ),
+            )),
+        ))
+        .with_openrouter_pricing(Arc::clone(&pricing))
+        .with_web_search(firecrawl_api_key.is_some()),
+    ));
     let mut provider = OpenRouterTaskProvider::new(
         ReqwestOpenRouterTransport::new()?,
         options.openrouter_api_key,
@@ -151,15 +171,23 @@ pub fn build_task_scheduler(
         options.system_prompt,
     )
     .with_openrouter_pricing(Arc::clone(&pricing))
-    // Web search stays with the task's own billed search; the factory adds
-    // the read-only tools chat uses.
-    .with_tools(Box::new(ProductionToolFactory::new(
-        options.redis_endpoint,
-        options.database_url,
-        options.coinmarketcap_key.map(str::to_owned),
-        None,
-    )));
-    let firecrawl_api_key = options.firecrawl_api_key.filter(|key| !key.is_empty());
+    // Web search and polls stay with the task's own billed search and
+    // delayed poll; the factory adds every other tool chat uses.
+    .with_tools(Box::new(
+        ProductionToolFactory::new(
+            options.redis_endpoint,
+            options.database_url,
+            options.coinmarketcap_key.map(str::to_owned),
+            None,
+        )
+        .with_telegram_token(options.telegram_token)
+        .with_openrouter_pricing(Arc::clone(&pricing))
+        .with_task_image_generation(ImageGeneration {
+            api_key: options.openrouter_api_key.to_owned(),
+            base_url: options.openrouter_base_url.to_owned(),
+            billing: Arc::clone(&billing),
+        }),
+    ));
     if let Some(api_key) = firecrawl_api_key {
         provider = provider.with_web_search(Box::new(FirecrawlScheduledWebSearch::new(
             ReqwestFirecrawlTransport::new()?,
@@ -167,22 +195,6 @@ pub fn build_task_scheduler(
             api_key,
         )));
     }
-    let billing = PostgresTaskBilling::new(
-        PostgresConversationBilling::new(options.database_url)
-            .with_creditless_cap(RedisCreditlessCap::new(options.redis_endpoint)?),
-        PRIMARY_CHAT_MODEL,
-    )
-    .with_payer_policy(Box::new(
-        ChatTaskPayerPolicy::new(options.database_url).with_admin_check(Box::new(
-            TelegramGroupAuthorizer::new(
-                ReqwestTelegramTransport::new().map_err(TaskServiceError::Telegram)?,
-                options.telegram_token,
-                options.redis_endpoint,
-            ),
-        )),
-    ))
-    .with_openrouter_pricing(pricing)
-    .with_web_search(firecrawl_api_key.is_some());
     let action_transport = ReqwestTelegramTransport::new().map_err(TaskServiceError::Telegram)?;
     let messenger = ActionTaskMessenger::new(
         TelegramActionSink::new(action_transport, options.telegram_token)

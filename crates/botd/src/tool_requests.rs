@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
+use bot_adapters::web_fetch::normalize_http_url;
 use bot_core::locale::Locale;
+use bot_core::media_reply::CAPTION_MAX_CHARS;
 use bot_core::polls::{MAX_POLL_OPTIONS, PollRequest};
 use serde_json::Value;
 
@@ -53,6 +55,24 @@ pub enum ExternalToolRequest {
     },
     CreatePoll(PollRequest),
     GetPolls,
+    SendMedia {
+        url: String,
+        caption: String,
+    },
+    PageScreenshot {
+        url: String,
+        full_page: bool,
+        caption: String,
+    },
+    GenerateImage {
+        prompt: String,
+        /// The top-quality model instead of the cheap one.
+        best: bool,
+        aspect_ratio: String,
+        /// Start from the photo in the message or the one it replies to.
+        edit_photo: bool,
+        caption: String,
+    },
     BotCapabilities,
 }
 
@@ -75,6 +95,9 @@ impl ExternalToolRequest {
             Self::Polymarket { .. } => NativeTool::Polymarket,
             Self::CreatePoll(_) => NativeTool::CreatePoll,
             Self::GetPolls => NativeTool::GetPolls,
+            Self::SendMedia { .. } => NativeTool::SendMedia,
+            Self::PageScreenshot { .. } => NativeTool::PageScreenshot,
+            Self::GenerateImage { .. } => NativeTool::GenerateImage,
             Self::BotCapabilities => NativeTool::BotCapabilities,
         }
     }
@@ -370,8 +393,96 @@ pub(crate) fn validate_request(
         .map(ExternalToolRequest::CreatePoll)
         .map_err(|error| error.message(locale).to_owned()),
         NativeTool::GetPolls => Ok(ExternalToolRequest::GetPolls),
+        NativeTool::SendMedia => {
+            let (url, caption) = media_target(arguments, locale)?;
+            Ok(ExternalToolRequest::SendMedia { url, caption })
+        }
+        NativeTool::PageScreenshot => {
+            let (url, caption) = media_target(arguments, locale)?;
+            Ok(ExternalToolRequest::PageScreenshot {
+                url,
+                full_page: arguments
+                    .get("full_page")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                caption,
+            })
+        }
+        NativeTool::GenerateImage => image_request(arguments, locale),
         NativeTool::BotCapabilities => Ok(ExternalToolRequest::BotCapabilities),
     }
+}
+
+/// The longest picture description, in characters.
+const IMAGE_PROMPT_MAX_CHARS: usize = 4_000;
+const IMAGE_ASPECT_RATIOS: &[&str] = &["1:1", "4:3", "3:4", "16:9", "9:16"];
+
+fn image_request(arguments: &Value, locale: Locale) -> Result<ExternalToolRequest, String> {
+    let prompt = text(arguments, "prompt");
+    if prompt.is_empty() || prompt.chars().count() > IMAGE_PROMPT_MAX_CHARS {
+        return Err(localized(
+            locale,
+            "necesito una descripción de la imagen de hasta 4000 caracteres",
+            "provide a picture description of at most 4000 characters",
+        ));
+    }
+    let best = match arguments.get("quality").and_then(Value::as_str) {
+        None | Some("fast") => false,
+        Some("best") => true,
+        Some(_) => {
+            return Err(localized(
+                locale,
+                "la calidad tiene que ser fast o best",
+                "quality must be fast or best",
+            ));
+        }
+    };
+    let aspect_ratio = match arguments.get("aspect_ratio").and_then(Value::as_str) {
+        None => "1:1",
+        Some(ratio) if IMAGE_ASPECT_RATIOS.contains(&ratio) => ratio,
+        Some(_) => {
+            return Err(localized(
+                locale,
+                "la proporción tiene que ser 1:1, 4:3, 3:4, 16:9 o 9:16",
+                "aspect_ratio must be 1:1, 4:3, 3:4, 16:9 or 9:16",
+            ));
+        }
+    };
+    Ok(ExternalToolRequest::GenerateImage {
+        prompt,
+        best,
+        aspect_ratio: aspect_ratio.to_owned(),
+        edit_photo: arguments
+            .get("edit_photo")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        caption: caption(arguments, locale)?,
+    })
+}
+
+/// The web link and optional caption of a media tool call.
+fn media_target(arguments: &Value, locale: Locale) -> Result<(String, String), String> {
+    let url = normalize_http_url(&text(arguments, "url")).ok_or_else(|| {
+        localized(
+            locale,
+            "necesito un link http o https",
+            "provide an http or https link",
+        )
+    })?;
+    Ok((url.to_string(), caption(arguments, locale)?))
+}
+
+/// The optional text under a file, within Telegram's limit.
+fn caption(arguments: &Value, locale: Locale) -> Result<String, String> {
+    let caption = text(arguments, "caption");
+    if caption.chars().count() > CAPTION_MAX_CHARS {
+        return Err(localized(
+            locale,
+            "el texto de abajo puede tener hasta 1024 caracteres",
+            "the caption can have at most 1024 characters",
+        ));
+    }
+    Ok(caption)
 }
 
 fn localized(locale: Locale, spanish: &str, english: &str) -> String {
@@ -832,6 +943,158 @@ mod tests {
         );
         assert!(ports.services().calls.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn media_requests_need_a_web_link_and_a_short_caption() {
+        let validate =
+            |tool, arguments: Value, locale| super::validate_request(tool, &arguments, locale);
+        assert_eq!(
+            validate(
+                NativeTool::SendMedia,
+                json!({"url": " example.com/cat.jpg#top ", "caption": " A cat "}),
+                Locale::En
+            ),
+            Ok(ExternalToolRequest::SendMedia {
+                url: "https://example.com/cat.jpg".to_owned(),
+                caption: "A cat".to_owned(),
+            })
+        );
+        assert_eq!(
+            validate(
+                NativeTool::PageScreenshot,
+                json!({"url": "http://example.com/", "full_page": true}),
+                Locale::En
+            ),
+            Ok(ExternalToolRequest::PageScreenshot {
+                url: "http://example.com/".to_owned(),
+                full_page: true,
+                caption: String::new(),
+            })
+        );
+        assert_eq!(
+            validate(
+                NativeTool::PageScreenshot,
+                json!({"url": "example.com"}),
+                Locale::En
+            )
+            .map(|request| request.tool()),
+            Ok(NativeTool::PageScreenshot)
+        );
+        assert_eq!(
+            ExternalToolRequest::SendMedia {
+                url: String::new(),
+                caption: String::new()
+            }
+            .tool(),
+            NativeTool::SendMedia
+        );
+        for (arguments, locale, error) in [
+            (json!({}), Locale::Es, "necesito un link http o https"),
+            (
+                json!({"url": "file:///etc/passwd"}),
+                Locale::En,
+                "provide an http or https link",
+            ),
+            (
+                json!({"url": "example.com", "caption": "a".repeat(1025)}),
+                Locale::Es,
+                "el texto de abajo puede tener hasta 1024 caracteres",
+            ),
+            (
+                json!({"url": "example.com", "caption": "a".repeat(1025)}),
+                Locale::En,
+                "the caption can have at most 1024 characters",
+            ),
+        ] {
+            assert_eq!(
+                validate(NativeTool::SendMedia, arguments.clone(), locale),
+                Err(error.to_owned())
+            );
+            assert_eq!(
+                validate(NativeTool::PageScreenshot, arguments, locale),
+                Err(error.to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn image_requests_need_a_description_and_known_options() {
+        let validate = |arguments: Value, locale| {
+            super::validate_request(NativeTool::GenerateImage, &arguments, locale)
+        };
+        assert_eq!(
+            validate(json!({"prompt": " a red cube "}), Locale::En),
+            Ok(ExternalToolRequest::GenerateImage {
+                prompt: "a red cube".to_owned(),
+                best: false,
+                aspect_ratio: "1:1".to_owned(),
+                edit_photo: false,
+                caption: String::new(),
+            })
+        );
+        let request = validate(
+            json!({"prompt": "make it blue", "quality": "best", "aspect_ratio": "9:16", "edit_photo": true, "caption": "Blue"}),
+            Locale::Es,
+        );
+        assert_eq!(
+            request,
+            Ok(ExternalToolRequest::GenerateImage {
+                prompt: "make it blue".to_owned(),
+                best: true,
+                aspect_ratio: "9:16".to_owned(),
+                edit_photo: true,
+                caption: "Blue".to_owned(),
+            })
+        );
+        assert_eq!(
+            request.map(|request| request.tool()),
+            Ok(NativeTool::GenerateImage)
+        );
+        assert_eq!(
+            validate(json!({"prompt": "x", "quality": "fast"}), Locale::En)
+                .map(|request| request.tool()),
+            Ok(NativeTool::GenerateImage)
+        );
+        for (arguments, locale, error) in [
+            (
+                json!({}),
+                Locale::Es,
+                "necesito una descripción de la imagen de hasta 4000 caracteres",
+            ),
+            (
+                json!({"prompt": "a".repeat(4001)}),
+                Locale::En,
+                "provide a picture description of at most 4000 characters",
+            ),
+            (
+                json!({"prompt": "x", "quality": "ultra"}),
+                Locale::Es,
+                "la calidad tiene que ser fast o best",
+            ),
+            (
+                json!({"prompt": "x", "quality": "ultra"}),
+                Locale::En,
+                "quality must be fast or best",
+            ),
+            (
+                json!({"prompt": "x", "aspect_ratio": "21:9"}),
+                Locale::Es,
+                "la proporción tiene que ser 1:1, 4:3, 3:4, 16:9 o 9:16",
+            ),
+            (
+                json!({"prompt": "x", "aspect_ratio": "21:9"}),
+                Locale::En,
+                "aspect_ratio must be 1:1, 4:3, 3:4, 16:9 or 9:16",
+            ),
+            (
+                json!({"prompt": "x", "caption": "a".repeat(1025)}),
+                Locale::En,
+                "the caption can have at most 1024 characters",
+            ),
+        ] {
+            assert_eq!(validate(arguments, locale), Err(error.to_owned()));
+        }
     }
 
     #[test]

@@ -252,6 +252,33 @@ fn postgres_and_redis_enforce_onboarding_replay_cap_and_refund_policy() -> Resul
         (&format!("{task_operation}:reserve"), &task_operation),
     )?;
     assert!(charged.ok);
+    // A tool's hold joins the run's charge. A hold the payer cannot cover is
+    // refused, and the run's own charge still settles.
+    let image = TaskCreditStore::extend(
+        &mut task_billing,
+        task_user_id,
+        &TaskPayer::PERSONAL,
+        30,
+        &task_metadata,
+        (
+            &format!("{task_operation}:image_generation:1"),
+            &task_operation,
+        ),
+    )?;
+    assert!(image.authorized);
+    assert_eq!(image.source, Some(PayerSource::User));
+    let too_big = TaskCreditStore::extend(
+        &mut task_billing,
+        task_user_id,
+        &TaskPayer::PERSONAL,
+        1_000_000,
+        &task_metadata,
+        (
+            &format!("{task_operation}:image_generation:2"),
+            &task_operation,
+        ),
+    )?;
+    assert!(!too_big.authorized);
     assert!(TaskCreditStore::record_segment(
         &mut task_billing,
         task_user_id,
