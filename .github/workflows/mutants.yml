@@ -62,7 +62,7 @@ jobs:
           shared-key: mutants
           save-if: 'false'
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-mutants@27.1.0
       - name: Mutate the changed code
@@ -137,7 +137,7 @@ jobs:
         with:
           shared-key: mutants
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-mutants@27.1.0
       - name: Mutate part ${{ matrix.part }}
