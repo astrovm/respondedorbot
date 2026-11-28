@@ -57,7 +57,7 @@ jobs:
     services:
       postgres:
         # The production image and sort order (quadlets/respondedorbot-postgres.container).
-        image: mirror.gcr.io/library/postgres:18-trixie
+        image: mirror.gcr.io/library/postgres:19-trixie
         env:
           POSTGRES_DB: respondedorbot_test
           POSTGRES_PASSWORD: synthetic-password
